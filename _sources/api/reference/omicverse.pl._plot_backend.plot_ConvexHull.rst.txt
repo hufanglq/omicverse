@@ -1,0 +1,6 @@
+﻿omicverse.pl.\_plot\_backend.plot\_ConvexHull
+=============================================
+
+.. currentmodule:: omicverse.pl._plot_backend
+
+.. autofunction:: plot_ConvexHull

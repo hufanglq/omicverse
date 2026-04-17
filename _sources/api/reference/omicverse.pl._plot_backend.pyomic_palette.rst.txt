@@ -1,0 +1,6 @@
+﻿omicverse.pl.\_plot\_backend.pyomic\_palette
+============================================
+
+.. currentmodule:: omicverse.pl._plot_backend
+
+.. autofunction:: pyomic_palette

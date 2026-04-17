@@ -1,0 +1,6 @@
+﻿omicverse.pl.\_plot\_backend.stacking\_vol
+==========================================
+
+.. currentmodule:: omicverse.pl._plot_backend
+
+.. autofunction:: stacking_vol
