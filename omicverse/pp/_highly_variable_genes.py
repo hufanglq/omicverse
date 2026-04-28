@@ -175,7 +175,7 @@ def _highly_variable_genes_seurat_v3(  # noqa: PLR0912, PLR0915
             stacklevel=3,
         )
 
-    df["means"], df["variances"] = _get_mean_var(data, axis=0, correction=1)
+    df["means"], df["variances"] = _get_mean_var(data, axis=0)
 
     if batch_key is None:
         batch_info = pd.Categorical(np.zeros(adata.shape[0], dtype=int))
@@ -186,7 +186,7 @@ def _highly_variable_genes_seurat_v3(  # noqa: PLR0912, PLR0915
     for b in np.unique(batch_info):
         data_batch = data[batch_info == b]
 
-        mean, var = _get_mean_var(data_batch, axis=0, correction=1)
+        mean, var = _get_mean_var(data_batch, axis=0)
         not_const = var > 0
         estimat_var = np.zeros(data.shape[1], dtype=np.float64)
 
