@@ -771,8 +771,8 @@ def preprocess(
             normalize_pearson_residuals(adata)
 
         if method_list[1] == 'pearson': # Size normalization + scanpy batch aware HVGs selection
-            from .experimental import highly_variable_genes
-            highly_variable_genes(
+            from .experimental import highly_variable_genes as _hvg_pearson
+            _hvg_pearson(
                 adata,
                 flavor="pearson_residuals",
                 layer='counts',
@@ -782,7 +782,13 @@ def preprocess(
             if no_cc:
                 remove_cc_genes(adata, organism=organism, corr_threshold=0.1)
         elif method_list[1] == 'seurat':
-            highly_variable_genes(
+            # Use the in-package implementation in
+            # `omicverse.pp._highly_variable_genes`, which natively
+            # supports `flavor='seurat_v3'`. The experimental variant in
+            # `.experimental` only supports `flavor='pearson_residuals'`,
+            # which is why the bare-name call here used to crash.
+            from ._highly_variable_genes import highly_variable_genes as _hvg_seurat
+            _hvg_seurat(
                 adata,
                 flavor="seurat_v3",
                 layer='counts',
