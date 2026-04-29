@@ -8,7 +8,7 @@ from .._registry import register_function
 @register_function(
     aliases=["空间解卷积", "spatial deconvolution", "Deconvolution", "cell type mapping", "空间细胞类型映射"],
     category="space",
-    description="Class for transferring single-cell cell-type information onto spatial transcriptomics spots using Tangram/cell2location/Starfysh/FlashDeconv backends.",
+    description="Class for transferring single-cell cell-type information onto spatial transcriptomics spots using Tangram/cell2location/Starfysh/FlashDeconv/RCTD backends.",
     prerequisites={
         'optional_functions': ['pp.preprocess', 'space.svg']
     },
@@ -28,6 +28,7 @@ from .._registry import register_function
         "decov.preprocess_sp(mode='pearsonr', n_svgs=3000)",
         "decov.deconvolution(method='Tangram', celltype_key_sc='cell_type')",
         "decov.deconvolution(method='cell2location', celltype_key_sc='cell_type')",
+        "decov.deconvolution(method='RCTD', celltype_key_sc='cell_type')",
     ],
     related=['space.calculate_gene_signature', 'space.svg', 'single.get_celltype_marker']
 )
@@ -206,6 +207,8 @@ class Deconvolution(object):
         # FlashDeconv parameters
         flashdeconv_kwargs=None,
         starfysh_kwargs=None,
+        # RCTD parameters
+        rctd_kwargs=None,
         spatial_type='visium',
         gene_sig=None,
         categorical_covariate_keys_sc=None,
@@ -215,7 +218,7 @@ class Deconvolution(object):
 
         Parameters
         ----------
-        method:{'Tangram', 'cell2location', 'FlashDeconv', 'starfysh'}
+        method:{'Tangram', 'cell2location', 'FlashDeconv', 'starfysh', 'RCTD'}
             Deconvolution backend.
         celltype_key_sc:str
             Cell-type label key in ``adata_sc.obs``.
@@ -239,6 +242,13 @@ class Deconvolution(object):
             Additional parameters for FlashDeconv.
         starfysh_kwargs:dict or None
             Additional parameters for Starfysh.
+        rctd_kwargs:dict or None
+            Additional parameters for RCTD. Recognised keys: ``mode``
+            (``'full'`` / ``'doublet'`` / ``'multi'``, default ``'full'``),
+            ``cell_min``, ``n_max_cells``, ``min_UMI`` (forwarded to
+            ``rctd.Reference``), ``batch_size``, ``sigma_override``
+            (forwarded to ``rctd.run_rctd``), and ``config``
+            (a dict of ``RCTDConfig`` overrides).
         spatial_type:str
             Spatial platform type used by backend-specific wrappers.
         gene_sig:pandas.DataFrame or None
@@ -256,6 +266,8 @@ class Deconvolution(object):
         --------
         >>> decov.deconvolution(method='Tangram', celltype_key_sc='cell_type')
         >>> decov.deconvolution(method='cell2location', celltype_key_sc='cell_type')
+        >>> decov.deconvolution(method='RCTD', celltype_key_sc='cell_type',
+        ...                     rctd_kwargs={'mode': 'full'})
         """
         if method=='Tangram':
             self.method='Tangram'
@@ -587,8 +599,143 @@ class Deconvolution(object):
                 print(f"The starfysh model is saved in self.starfysh_model")
             
 
+        elif method == 'RCTD':
+            self.method = 'RCTD'
+            try:
+                from rctd import RCTD, Reference, RCTDConfig, run_rctd
+            except ImportError:
+                raise ImportError(
+                    "rctd-py is not installed. Install it with: pip install rctd-py "
+                    "(see https://github.com/p-gueguen/rctd-py for details)."
+                )
+
+            # ── 1. RCTD needs RAW counts on .X for both adata_sc and adata_sp.
+            # The omicverse preprocessing pipeline writes raw counts into
+            # `layers['counts']` and replaces .X with normalized values, so we
+            # build temporary count-matrix views without mutating the user's
+            # AnnData. If `layers['counts']` is missing we fall back to .X
+            # (with a sanity check) — that handles the case where the user
+            # passes raw-counts AnnData directly without going through
+            # `preprocess_sc` / `preprocess_sp`.
+            def _counts_view(adata, label):
+                if 'counts' in adata.layers:
+                    counts = adata.layers['counts']
+                else:
+                    counts = adata.X
+                    if hasattr(counts, 'max'):
+                        max_v = float(counts.max())
+                        if max_v <= np.log1p(1e6):
+                            print(
+                                f"{Colors.WARNING}⚠️ {label}.X looks log-normalized (max≈{max_v:.2f}); "
+                                f"RCTD requires raw counts. Pass `adata.layers['counts']` "
+                                f"or set `adata.X = adata.layers['counts']` before calling.{Colors.ENDC}"
+                            )
+                view = adata.copy()
+                view.X = counts
+                return view
+
+            adata_sc_counts = _counts_view(self.adata_sc, 'adata_sc')
+            adata_sp_counts = _counts_view(self.adata_sp, 'adata_sp')
+
+            # ── 2. Set defaults; let user override via rctd_kwargs.
+            rctd_defaults = {
+                'mode': 'full',           # 'full' | 'doublet' | 'multi'
+                # Reference kwargs
+                'cell_min': 25,
+                'n_max_cells': 10000,
+                'min_UMI': 100,
+                # Run kwargs
+                'batch_size': 'auto',
+                'sigma_override': None,
+                # RCTDConfig overrides — passed straight to RCTDConfig(**...)
+                'config': {},
+            }
+            user_kwargs = dict(rctd_kwargs) if rctd_kwargs else {}
+            cfg_overrides = user_kwargs.pop('config', None) or {}
+            rctd_defaults['config'] = {**rctd_defaults['config'], **cfg_overrides}
+            rctd_defaults.update(user_kwargs)
+
+            mode = rctd_defaults['mode']
+            print(f"{Colors.CYAN}Running RCTD (mode={mode!r}) — this may take a while on full Visium slides.{Colors.ENDC}")
+
+            ref = Reference(
+                adata_sc_counts,
+                cell_type_col=celltype_key_sc,
+                cell_min=rctd_defaults['cell_min'],
+                n_max_cells=rctd_defaults['n_max_cells'],
+                min_UMI=rctd_defaults['min_UMI'],
+            )
+
+            cfg = RCTDConfig(**rctd_defaults['config']) if rctd_defaults['config'] else RCTDConfig()
+
+            result = run_rctd(
+                adata_sp_counts,
+                ref,
+                mode=mode,
+                config=cfg,
+                batch_size=rctd_defaults['batch_size'],
+                sigma_override=rctd_defaults['sigma_override'],
+            )
+            self.rctd_result = result
+
+            # ── 3. Convert RCTD result → omicverse `adata_cell2location` schema:
+            # an AnnData of shape (kept_pixels × cell_types) holding row-normalised
+            # proportions. Only pixels that pass RCTD's UMI filter are kept; the
+            # boolean `pixel_mask` aligns indices back to the original adata_sp.
+            pixel_mask = np.asarray(result.pixel_mask)
+            kept_idx = np.where(pixel_mask)[0]
+            cell_type_names = list(result.cell_type_names)
+
+            if mode in ('full', 'multi'):
+                weights = np.asarray(result.weights, dtype=np.float32)
+            elif mode == 'doublet':
+                # `weights_doublet` is (n_pixels, 2) — only two cell types per
+                # pixel are non-zero. Materialise into the full (n_pixels, n_types)
+                # matrix by scattering using `first_type` / `second_type` indices.
+                weights_doublet = np.asarray(result.weights_doublet, dtype=np.float32)
+                first_type = np.asarray(result.first_type, dtype=np.int64)
+                second_type = np.asarray(result.second_type, dtype=np.int64)
+                n_kept = len(first_type)
+                weights = np.zeros((n_kept, len(cell_type_names)), dtype=np.float32)
+                rows = np.arange(n_kept)
+                weights[rows, first_type] += weights_doublet[:, 0]
+                weights[rows, second_type] += weights_doublet[:, 1]
+            else:
+                raise ValueError(f"Unknown RCTD mode {mode!r}; expected 'full' / 'doublet' / 'multi'.")
+
+            # Row-normalise to proportions (RCTD weights are unnormalised abundances)
+            row_sum = weights.sum(axis=1, keepdims=True)
+            proportions = np.divide(
+                weights, row_sum, out=np.zeros_like(weights), where=row_sum > 0
+            )
+
+            adata_cell2location = sc.AnnData(proportions)
+            adata_cell2location.var_names = cell_type_names
+            adata_cell2location.var.index = pd.Index(cell_type_names)
+
+            # Slice the spatial-object metadata to the kept pixels
+            adata_cell2location.obs_names = self.adata_sp.obs_names[kept_idx]
+            adata_cell2location.obs = self.adata_sp.obs.iloc[kept_idx].copy()
+            for k, v in self.adata_sp.obsm.items():
+                adata_cell2location.obsm[k] = v[kept_idx]
+            adata_cell2location.uns = self.adata_sp.uns.copy()
+
+            # Mirror omicverse's existing convention: also stash the proportions
+            # in adata_sp.obsm so existing plotting helpers (e.g. matplotlib /
+            # ov.pl.spatial(color=cell_type)) can consume them as a column source.
+            prop_df = pd.DataFrame(
+                proportions, index=adata_cell2location.obs_names, columns=cell_type_names
+            )
+            self.adata_sp.obsm['rctd_proportions'] = prop_df.reindex(self.adata_sp.obs_names).fillna(0.0)
+            self.adata_cell2location = adata_cell2location
+
+            print(f"{Colors.GREEN}✓ RCTD deconvolution is done{Colors.ENDC}")
+            print(f"The deconvolution result is saved in self.adata_cell2location")
+            print(f"Cell type proportions are also stored in self.adata_sp.obsm['rctd_proportions']")
+            print(f"The full RCTD result object is saved in self.rctd_result")
+
         else:
-            raise ValueError(f"Method {method} is not supported. Choose from: 'Tangram', 'cell2location', 'FlashDeconv'")
+            raise ValueError(f"Method {method} is not supported. Choose from: 'Tangram', 'cell2location', 'FlashDeconv', 'starfysh', 'RCTD'")
 
     def impute(self,method='Tangram'):
         """
