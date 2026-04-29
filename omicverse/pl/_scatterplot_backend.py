@@ -401,10 +401,11 @@ def embedding(
         if grid:
             ax = pl.subplot(grid[count], **args_3d)
             axs.append(ax)
-        if frameon ==False:
+        if frameon is False:
+            # Match scanpy semantics: `frameon=False` means hide the
+            # frame entirely (no axis, no arrow). The arrow is the
+            # `frameon='small'` extension below.
             ax.axis('off')
-            from ..pl._single import add_arrow
-            add_arrow(ax,adata,basis,fontsize=legend_fontsize,arrow_scale=arrow_scale,arrow_width=arrow_width)
         elif frameon == 'small':
             ax.axis('off')
             from ..pl._single import add_arrow

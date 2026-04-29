@@ -1484,6 +1484,88 @@ def sc_ref_Lymph_Node(
 
 
 @register_function(
+    aliases=['淋巴结Visium', 'visium_lymph_node', 'V1_Human_Lymph_Node', '10x lymph node visium'],
+    category="datasets",
+    description="Download and load the 10x V1 Human Lymph Node Visium spatial transcriptomics sample (paired with sc_ref_Lymph_Node for deconvolution benchmarking).",
+    prerequisites={},
+    requires={},
+    produces={'obsm': ['spatial']},
+    auto_fix='none',
+    examples=['adata_sp = ov.datasets.visium_lymph_node()'],
+    related=['datasets.sc_ref_Lymph_Node', 'io.spatial.read_visium', 'space.Deconvolution']
+)
+def visium_lymph_node(dir: str = "./data") -> AnnData:
+    r"""Download + load the 10x V1 Human Lymph Node Visium dataset.
+
+    Bundles the two artefacts the 10x sample page ships separately:
+
+    - ``V1_Human_Lymph_Node_filtered_feature_bc_matrix.h5`` — gene × spot
+      counts filtered to in-tissue spots,
+    - ``V1_Human_Lymph_Node_spatial.tar.gz`` — tissue image, fiducial
+      JSON, and per-spot pixel coordinates.
+
+    Both come from the public 10x CDN
+    (https://cf.10xgenomics.com/samples/spatial-exp/1.1.0/V1_Human_Lymph_Node/);
+    extraction puts them in the layout that ``ov.io.spatial.read_visium``
+    expects (``filtered_feature_bc_matrix.h5`` + ``spatial/``).
+
+    Parameters
+    ----------
+    dir : str
+        Local directory under which the dataset is cached (``./data`` by
+        default). Re-downloads are skipped when the artefacts already exist.
+
+    Returns
+    -------
+    AnnData
+        Visium AnnData with raw counts on ``X``, spot coordinates on
+        ``obsm['spatial']``, and the tissue image / scalefactors registered
+        under ``uns['spatial']``.
+
+    Examples
+    --------
+    >>> adata_sc = ov.datasets.sc_ref_Lymph_Node()
+    >>> adata_sp = ov.datasets.visium_lymph_node()
+    >>> decov = ov.space.Deconvolution(adata_sc=adata_sc, adata_sp=adata_sp)
+    >>> decov.deconvolution(method='RCTD', celltype_key_sc='Subset')
+    """
+    import tarfile
+    print(f"{Colors.HEADER}🧬 Loading 10x V1 Human Lymph Node Visium data{Colors.ENDC}")
+
+    base = "https://cf.10xgenomics.com/samples/spatial-exp/1.1.0/V1_Human_Lymph_Node"
+    sample_dir = os.path.join(dir, "V1_Human_Lymph_Node")
+    os.makedirs(sample_dir, exist_ok=True)
+
+    # 10x labels every artefact with the sample prefix; `read_visium` expects
+    # `filtered_feature_bc_matrix.h5` literally, so download the prefixed file
+    # straight under that canonical filename.
+    h5_path = os.path.join(sample_dir, "filtered_feature_bc_matrix.h5")
+    if not os.path.exists(h5_path):
+        download_data(
+            f"{base}/V1_Human_Lymph_Node_filtered_feature_bc_matrix.h5",
+            file_path="filtered_feature_bc_matrix.h5",
+            dir=sample_dir,
+        )
+
+    # Spatial side: tarball expands into `spatial/` next to the matrix.
+    spatial_dir = os.path.join(sample_dir, "spatial")
+    if not os.path.isdir(spatial_dir) or not os.listdir(spatial_dir):
+        tar_local = download_data(
+            f"{base}/V1_Human_Lymph_Node_spatial.tar.gz",
+            file_path="V1_Human_Lymph_Node_spatial.tar.gz",
+            dir=sample_dir,
+        )
+        with tarfile.open(tar_local, "r:gz") as tar:
+            tar.extractall(sample_dir)
+        print(f"{Colors.GREEN}{EMOJI['done']} Extracted spatial assets to {spatial_dir}{Colors.ENDC}")
+
+    from ..io.spatial import read_visium
+    adata = read_visium(sample_dir)
+    adata.var_names_make_unique()
+    return adata
+
+
+@register_function(
     aliases=['pbmc3k', 'PBMC3K', 'pbmc_3k_dataset'],
     category="datasets",
     description="Load PBMC3k dataset with optional processed/raw mode and mock fallback.",
