@@ -94,6 +94,7 @@ from ._datasets import (
     decov_bulk_covid_single,
 
     sc_ref_Lymph_Node,
+    visium_lymph_node,
     pbmc8k,
     seqfish,
 )
