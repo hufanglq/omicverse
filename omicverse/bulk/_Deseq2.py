@@ -612,7 +612,8 @@ class pyDEG(object):
             #max mean of between each value in group1 and group2
             #result=result[result['padj']<alpha]
             result['sig']='normal'
-            result.loc[result['qvalue']<alpha,'sig']='sig'
+            result.loc[(result['qvalue'] < alpha) & (result['log2FC'] > 0), 'sig'] = 'up'
+            result.loc[(result['qvalue'] < alpha) & (result['log2FC'] < 0), 'sig'] = 'down'
             print(f"✅ Differential expression analysis completed.")
             
             self.result=result
@@ -716,7 +717,8 @@ class pyDEG(object):
             result['log2FC'] = result['log2FoldChange']
             result['abs(log2FC)'] = abs(result['log2FC'])
             result['sig'] = 'normal'
-            result.loc[result['qvalue'] < alpha, 'sig'] = 'sig'
+            result.loc[(result['qvalue'] < alpha) & (result['log2FC'] > 0), 'sig'] = 'up'
+            result.loc[(result['qvalue'] < alpha) & (result['log2FC'] < 0), 'sig'] = 'down'
             self.result = result
             print(f"✅ Differential expression analysis completed.")
             return result
@@ -776,7 +778,8 @@ class pyDEG(object):
             #max mean of between each value in group1 and group2
             #result=result[result['padj']<alpha]
             result['sig']='normal'
-            result.loc[result['qvalue']<alpha,'sig']='sig'
+            result.loc[(result['qvalue'] < alpha) & (result['log2FC'] > 0), 'sig'] = 'up'
+            result.loc[(result['qvalue'] < alpha) & (result['log2FC'] < 0), 'sig'] = 'down'
             self.result=result
             print(f"✅ Differential expression analysis completed.")
             return result
@@ -838,7 +841,8 @@ class pyDEG(object):
             #max mean of between each value in group1 and group2
             #result=result[result['padj']<alpha]
             result['sig']='normal'
-            result.loc[result['qvalue']<alpha,'sig']='sig'
+            result.loc[(result['qvalue'] < alpha) & (result['log2FC'] > 0), 'sig'] = 'up'
+            result.loc[(result['qvalue'] < alpha) & (result['log2FC'] < 0), 'sig'] = 'down'
 
             result['F']=fit_eb.F.reshape(-1)
             result['t']=fit_eb.t.values.reshape(-1)

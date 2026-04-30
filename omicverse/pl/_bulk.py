@@ -115,6 +115,12 @@ def volcano(result,pval_name='qvalue',fc_name='log2FC',pval_max=None,FC_max=None
         print(f"   {Colors.FAIL}❌ Missing required columns: {Colors.BOLD}{missing_cols}{Colors.ENDC}")
         raise ValueError(f"Missing required columns: {missing_cols}")
     
+    valid_sig = {'up', 'down', 'normal'}
+    if not set(result['sig'].unique()).issubset(valid_sig):
+        result['sig'] = 'normal'
+        result.loc[(result[fc_name] > fc_max) & (result[pval_name] < pval_threshold), 'sig'] = 'up'
+        result.loc[(result[fc_name] < fc_min) & (result[pval_name] < pval_threshold), 'sig'] = 'down'
+
     # Calculate gene counts by significance
     sig_counts = result['sig'].value_counts()
     total_sig = sig_counts.get('up', 0) + sig_counts.get('down', 0)
@@ -160,13 +166,13 @@ def volcano(result,pval_name='qvalue',fc_name='log2FC',pval_max=None,FC_max=None
         suggestions.append(f"     {Colors.GREEN}Suggested: {Colors.BOLD}fc_max={new_fc_max}, fc_min={new_fc_min}{Colors.ENDC}")
     
     # Check plot size based on gene label settings
-    if plot_genes_num > 20 and figsize[0] < 6:
+    if plot_genes_num is not None and plot_genes_num > 20 and figsize[0] < 6:
         suggestions.append(f"   {Colors.WARNING}▶ Many gene labels with small plot:{Colors.ENDC}")
         suggestions.append(f"     {Colors.CYAN}Current: plot_genes_num={Colors.BOLD}{plot_genes_num}{Colors.ENDC}{Colors.CYAN}, figsize={Colors.BOLD}{figsize}{Colors.ENDC}")
         suggestions.append(f"     {Colors.GREEN}Suggested: {Colors.BOLD}figsize=(6, 6){Colors.ENDC} or {Colors.BOLD}plot_genes_num=15{Colors.ENDC}")
     
     # Check if gene labels might be too small
-    if plot_genes_fontsize < 8 and plot_genes_num > 15:
+    if plot_genes_fontsize < 8 and plot_genes_num is not None and plot_genes_num > 15:
         suggestions.append(f"   {Colors.WARNING}▶ Small font with many labels:{Colors.ENDC}")
         suggestions.append(f"     {Colors.CYAN}Current: plot_genes_fontsize={Colors.BOLD}{plot_genes_fontsize}{Colors.ENDC}{Colors.CYAN}, plot_genes_num={Colors.BOLD}{plot_genes_num}{Colors.ENDC}")
         suggestions.append(f"     {Colors.GREEN}Suggested: {Colors.BOLD}plot_genes_fontsize=10{Colors.ENDC} or {Colors.BOLD}plot_genes_num=10{Colors.ENDC}")
@@ -202,13 +208,13 @@ def volcano(result,pval_name='qvalue',fc_name='log2FC',pval_max=None,FC_max=None
             optimized_params.append(f"fc_max={new_fc_max}")
             optimized_params.append(f"fc_min={new_fc_min}")
         
-        if plot_genes_num > 20 and figsize[0] < 6:
+        if plot_genes_num is not None and plot_genes_num > 20 and figsize[0] < 6:
             optimized_params.append("figsize=(6, 6)")
         elif abs(figsize[0] - figsize[1]) > 2:
             optimal_size = max(figsize)
             optimized_params.append(f"figsize=({optimal_size}, {optimal_size})")
         
-        if plot_genes_fontsize < 8 and plot_genes_num > 15:
+        if plot_genes_fontsize < 8 and plot_genes_num is not None and plot_genes_num > 15:
             optimized_params.append("plot_genes_fontsize=10")
         
         if plot_genes is not None:
@@ -269,7 +275,7 @@ def volcano(result,pval_name='qvalue',fc_name='log2FC',pval_max=None,FC_max=None
             linestyle="--",
             color='black')
     #设置横标签与纵标签
-    ax.set_ylabel(r'$-log_{10}(qvalue)$',titlefont)                                    
+    ax.set_ylabel(rf'$-log_{{10}}({pval_name})$',titlefont)
     ax.set_xlabel(r'$log_{2}FC$',titlefont)
     #设置标题
     ax.set_title(title,titlefont)
