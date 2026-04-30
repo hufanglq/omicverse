@@ -495,7 +495,8 @@ class DEG:
             res['qvalue']=md_d['pvals_adj'].tolist()
             res['size']=np.abs(res['log2FC'])/10
             res['sig']='normal'
-            res.loc[res['padj']<0.05,'sig']='sig'
+            res.loc[(res['padj'] < 0.05) & (res['log2FC'] > 0), 'sig'] = 'up'
+            res.loc[(res['padj'] < 0.05) & (res['log2FC'] < 0), 'sig'] = 'down'
             res['-log(pvalue)'] = -np.log10(res['pvalue'])
             res['-log(qvalue)'] = -np.log10(res['qvalue'])
             #calculate the Mean of the self.adata_test's genes(var)
