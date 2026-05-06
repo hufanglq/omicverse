@@ -268,6 +268,7 @@ def _communication_long_table(
     if pair_lr_use is not None:
         long_df = long_df.loc[long_df["pair_lr"].isin(pair_lr_use)]
 
+    long_df = long_df.loc[long_df["significant"]].copy()
     return long_df.reset_index(drop=True)
 
 
@@ -3589,6 +3590,22 @@ def _draw_circle_network(
         connectionstyle="arc3,rad=0.15",
     )
     nx.draw_networkx_labels(graph, pos, font_size=10, ax=ax)
+    active_senders = list(dict.fromkeys(source for source, _ in graph.edges))
+    if 0 < len(active_senders) <= 20:
+        legend_handles = [
+            plt.Line2D([0], [0], color=colors[sender], lw=4, label=f"{sender} (sender)")
+            for sender in active_senders
+        ]
+        legend = ax.legend(
+            handles=legend_handles,
+            title="Sender",
+            loc="center left",
+            bbox_to_anchor=(1.02, 0.5),
+            frameon=False,
+            fontsize=8,
+        )
+        if legend is not None and legend.get_title() is not None:
+            legend.get_title().set_fontsize(9)
     ax.set_title(title or "Communication network")
     ax.set_axis_off()
     return fig, ax
@@ -4737,7 +4754,7 @@ def ccc_network_plot(
     classification_fallback: str | None = "family",
     pvalue_threshold: float = 0.05,
     value: Literal["sum", "mean", "max", "count"] = "sum",
-    top_n: int = 20,
+    top_n: int | None = None,
     ligand: str | None = None,
     receptor=None,
     normalize_to_sender: bool = True,
@@ -4810,9 +4827,11 @@ def ccc_network_plot(
     value : {"sum", "mean", "max", "count"}, default="sum"
         Aggregation statistic used when communication strengths are collapsed
         before plotting.
-    top_n : int, default=20
+    top_n : int or None, default=None
         Number of top pathways, interactions, or pairs retained for plot
-        types that rank results before drawing.
+        types that rank results before drawing. Circle-style network views keep
+        all significant edges by default; flow-style views use an internal
+        default of 20 when ``top_n`` is omitted.
     ligand : str or None, default=None
         Ligand name used by ligand-centric plots such as ``bipartite`` or
         ligand-receptor chord views.
@@ -4884,6 +4903,7 @@ def ccc_network_plot(
         func_name="ccc_network_plot",
     )
     _validate_display_by(display_by, func_name="ccc_network_plot")
+    flow_top_n = 20 if top_n is None else top_n
 
     adata = _resolve_comm_adata(
         adata,
@@ -5241,7 +5261,7 @@ def ccc_network_plot(
             ),
             display_by=display_by,
             value=value,
-            top_n=top_n,
+            top_n=flow_top_n,
         )
         fig, ax = _draw_arrow_network(
             flow_edges,
@@ -5264,7 +5284,7 @@ def ccc_network_plot(
             ),
             display_by=display_by,
             value=value,
-            top_n=top_n,
+            top_n=flow_top_n,
         )
         fig, ax = _draw_sigmoid_network(
             flow_edges,

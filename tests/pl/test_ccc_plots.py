@@ -102,6 +102,78 @@ def _build_comm_adata_with_duplicate_pairs() -> AnnData:
     return adata
 
 
+def _build_comm_adata_with_high_nonsignificant_scores() -> AnnData:
+    obs = pd.DataFrame(
+        {
+            "sender": ["A", "A", "B", "B"],
+            "receiver": ["A", "B", "A", "B"],
+        },
+        index=["A|A", "A|B", "B|A", "B|B"],
+    )
+    var = pd.DataFrame(
+        {
+            "interacting_pair": ["L1_R1", "L2_R2"],
+            "interaction_name": ["L1_R1", "L2_R2"],
+            "interaction_name_2": ["L1 - R1", "L2 - R2"],
+            "classification": ["Pathway", "Pathway"],
+            "gene_a": ["L1", "L2"],
+            "gene_b": ["R1", "R2"],
+        },
+        index=["L1_R1", "L2_R2"],
+    )
+    means = np.array(
+        [
+            [1.0, 100.0],
+            [2.0, 200.0],
+            [3.0, 300.0],
+            [4.0, 400.0],
+        ],
+        dtype=float,
+    )
+    pvalues = np.array(
+        [
+            [0.01, 0.50],
+            [0.02, 0.50],
+            [0.50, 0.50],
+            [0.50, 0.50],
+        ],
+        dtype=float,
+    )
+    adata = AnnData(X=means.copy(), obs=obs, var=var)
+    adata.layers["means"] = means.copy()
+    adata.layers["pvalues"] = pvalues.copy()
+    return adata
+
+
+def _build_dense_pathway_comm_adata(n_cell_types: int = 5) -> AnnData:
+    cell_types = [f"Cell{i}" for i in range(n_cell_types)]
+    obs = pd.DataFrame(
+        [
+            {"sender": sender, "receiver": receiver}
+            for sender in cell_types
+            for receiver in cell_types
+        ],
+        index=[f"{sender}|{receiver}" for sender in cell_types for receiver in cell_types],
+    )
+    var = pd.DataFrame(
+        {
+            "interacting_pair": ["L1_R1"],
+            "interaction_name": ["L1_R1"],
+            "interaction_name_2": ["L1 - R1"],
+            "classification": ["Dense"],
+            "gene_a": ["L1"],
+            "gene_b": ["R1"],
+        },
+        index=["L1_R1"],
+    )
+    means = np.arange(1, n_cell_types * n_cell_types + 1, dtype=float).reshape(-1, 1)
+    pvalues = np.full_like(means, 0.01, dtype=float)
+    adata = AnnData(X=means.copy(), obs=obs, var=var)
+    adata.layers["means"] = means.copy()
+    adata.layers["pvalues"] = pvalues.copy()
+    return adata
+
+
 def _build_raw_liana_adata(*, uns_key: str = "liana_res", shifted: bool = False) -> AnnData:
     adata = AnnData(X=np.zeros((1, 1), dtype=float))
     specificity = [0.01, 0.04, 0.15, 0.03]
@@ -453,6 +525,52 @@ def test_ccc_network_plot_pathway_forwards_top_n(monkeypatch, comm_adata: AnnDat
     assert captured["top_n"] == 7
 
 
+def test_ccc_circle_keeps_all_edges(monkeypatch) -> None:
+    adata = _build_dense_pathway_comm_adata()
+    captured_lengths: list[int] = []
+
+    def _fake_draw_circle_network(edge_df, **kwargs):
+        captured_lengths.append(len(edge_df))
+        return plt.subplots(figsize=kwargs.get("figsize", (7, 7)))
+
+    monkeypatch.setattr(ccc_mod, "_draw_circle_network", _fake_draw_circle_network)
+
+    fig, ax = ov.pl.ccc_network_plot(
+        adata,
+        plot_type="circle",
+        signaling="Dense",
+        show=False,
+    )
+    _assert_figure_and_axes(fig, ax)
+
+    fig, ax = ov.pl.ccc_network_plot(
+        adata,
+        plot_type="circle",
+        signaling="Dense",
+        top_n=7,
+        show=False,
+    )
+    _assert_figure_and_axes(fig, ax)
+
+    assert captured_lengths == [25, 7]
+
+
+def test_ccc_circle_sender_legend() -> None:
+    adata = _build_comm_adata_with_high_nonsignificant_scores()
+
+    fig, ax = ov.pl.ccc_network_plot(
+        adata,
+        plot_type="circle",
+        signaling="Pathway",
+        show=False,
+    )
+
+    _assert_figure_and_axes(fig, ax)
+    legend = ax.get_legend()
+    assert legend is not None
+    assert [text.get_text() for text in legend.get_texts()] == ["A (sender)"]
+
+
 @pytest.mark.parametrize(
     ("plot_type", "method_name"),
     [
@@ -614,7 +732,11 @@ def test_ccc_stat_plot_interaction_sankey_returns_figure_and_axes(comm_adata: An
         show=False,
     )
     _assert_figure_and_axes(fig, ax)
-    interaction_texts = [text for text in ax.texts if "CXCL12" in text.get_text() or "TGFB1" in text.get_text()]
+    interaction_texts = [
+        text
+        for text in ax.texts
+        if "FN1" in text.get_text() or "MIF" in text.get_text()
+    ]
     assert interaction_texts
     assert all(text.get_rotation() == 0 for text in interaction_texts)
     assert any(" - " in text.get_text() for text in interaction_texts)
