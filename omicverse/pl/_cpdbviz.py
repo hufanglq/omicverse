@@ -2903,44 +2903,76 @@ class CellChatViz(CellChatVizPlus):
         
         # Choose visualization method based on layout type
         if layout == 'circle':
-            title = f"Signaling Pathway: {', '.join(signaling)} (Circle)"
-            from ._ccc import ccc_network_plot
-
-            try:
-                # Route aggregated circle rendering through the Python-native CCC
-                # backend so pathway circles share the same visual language as
-                # `ov.pl.ccc_network_plot(..., plot_type="circle")`.
-                fig, ax = ccc_network_plot(
-                    self.adata,
-                    plot_type="circle",
-                    signaling=signaling,
-                    sender_use=vertex_sender,
-                    receiver_use=vertex_receiver,
-                    pvalue_threshold=pvalue_threshold,
-                    value="sum",
-                    top_n=top_n,
-                    palette=self.palette,
-                    figsize=figsize,
-                    title=title,
-                    show=False,
-                    save=False,
-                )
-            except ValueError:
+            if pathway_matrix.sum() == 0:
                 fig, ax = plt.subplots(figsize=figsize)
-                if vertex_sender is not None or vertex_receiver is not None:
-                    sender_str = f"senders: {vertex_sender}" if vertex_sender else "any senders"
-                    receiver_str = f"receivers: {vertex_receiver}" if vertex_receiver else "any receivers"
-                    message = (
-                        f'No interactions found for pathway(s): {", ".join(signaling)}\n'
-                        f'with {sender_str} and {receiver_str}'
-                    )
-                    fontsize = 14
-                else:
-                    message = f'No significant interactions found for pathway(s): {", ".join(signaling)}'
-                    fontsize = 16
-                ax.text(0.5, 0.5, message, ha='center', va='center', fontsize=fontsize)
+                ax.text(0.5, 0.5, f'No significant interactions found for pathway(s): {", ".join(signaling)}',
+                       ha='center', va='center', fontsize=16)
                 ax.axis('off')
                 return fig, ax
+
+            title = f"Signaling Pathway: {', '.join(signaling)} (Circle)"
+
+            if vertex_sender is not None or vertex_receiver is not None:
+                filtered_matrix = np.zeros_like(pathway_matrix)
+
+                for i, sender_type in enumerate(self.cell_types):
+                    for j, receiver_type in enumerate(self.cell_types):
+                        sender_ok = (vertex_sender is None) or (sender_type in vertex_sender)
+                        receiver_ok = (vertex_receiver is None) or (receiver_type in vertex_receiver)
+
+                        if sender_ok and receiver_ok and pathway_matrix[i, j] > 0:
+                            filtered_matrix[i, j] = pathway_matrix[i, j]
+
+                pathway_matrix = filtered_matrix
+
+                if pathway_matrix.sum() == 0:
+                    fig, ax = plt.subplots(figsize=figsize)
+                    sender_str = f"senders: {vertex_sender}" if vertex_sender else "any senders"
+                    receiver_str = f"receivers: {vertex_receiver}" if vertex_receiver else "any receivers"
+                    ax.text(0.5, 0.5, f'No interactions found for pathway(s): {", ".join(signaling)}\nwith {sender_str} and {receiver_str}',
+                           ha='center', va='center', fontsize=14)
+                    ax.axis('off')
+                    return fig, ax
+
+            if top_n is not None and top_n > 0:
+                positive_edges = np.argwhere(pathway_matrix > 0)
+                if len(positive_edges) > int(top_n):
+                    edge_weights = pathway_matrix[pathway_matrix > 0]
+                    keep_order = np.argsort(edge_weights)[::-1][:int(top_n)]
+                    top_matrix = np.zeros_like(pathway_matrix)
+                    for edge_idx in keep_order:
+                        sender_idx, receiver_idx = positive_edges[edge_idx]
+                        top_matrix[sender_idx, receiver_idx] = pathway_matrix[sender_idx, receiver_idx]
+                    pathway_matrix = top_matrix
+
+            if focused_view:
+                fig, ax = self.netVisual_circle_focused(
+                    matrix=pathway_matrix,
+                    title=title,
+                    edge_width_max=edge_width_max,
+                    vertex_size_max=vertex_size_max,
+                    show_labels=show_labels,
+                    cmap=cmap,
+                    figsize=figsize,
+                    min_interaction_threshold=0,
+                    use_sender_colors=use_sender_colors,
+                    use_curved_arrows=use_curved_arrows,
+                    curve_strength=curve_strength
+                )
+            else:
+                fig, ax = self.netVisual_circle(
+                    matrix=pathway_matrix,
+                    title=title,
+                    edge_width_max=edge_width_max,
+                    vertex_size_max=vertex_size_max,
+                    show_labels=show_labels,
+                    cmap=cmap,
+                    figsize=figsize,
+                    use_sender_colors=use_sender_colors,
+                    use_curved_arrows=use_curved_arrows,
+                    curve_strength=curve_strength,
+                    adjust_text=adjust_text
+                )
         
         elif layout == 'hierarchy':
             # Determine source and target cells
