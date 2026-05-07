@@ -119,59 +119,128 @@ def _load_experiment_metadata(root: Path) -> dict:
         return {}
 
 
+def _morphology_candidates(root: Path, name: str) -> list[Path]:
+    """Build a search-ordered list of candidate morphology OME-TIFFs.
+
+    Xenium morphology images ship in three layouts:
+
+    * **V1**: ``morphology_focus.ome.tif`` / ``morphology_mip.ome.tif`` at the
+      ``outs`` root.
+    * **V2 / Prime (directory)**: ``morphology_focus/morphology_focus_NNNN.ome.tif``
+      with one file per stain channel (e.g. ``_0000`` = DAPI).
+    * **V2 (flat)**: same per-channel files but written next to ``cells.parquet``.
+
+    The returned list honours the user's ``image_key``:
+
+    * ``"morphology_focus"`` / ``"morphology_mip"`` — pick the V1 file if it
+      exists; otherwise fall back to the first V2 channel (``_0000``).
+    * ``"morphology_focus_NNNN"`` — prefer the specific V2 channel; fall back to
+      other V2 channels and finally V1 layouts so an explicit channel still
+      yields *some* image when the requested channel is missing.
+    """
+    name = (name or "morphology_focus").strip()
+    focus_dir = root / "morphology_focus"
+    v2_files: list[Path] = []
+    if focus_dir.is_dir():
+        v2_files.extend(sorted(focus_dir.glob("morphology_focus_*.ome.tif")))
+    v2_files.extend(sorted(root.glob("morphology_focus_*.ome.tif")))
+
+    candidates: list[Path] = []
+    if name.startswith("morphology_focus_") or name.startswith("morphology_mip_"):
+        target = f"{name}.ome.tif"
+        # Specific channel first, then siblings as fallback.
+        for f in v2_files:
+            if f.name == target:
+                candidates.append(f)
+        for f in v2_files:
+            if f.name != target:
+                candidates.append(f)
+        # Also allow a flat-named file at root (rare, but cheap to check).
+        candidates.append(root / target)
+    else:
+        # Generic key — V1 first, then V2 channels.
+        candidates.append(root / f"{name}.ome.tif")
+        candidates.extend(v2_files)
+        if name != "morphology_focus":
+            candidates.append(root / "morphology_focus.ome.tif")
+
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for cand in candidates:
+        if cand in seen:
+            continue
+        seen.add(cand)
+        unique.append(cand)
+    return unique
+
+
+def _read_pyramid(cand: Path, max_dim: int) -> tuple[np.ndarray, float]:
+    """Read one OME-TIFF, returning ``(image_2d, downsample_factor)``.
+
+    ``_multifile=False`` keeps tifffile from following the OME-XML's references
+    to *sibling* per-channel files (Xenium V2 / Prime ships
+    ``morphology_focus_0000.ome.tif`` with TiffData/UUID entries pointing at
+    ``_0001``…``_0003``). With the default ``_multifile=True`` tifffile merges
+    those into a single multi-channel series, which silently breaks the
+    pyramid-level walk below — so we always read each file as its own
+    single-channel pyramid and pick the channel up the directory listing.
+    """
+    import tifffile
+
+    with tifffile.TiffFile(cand, _multifile=False) as tif:
+        series = tif.series[0]
+        levels = getattr(series, "levels", None) or [series]
+        full_h, full_w = levels[0].shape[-2:]
+        target_idx = 0
+        for i, lvl in enumerate(levels):
+            h, w = lvl.shape[-2:]
+            if max(h, w) <= max_dim:
+                target_idx = i
+                break
+        else:
+            target_idx = len(levels) - 1
+        target = levels[target_idx]
+        arr = target.asarray()
+    while arr.ndim > 2:
+        arr = arr[0]
+    downsample = arr.shape[0] / full_h if full_h else 1.0
+    return arr, float(downsample)
+
+
 def _load_morphology_image(
     root: Path,
     name: str,
     max_dim: int = 4096,
-) -> Optional[tuple[np.ndarray, float]]:
+) -> Optional[tuple[np.ndarray, float, Path]]:
     """Load a morphology image (OME-TIFF) and its downsample factor.
 
-    Xenium output ships either a flat ``morphology_focus.ome.tif`` /
-    ``morphology_mip.ome.tif`` (V1) or a ``morphology_focus/morphology_focus_0000.ome.tif``
-    directory layout (V2+). The file is a multi-resolution pyramid; we pick the
-    highest-resolution level whose largest dimension fits under ``max_dim`` so the
-    in-memory array is bounded while remaining usable for overlay. Returns the
-    image and the ``chosen_level_size / full_res_size`` downsample factor so
-    coordinates can still be mapped into image-pixel space later.
+    Returns ``(image_2d, downsample, source_path)`` or ``None`` if no candidate
+    could be read. Failures for individual candidates are surfaced via
+    ``_progress(..., level='warn')`` so the user can see *which* file failed
+    rather than a generic "no morphology image loaded".
     """
-    candidates = []
-    focus_dir = root / "morphology_focus"
-    if focus_dir.is_dir():
-        candidates.extend(sorted(focus_dir.glob("morphology_focus_*.ome.tif")))
-    candidates.append(root / f"{name}.ome.tif")
+    candidates = _morphology_candidates(root, name)
+    if not candidates:
+        return None
+
+    try:
+        import tifffile  # noqa: F401
+    except ImportError:
+        warnings.warn(
+            "tifffile not installed — skipping morphology image. "
+            "`pip install tifffile` to enable H&E / DAPI overlay."
+        )
+        return None
+
     for cand in candidates:
         if not cand.exists():
             continue
         try:
-            import tifffile
-
-            with tifffile.TiffFile(cand) as tif:
-                series = tif.series[0]
-                levels = getattr(series, "levels", None) or [series]
-                # Full-res is levels[0]; walk down pyramid until both dims fit.
-                full_h, full_w = levels[0].shape[-2:]
-                target_idx = 0
-                for i, lvl in enumerate(levels):
-                    h, w = lvl.shape[-2:]
-                    if max(h, w) <= max_dim:
-                        target_idx = i
-                        break
-                else:
-                    target_idx = len(levels) - 1
-                target = levels[target_idx]
-                arr = target.asarray()
-            while arr.ndim > 2:
-                arr = arr[0]
-            downsample = arr.shape[0] / full_h if full_h else 1.0
-            return arr, float(downsample)
-        except ImportError:
-            warnings.warn(
-                "tifffile not installed — skipping morphology image. "
-                "`pip install tifffile` to enable H&E / DAPI overlay."
-            )
-            return None
+            arr, downsample = _read_pyramid(cand, max_dim=max_dim)
         except Exception as exc:
-            warnings.warn(f"Failed to read {cand.name}: {exc}")
+            _progress(f"Failed to read {cand}: {exc}", level="warn")
+            continue
+        return arr, downsample, cand
     return None
 
 
@@ -214,8 +283,11 @@ def read_xenium(
           cells.csv.gz    (or cells.parquet)# per-cell metadata incl. centroids
           experiment.xenium                 # run / panel metadata (JSON)
           morphology_focus.ome.tif          # V1 focused morphology image (optional)
-          morphology_focus/                 # V2+ morphology folder (optional)
-              morphology_focus_0000.ome.tif
+          morphology_focus/                 # V2 / Prime morphology folder (optional)
+              morphology_focus_0000.ome.tif  # DAPI
+              morphology_focus_0001.ome.tif  # boundary stain
+              morphology_focus_0002.ome.tif  # interior stain
+              morphology_focus_0003.ome.tif  # 4th channel (Prime panels)
 
     Parameters
     ----------
@@ -231,9 +303,16 @@ def read_xenium(
         (hundreds of MB); pass ``False`` for lightweight tutorials that only need
         the centroid scatter.
     image_key
-        Which morphology image to prefer when both ``morphology_focus`` and
-        ``morphology_mip`` are shipped. One of ``'morphology_focus'``,
-        ``'morphology_mip'``, ``'morphology'``.
+        Which morphology image to load. Accepts:
+
+        * ``'morphology_focus'`` / ``'morphology_mip'`` — V1 layout files at
+          the outs root; falls back to the first V2 channel (``_0000``, DAPI)
+          when V1 files are absent.
+        * ``'morphology_focus_NNNN'`` — pick a specific V2 / Prime channel
+          (``_0000`` DAPI, ``_0001`` boundary, ``_0002`` interior, ``_0003``
+          alternative) from ``morphology_focus/``. If the requested channel
+          is missing, the reader falls back to the other available channels
+          rather than returning no image.
     image_max_dim
         Xenium OME-TIFFs are multi-resolution pyramids; this is the maximum
         pixel extent along either axis that we will load. The highest-resolution
@@ -373,10 +452,10 @@ def read_xenium(
     if load_image:
         loaded = _load_morphology_image(root, image_key, max_dim=image_max_dim)
         if loaded is not None:
-            img, downsample = loaded
+            img, downsample, src_path = loaded
             _progress(
                 f"Loaded morphology image {img.shape} "
-                f"(pyramid downsample {downsample:.4f}) from {root}"
+                f"(pyramid downsample {downsample:.4f}) from {src_path}"
             )
             uns_spatial["images"]["hires"] = img
             # Rescale so that micron × scalef lands on the downsampled image.
@@ -385,7 +464,14 @@ def read_xenium(
                 spot_diameter_fullres * downsample
             )
         else:
-            _progress("No morphology image loaded (set load_image=False to silence).", level="warn")
+            tried = _morphology_candidates(root, image_key)
+            tried_repr = ", ".join(str(p) for p in tried) if tried else "no candidates"
+            _progress(
+                "No morphology image loaded (tried: "
+                f"{tried_repr}). Set load_image=False to silence, or pass a "
+                "specific channel via image_key='morphology_focus_0000'.",
+                level="warn",
+            )
 
     has_geometry = False
     if load_boundaries:
