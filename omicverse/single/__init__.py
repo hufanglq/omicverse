@@ -210,6 +210,11 @@ def __getattr__(name):
         from . import _cnmf as cnmf_module
 
         return getattr(cnmf_module, name)
+    if name == "NMF":
+        from . import _nmf as nmf_module
+
+        globals()["NMF"] = nmf_module.NMF
+        return nmf_module.NMF
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
 
@@ -358,6 +363,7 @@ __all__ = [
     # Additional analysis tools  
     'cnmf',
     'cNMF',
+    'NMF',
     'Hotspot',
     'generate_scRNA_report',
     'SCENIC',
