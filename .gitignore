@@ -28,6 +28,22 @@ omicverse_guide/site
 *sqlite3
 *log
 *moban*
+
+# Generated documentation output. The built site is deployed to
+# omicverse/omicverse-pages and must not be committed to this repo.
+omicverse_guide/docs/_build/
+omicverse_guide/docs_zh/_build/
+omicverse_guide/docs/.doctrees/
+omicverse_guide/docs_zh/.doctrees/
+omicverse_guide/docs/jupyter_execute/
+omicverse_guide/docs_zh/jupyter_execute/
+omicverse_guide/docs/_sources/
+omicverse_guide/docs_zh/_sources/
+site/
+.doctrees/
+_sources/
+_build/
+jupyter_execute/
 # Local, non-repo directories
 Skill_Seekers/
 skill_seekers/

@@ -1,4 +1,4 @@
-name: Deploy Docs to GitHub Pages
+name: Deploy Docs to omicverse-pages
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:   # allow manual trigger from the Actions tab
 
 permissions:
-  contents: write      # needed to push to gh-pages branch
+  contents: read
 
 jobs:
   deploy:
@@ -49,17 +49,19 @@ jobs:
             omicverse_guide/docs/_build/html \
             -q -T
 
-      # ── 6. Configure git identity for gh-deploy push ──────────────────
+      # ── 6. Configure git identity for docs deploy push ────────────────
       - name: Configure git
         run: |
           git config --global user.name  "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      # ── 7. Deploy to gh-pages branch ──────────────────────────────────
-      - name: Deploy to GitHub Pages
+      # ── 7. Deploy to the standalone documentation repository ──────────
+      - name: Deploy to omicverse-pages
         uses: peaceiris/actions-gh-pages@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          personal_token: ${{ secrets.OMICVERSE_PAGES_TOKEN }}
+          external_repository: omicverse/omicverse-pages
+          publish_branch: main
           publish_dir: omicverse_guide/docs/_build/html
           force_orphan: true
           commit_message: "docs: auto-deploy from ${{ github.sha }}"
