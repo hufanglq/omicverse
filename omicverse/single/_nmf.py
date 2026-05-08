@@ -626,159 +626,177 @@ class NMF:
     def consensus(
         self,
         *,
-        n_runs: int = 10,
+        n_runs: int = 50,
         method: Optional[str] = None,
-        init: str = "random",
-        max_iter: int = 25,
-        n_subsample: int = 3000,
+        max_iter: int = 50,
         sparsity: float = 0.0,
         smoothness: float = 0.0,
         seed: int = 0,
     ) -> np.ndarray:
-        """Compute the Brunet 2004 consensus matrix.
+        """Compute the cNMF-style spectra consensus.
 
-        Runs NMF ``n_runs`` times with different random seeds (so each run
-        finds a possibly different local minimum), assigns each cell to its
-        argmax-factor in every run, and averages the resulting binary
-        co-cluster matrices into a single consensus matrix C̄ (cells × cells,
-        values in [0, 1]). Stable factorisations have C̄ close to {0, 1}
-        (cells either always co-cluster or never).
+        Following the canonical Brunet 2003 / cNMF (Kotliar 2019) recipe:
+        run NMF ``n_runs`` times with different random seeds → collect all
+        ``n_runs · K`` factor vectors (each one length-`n_genes`) →
+        compute the pair-wise Euclidean distance matrix between them →
+        cluster the spectra into K groups via k-means → reorder by cluster.
 
-        Memory note: the consensus matrix is N × N where N = ``n_subsample``
-        (or ``n_cells`` if smaller). For 3000 cells it's 72 MB — manageable.
-        For atlas-scale data set ``n_subsample`` ≤ 3000 to keep memory bounded.
+        A perfectly stable factorisation produces K tight clusters of
+        spectra and the distance matrix renders as **K dark blocks on the
+        diagonal against a bright background** — the canonical figure from
+        the Brunet PNAS 2003 paper that cNMF reproduces.
 
         Parameters
         ----------
-        n_runs : int
-            Number of independent NMF runs (Brunet et al. recommend 30+;
-            10 is fine for visualisation purposes).
+        n_runs : int, default 50
+            Number of independent NMF runs. cNMF uses 200; 30-50 is
+            usually enough to see the block structure.
         method : str, optional
-            Algorithm to run; falls back to ``self.method`` (the most recent
-            ``fit()``) when ``None``.
-        init : {'random', 'nndsvd'}
-            Use ``'random'`` for proper consensus (NNDSVD is deterministic
-            given V/rank → all runs identical → consensus trivially 1.0).
-        n_subsample : int
-            Maximum cell count for the consensus matrix. Cells are randomly
-            sampled if there are more.
+            Algorithm to run; falls back to ``self.method``.
+        max_iter : int
+            Iterations per run.
 
         Returns
         -------
-        consensus : (N, N) np.ndarray, with N = min(n_cells, n_subsample).
+        spectra_dist : (n_runs·K, n_runs·K) np.ndarray of pair-wise distances.
 
         Side effects
         ------------
-        Stores ``self._consensus`` and ``self._consensus_idx`` (the
-        subsampled cell indices) for use by :meth:`plot_consensus_heatmap`.
+        Sets ``self._spectra_dist``, ``self._spectra_labels`` (k-means
+        cluster IDs, length n_runs·K), and ``self._spectra_order`` (the
+        sort order to use when plotting). Use :meth:`plot_consensus_heatmap`
+        to render.
         """
         nmf_rs = _import_nmf_rs()
         if self._V is None:
-            raise RuntimeError(
-                "call .fit() at least once first (consensus reuses the "
-                "preprocessed V)"
-            )
+            self._V = _to_dense_genes_x_cells(self._adata_view, self.layer)
         method = method or self.method or "dnmf"
-        n_cells = self._V.shape[1]
-        rng_top = np.random.default_rng(seed)
-        if n_subsample < n_cells:
-            sub_idx = rng_top.choice(n_cells, n_subsample, replace=False)
-            sub_idx.sort()
-        else:
-            sub_idx = np.arange(n_cells)
-        N = sub_idx.size
+        K = self.rank
+        rng = np.random.default_rng(seed)
 
-        consensus = np.zeros((N, N), dtype=np.float64)
         kw_extras = {}
         if method.lower() in {"snmf/r", "snmf_r", "snmfr", "snmf/l", "snmf_l",
                                "snmfl", "dnmf", "rcppml", "diag_nmf"}:
             kw_extras["sparsity"] = float(sparsity)
             kw_extras["smoothness"] = float(smoothness)
 
+        # Stack all factors from all runs as columns of a (n_genes × n_runs·K) matrix.
+        spectra_cols: List[np.ndarray] = []
         for run in range(n_runs):
-            if init == "nndsvd":
-                W0, H0 = nmf_rs.nndsvd_init(self._V, self.rank, fill="mean", seed=int(rng_top.integers(0, 2**31 - 1)))
-            else:
-                W0, H0 = nmf_rs.random_init(self._V, self.rank, seed=int(rng_top.integers(0, 2**31 - 1)))
+            run_seed = int(rng.integers(0, 2**31 - 1))
+            W0, H0 = nmf_rs.random_init(self._V, K, seed=run_seed)
             res = nmf_rs.nmf(
-                self._V, rank=self.rank, method=method,
+                self._V, rank=K, method=method,
                 W0=W0, H0=H0, max_iter=int(max_iter),
                 num_threads=self.num_threads,
                 **kw_extras,
             )
-            cluster = np.argmax(res.H[:, sub_idx], axis=0)
-            consensus += (cluster[:, None] == cluster[None, :]).astype(np.float64)
-        consensus /= n_runs
-        self._consensus = consensus
-        self._consensus_idx = sub_idx
-        return consensus
+            # L2-normalise each factor column so the distance is direction-only.
+            W = res.W
+            norms = np.linalg.norm(W, axis=0, keepdims=True)
+            norms = np.where(norms > 0, norms, 1.0)
+            spectra_cols.append(W / norms)
+        spectra = np.hstack(spectra_cols)             # (n_genes, n_runs * K)
+
+        # Pair-wise distance (Euclidean on L2-normalised vectors ≈ angular distance).
+        from scipy.spatial.distance import pdist, squareform
+        dist = squareform(pdist(spectra.T, metric="euclidean"))
+
+        # K-means cluster the n_runs·K spectra into K groups, using the
+        # raw direction vectors. This is what cNMF does at consensus stage.
+        try:
+            from sklearn.cluster import KMeans
+        except ImportError as e:
+            raise ImportError(
+                "consensus() requires scikit-learn (pip install scikit-learn)"
+            ) from e
+        km = KMeans(n_clusters=K, n_init=10, random_state=int(seed))
+        labels = km.fit_predict(spectra.T)
+
+        # Sort: cluster id, then by intra-cluster distance to the centroid
+        # (more representative spectra come first within each block).
+        centroid_dist = np.array([
+            np.linalg.norm(spectra[:, i] - km.cluster_centers_[labels[i]])
+            for i in range(spectra.shape[1])
+        ])
+        order = np.lexsort((centroid_dist, labels))
+
+        self._spectra_dist = dist
+        self._spectra_labels = labels
+        self._spectra_order = order
+        return dist
 
     def plot_consensus_heatmap(
         self,
         *,
-        figsize: Tuple[int, int] = (6, 6),
-        cmap: str = "RdBu_r",
+        figsize: Tuple[int, int] = (6.5, 5.5),
+        cmap: str = "viridis",
         cluster_cmap: str = "Spectral",
-        show_dendrogram: bool = False,
     ):
-        """Plot the consensus matrix re-ordered by hierarchical clustering.
+        """Render the cNMF-style consensus heatmap.
 
-        Reproduces the canonical Brunet 2004 consensus heatmap. Cells along
-        both axes are reordered by average-linkage on ``1 - C̄``; a
-        secondary track on the left and top shows the K-means cluster
-        assignment from the same hierarchy. A perfectly stable factorisation
-        looks like K diagonal blocks of solid red against a blue background.
+        Layout matches the cNMF tutorial:
+
+        - **Top + left tracks**: K-means cluster colour assignment of the
+          spectra (Spectral palette).
+        - **Main panel**: pair-wise Euclidean distance between spectra,
+          re-ordered so cells in the same cluster are adjacent. Tight
+          clusters → small intra-block distance → dark diagonal blocks.
+        - **Right colourbar**: distance scale.
+
+        A perfectly stable factorisation produces K dark blocks on the
+        diagonal; instability shows as bright crossings.
         """
-        if not hasattr(self, "_consensus"):
+        if not hasattr(self, "_spectra_dist"):
             raise RuntimeError("call .consensus() first")
-        from scipy.cluster.hierarchy import linkage, fcluster
-        from scipy.spatial.distance import squareform
         import matplotlib.pyplot as plt
         from matplotlib import gridspec
 
-        C = self._consensus
-        # Hierarchical clustering on 1-C̄ to get a row/column order.
-        cond = squareform(1.0 - C, checks=False)
-        Z = linkage(cond, method="average")
-        # K clusters for the side-track colour bar.
-        cluster = fcluster(Z, t=self.rank, criterion="maxclust")
-        # Order cells by cluster, then by original index within cluster.
-        order = np.lexsort((np.arange(C.shape[0]), cluster))
+        D = self._spectra_dist[self._spectra_order, :][:, self._spectra_order]
+        cluster_track = self._spectra_labels[self._spectra_order].reshape(-1, 1)
 
-        # Compose figure: cluster track (left), heatmap, colourbar.
-        fig = plt.figure(figsize=figsize)
-        gs = gridspec.GridSpec(
-            2, 3, figure=fig,
-            width_ratios=[0.04, 1.0, 0.04], height_ratios=[0.04, 1.0],
-            wspace=0.02, hspace=0.02,
+        # Layout — width_ratios mirror the cNMF tutorial: thin track + main +
+        # gap + colourbar slot. height_ratios: thin track + main.
+        width_ratios = [0.18, 4.0, 0.4, 0.18]
+        height_ratios = [0.18, 4.0]
+        fig = plt.figure(
+            figsize=(sum(width_ratios) / 4.0 * figsize[0],
+                     sum(height_ratios) / 4.0 * figsize[1])
         )
-        # Top track.
-        ax_top = fig.add_subplot(gs[0, 1])
-        ax_top.imshow(cluster[order].reshape(1, -1), aspect="auto",
-                      cmap=cluster_cmap, interpolation="nearest")
+        gs = gridspec.GridSpec(
+            2, 4, figure=fig,
+            left=0.04, bottom=0.05, right=0.97, top=0.92,
+            width_ratios=width_ratios, height_ratios=height_ratios,
+            wspace=0.0, hspace=0.0,
+        )
+        # Top cluster track.
+        ax_top = fig.add_subplot(gs[0, 1], frameon=True)
+        ax_top.imshow(cluster_track.T, aspect="auto",
+                      cmap=cluster_cmap, interpolation="nearest", rasterized=True)
         ax_top.set_xticks([]); ax_top.set_yticks([])
-        # Left track.
-        ax_left = fig.add_subplot(gs[1, 0])
-        ax_left.imshow(cluster[order].reshape(-1, 1), aspect="auto",
-                       cmap=cluster_cmap, interpolation="nearest")
+        # Left cluster track.
+        ax_left = fig.add_subplot(gs[1, 0], frameon=True)
+        ax_left.imshow(cluster_track, aspect="auto",
+                       cmap=cluster_cmap, interpolation="nearest", rasterized=True)
         ax_left.set_xticks([]); ax_left.set_yticks([])
-        # Main heatmap.
-        ax_main = fig.add_subplot(gs[1, 1])
+        # Main distance heatmap.
+        ax_main = fig.add_subplot(gs[1, 1], frameon=True)
         im = ax_main.imshow(
-            C[order, :][:, order],
-            aspect="auto", cmap=cmap, vmin=0.0, vmax=1.0,
-            interpolation="nearest",
+            D, aspect="auto", cmap=cmap,
+            interpolation="nearest", rasterized=True,
         )
         ax_main.set_xticks([]); ax_main.set_yticks([])
-        ax_main.set_xlabel(f"cell (re-ordered, n={C.shape[0]})")
-        ax_main.set_ylabel("cell (re-ordered)")
-        # Colourbar.
-        ax_cb = fig.add_subplot(gs[1, 2])
-        fig.colorbar(im, cax=ax_cb)
-        ax_cb.set_ylabel("co-cluster fraction")
-        ax_main.set_title(
-            f"Consensus matrix ({self.method}, K={self.rank}, "
-            f"n_runs ≈ {C.shape[0]})"
+        # Colourbar — sit it in a smaller cell next to the main panel.
+        ax_cb = fig.add_subplot(gs[1, 3])
+        cb = fig.colorbar(im, cax=ax_cb)
+        cb.ax.tick_params(labelsize=8)
+        cb.set_label("Euclidean distance", fontsize=9)
+        # Title — placed centred via a separate axes so it doesn't push the
+        # main panel down.
+        fig.suptitle(
+            f"cNMF-style spectra consensus  (method={self.method}, "
+            f"K={self.rank}, n_runs={D.shape[0] // self.rank})",
+            fontsize=10,
         )
         return ax_main
 
