@@ -348,6 +348,11 @@ class NMF:
             )
         usage_full = usage_norm.reindex(adata.obs_names)
         adata.obsm[f"{key_added}_usage"] = usage_full.to_numpy(dtype=np.float64)
+        # Also expose each factor as a per-cell column in adata.obs so
+        # `ov.pl.embedding(adata, color=result_dict['usage_norm'].columns)`
+        # works without extra plumbing — same as cNMF's behaviour.
+        for col in cols:
+            adata.obs[col] = usage_full[col].astype(np.float64).values
         # varm: store on shared genes only.
         common_var = self.var_names.intersection(adata.var_names)
         gene_full = pd.DataFrame(
@@ -363,10 +368,9 @@ class NMF:
         valid = ~np.isnan(usage_arr).any(axis=1)
         if valid.any():
             argmax_mod[valid] = np.argmax(usage_arr[valid], axis=1) + 1
-        adata.obs[f"{key_added}_module"] = pd.Categorical(
-            [f"M{m}" if m > 0 else "NA" for m in argmax_mod],
-            categories=[f"M{k+1}" for k in range(rank)] + (["NA"] if (argmax_mod == -1).any() else []),
-        )
+        labels_mod = [f"M{m}" if m > 0 else "NA" for m in argmax_mod]
+        seen_mod = sorted(set(labels_mod), key=lambda s: (s == "NA", int(s[1:]) if s != "NA" else 0))
+        adata.obs[f"{key_added}_module"] = pd.Categorical(labels_mod, categories=seen_mod)
 
         adata.uns[f"{key_added}_params"] = {
             "rank": int(self.rank),
@@ -433,10 +437,15 @@ class NMF:
         )
         clf.fit(X[train_mask], pseudo_label[train_mask])
         pred = clf.predict(X)
-        adata.obs[key_added] = pd.Categorical(
-            [f"M{m}" for m in pred],
-            categories=[f"M{k+1}" for k in range(self.rank)],
+        labels = [f"M{m}" for m in pred]
+        # Only include categories the RFC actually predicted, otherwise
+        # downstream `ov.pl.dotplot(..., standard_scale='var')` divides by
+        # zero on empty groups.
+        seen = sorted(
+            {f"M{m}" for m in pred},
+            key=lambda s: int(s[1:]),
         )
+        adata.obs[key_added] = pd.Categorical(labels, categories=seen)
         return clf
 
     # ------ Visualisation --------------------------------------------------
