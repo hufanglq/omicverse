@@ -269,45 +269,42 @@ class NMF:
         k_range: Iterable[int],
         *,
         method: Optional[str] = None,
-        n_runs: int = 10,
-        max_iter: int = 25,
-        n_subsample: int = 3000,
+        n_runs: int = 50,
+        max_iter: int = 50,
         sparsity: float = 0.0,
         smoothness: float = 0.0,
         seed: int = 0,
     ) -> pd.DataFrame:
-        """Brunet-style rank selection (cNMF-equivalent).
+        """cNMF-style rank selection — silhouette of spectra k-means clusters.
 
-        For each ``K`` in ``k_range`` runs NMF ``n_runs`` times with different
-        random seeds and reports:
+        For each ``K`` in ``k_range``:
 
-        - **mean reconstruction error** (lower → better fit)
-        - **dispersion coefficient** ρ = (1/n²) Σ 4·(C̄ - 0.5)²
-          (Kim-Park 2007; higher → more stable consensus)
-        - **silhouette score** of the consensus matrix
-          (Brunet 2004; higher → tighter K-clusters of the consensus)
+        1. Run NMF ``n_runs`` times with different random seeds.
+        2. Stack all ``n_runs·K`` factor vectors (each length-`n_genes`,
+           L2-normalised) and compute pair-wise Euclidean distances.
+        3. K-means cluster the spectra into K groups.
+        4. **Silhouette** of that K-clustering (tighter clusters → factors
+           reproduce reliably across runs → higher silhouette).
+        5. **Mean reconstruction loss** across runs.
 
-        The recommended K is where stability stays high AND reconstruction
-        has plateaued — usually the elbow on the stability-vs-K curve.
+        This is the canonical cNMF / Kotliar 2019 approach (and matches
+        ``cnmf_obj.k_selection_plot``). The recommended K is at the
+        silhouette elbow before reconstruction plateaus.
+
+        Defaults are tuned to actually produce a clean elbow:
+        ``n_runs=50, max_iter=50``. cNMF uses 200 / 500 — increase if your
+        K curves still look noisy.
 
         Returns
         -------
-        DataFrame with columns ``rank, mean_loss, dispersion, silhouette``.
+        DataFrame with columns ``rank, mean_loss, silhouette``.
         Use :meth:`k_selection_plot` to visualise.
         """
         nmf_rs = _import_nmf_rs()
         if self._V is None:
-            # Fit hasn't run yet; load V from the cached AnnData view.
             self._V = _to_dense_genes_x_cells(self._adata_view, self.layer)
         method = method or "dnmf"
         rng = np.random.default_rng(seed)
-        n_cells = self._V.shape[1]
-        if n_subsample < n_cells:
-            sub_idx = rng.choice(n_cells, n_subsample, replace=False)
-            sub_idx.sort()
-        else:
-            sub_idx = np.arange(n_cells)
-        N = sub_idx.size
 
         kw_extras = {}
         if method.lower() in {"snmf/r", "snmf_r", "snmfr", "snmf/l", "snmf_l",
@@ -315,11 +312,20 @@ class NMF:
             kw_extras["sparsity"] = float(sparsity)
             kw_extras["smoothness"] = float(smoothness)
 
+        try:
+            from scipy.spatial.distance import pdist, squareform
+            from sklearn.cluster import KMeans
+            from sklearn.metrics import silhouette_score
+        except ImportError as e:
+            raise ImportError(
+                "select_k_brunet() requires scikit-learn + scipy"
+            ) from e
+
         rows = []
         for k in k_range:
-            consensus = np.zeros((N, N), dtype=np.float64)
-            losses = []
-            for _ in range(n_runs):
+            spectra_cols: List[np.ndarray] = []
+            losses: List[float] = []
+            for _ in range(int(n_runs)):
                 run_seed = int(rng.integers(0, 2**31 - 1))
                 W0, H0 = nmf_rs.random_init(self._V, int(k), seed=run_seed)
                 res = nmf_rs.nmf(
@@ -329,42 +335,83 @@ class NMF:
                     **kw_extras,
                 )
                 losses.append(0.5 * float(np.linalg.norm(self._V - res.fitted()) ** 2))
-                cluster = np.argmax(res.H[:, sub_idx], axis=0)
-                consensus += (cluster[:, None] == cluster[None, :]).astype(np.float64)
-            consensus /= n_runs
-            disp = float((4.0 * (consensus - 0.5) ** 2).mean())
-            sil = self._consensus_silhouette(consensus, int(k))
+                W = res.W
+                norms = np.linalg.norm(W, axis=0, keepdims=True)
+                norms = np.where(norms > 0, norms, 1.0)
+                spectra_cols.append(W / norms)
+            spectra = np.hstack(spectra_cols).T          # (n_runs·k, n_genes)
+            # Pair-wise distance + silhouette of k-means clustering.
+            dist = squareform(pdist(spectra, metric="euclidean"))
+            km = KMeans(n_clusters=int(k), n_init=10, random_state=int(seed))
+            labels = km.fit_predict(spectra)
+            if len(set(labels)) < 2:
+                sil = float("nan")
+            else:
+                sil = float(silhouette_score(dist, labels, metric="precomputed"))
             rows.append({
                 "rank": int(k),
                 "mean_loss": float(np.mean(losses)),
-                "dispersion": disp,
                 "silhouette": sil,
             })
 
         df = pd.DataFrame(rows)
         self._k_selection = df
         self._k_selection_mode = "brunet"
+        self._auto_k = self._stability_drop_k(df["rank"].to_numpy(),
+                                               df["silhouette"].to_numpy())
         return df
 
     @staticmethod
-    def _consensus_silhouette(consensus: np.ndarray, k: int) -> float:
-        """Silhouette of the K-cluster partition of the consensus matrix."""
-        try:
-            from scipy.cluster.hierarchy import linkage, fcluster
-            from scipy.spatial.distance import squareform
-            from sklearn.metrics import silhouette_score
-        except ImportError:
-            return float("nan")
-        if consensus.shape[0] < k + 1:
-            return float("nan")
-        dist = 1.0 - consensus
-        np.fill_diagonal(dist, 0.0)
-        cond = squareform(dist, checks=False)
-        Z = linkage(cond, method="average")
-        labels = fcluster(Z, t=k, criterion="maxclust")
-        if len(set(labels)) < 2:
-            return float("nan")
-        return float(silhouette_score(dist, labels, metric="precomputed"))
+    def _stability_drop_k(ranks: np.ndarray, sil: np.ndarray,
+                           plateau_tol: float = -0.01) -> int:
+        """Auto-pick K via the **stability-drop heuristic**.
+
+        Combines two well-cited NMF rank-selection ideas:
+
+        - Brunet et al. PNAS 2004: pick K just before consensus stability
+          drops sharply (originally on cophenetic correlation; we use the
+          factor silhouette as a closely related but more robust statistic).
+        - Kim-Park 2007: prefer K at a *local maximum* of the stability
+          profile, not just the global peak.
+
+        Algorithm: for each interior K, score it by the size of the silhouette
+        drop from K to K+1, gated by the requirement that the silhouette
+        held flat (or rose) coming into K — i.e. K is the end of a plateau
+        right before a sharp drop. Return the K with maximum score.
+        Falls back to the largest local peak if no plateau-drop pattern is
+        detected (e.g. monotonic curves).
+        """
+        ranks = np.asarray(ranks); sil = np.asarray(sil, dtype=float)
+        if len(ranks) < 3:
+            return int(ranks[int(np.argmax(sil))])
+        # First differences: dy[i] = sil[i+1] - sil[i].
+        dy = np.diff(sil)
+        # Score interior points where (left ≥ tol) and (right < 0).
+        score = np.zeros(len(ranks))
+        for i in range(1, len(ranks) - 1):
+            left = dy[i - 1]    # change INTO ranks[i]
+            right = dy[i]        # change AFTER ranks[i]
+            if left >= plateau_tol and right < 0:
+                score[i] = abs(right)
+        if score.max() > 0:
+            return int(ranks[int(np.argmax(score))])
+        # Fallback: largest local peak (handles monotonic curves).
+        local = []
+        for i in range(len(ranks)):
+            ok_left = (i == 0) or sil[i] >= sil[i - 1]
+            ok_right = (i == len(ranks) - 1) or sil[i] >= sil[i + 1]
+            if ok_left and ok_right:
+                local.append(int(ranks[i]))
+        if local:
+            return max(local)
+        return int(ranks[int(np.argmax(sil))])
+
+    @property
+    def auto_k(self) -> int:
+        """K auto-selected by the most recent ``select_k_brunet`` run."""
+        if not hasattr(self, "_auto_k"):
+            raise RuntimeError("call select_k_brunet() first")
+        return self._auto_k
 
     def k_selection_plot(
         self,
@@ -399,16 +446,29 @@ class NMF:
             ax.set_title("CV rank selection — test-MSE plateau picks K")
             ax.grid(alpha=0.3)
         else:
-            # Brunet mode: stability (left axis) + reconstruction (right axis)
+            # Brunet/cNMF mode: silhouette (left axis) + reconstruction (right).
             agg = df.set_index("rank").sort_index()
-            ax.plot(agg.index, agg["dispersion"], "o-", lw=1.8,
-                    color="#cc6677", label="dispersion ρ (stability)")
-            ax.plot(agg.index, agg["silhouette"], "s--", lw=1.2,
-                    color="#882255", alpha=0.7, label="silhouette")
-            ax.set_xlabel("rank (number of factors)")
-            ax.set_ylabel("stability (higher = better)", color="#cc6677")
+            ax.plot(agg.index, agg["silhouette"], "o-", lw=2.0,
+                    color="#cc6677", label="silhouette (factor stability)")
+            sil_vals = agg["silhouette"].to_numpy()
+            ranks_arr = agg.index.to_numpy()
+
+            # Auto-K via the stability-drop heuristic (Brunet 2004 +
+            # Kim-Park 2007). This is the same K our ``auto_k`` property
+            # returns; it picks the K right before the biggest stability
+            # drop, gated by a plateau / rise into K.
+            auto_k = NMF._stability_drop_k(ranks_arr, sil_vals)
+            ax.axvline(auto_k, color="#882255", lw=1.2, ls="--", alpha=0.85)
+            ax.text(
+                auto_k, agg.loc[auto_k, "silhouette"],
+                f"  auto K = {auto_k}",
+                color="#882255", fontsize=10, va="bottom", ha="left",
+                fontweight="bold",
+            )
+            ax.set_xlabel("rank (K)")
+            ax.set_ylabel("silhouette (higher = better)", color="#cc6677")
             ax.tick_params(axis='y', labelcolor="#cc6677")
-            ax.set_ylim(-0.05, 1.05)
+            ax.set_ylim(0, 1.0)
             ax.grid(alpha=0.3)
             ax2 = ax.twinx()
             ax2.plot(agg.index, agg["mean_loss"], "^-", lw=1.8,
@@ -418,9 +478,12 @@ class NMF:
             lines1, labels1 = ax.get_legend_handles_labels()
             lines2, labels2 = ax2.get_legend_handles_labels()
             ax.legend(lines1 + lines2, labels1 + labels2,
-                      loc="lower center", bbox_to_anchor=(0.5, -0.45),
+                      loc="lower center", bbox_to_anchor=(0.5, -0.42),
                       ncol=2, fontsize=8)
-            ax.set_title("Brunet-style K selection — stability vs reconstruction")
+            ax.set_title(
+                "cNMF-style K selection — pick the K with peak silhouette",
+                fontsize=10,
+            )
         fig.tight_layout()
         return ax
 
