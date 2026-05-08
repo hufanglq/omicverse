@@ -261,29 +261,166 @@ class NMF:
             num_threads=self.num_threads,
         )
         self._k_selection = df
+        self._k_selection_mode = "cv"
         return df
+
+    def select_k_brunet(
+        self,
+        k_range: Iterable[int],
+        *,
+        method: Optional[str] = None,
+        n_runs: int = 10,
+        max_iter: int = 25,
+        n_subsample: int = 3000,
+        sparsity: float = 0.0,
+        smoothness: float = 0.0,
+        seed: int = 0,
+    ) -> pd.DataFrame:
+        """Brunet-style rank selection (cNMF-equivalent).
+
+        For each ``K`` in ``k_range`` runs NMF ``n_runs`` times with different
+        random seeds and reports:
+
+        - **mean reconstruction error** (lower → better fit)
+        - **dispersion coefficient** ρ = (1/n²) Σ 4·(C̄ - 0.5)²
+          (Kim-Park 2007; higher → more stable consensus)
+        - **silhouette score** of the consensus matrix
+          (Brunet 2004; higher → tighter K-clusters of the consensus)
+
+        The recommended K is where stability stays high AND reconstruction
+        has plateaued — usually the elbow on the stability-vs-K curve.
+
+        Returns
+        -------
+        DataFrame with columns ``rank, mean_loss, dispersion, silhouette``.
+        Use :meth:`k_selection_plot` to visualise.
+        """
+        nmf_rs = _import_nmf_rs()
+        if self._V is None:
+            # Fit hasn't run yet; load V from the cached AnnData view.
+            self._V = _to_dense_genes_x_cells(self._adata_view, self.layer)
+        method = method or "dnmf"
+        rng = np.random.default_rng(seed)
+        n_cells = self._V.shape[1]
+        if n_subsample < n_cells:
+            sub_idx = rng.choice(n_cells, n_subsample, replace=False)
+            sub_idx.sort()
+        else:
+            sub_idx = np.arange(n_cells)
+        N = sub_idx.size
+
+        kw_extras = {}
+        if method.lower() in {"snmf/r", "snmf_r", "snmfr", "snmf/l", "snmf_l",
+                               "snmfl", "dnmf", "rcppml", "diag_nmf"}:
+            kw_extras["sparsity"] = float(sparsity)
+            kw_extras["smoothness"] = float(smoothness)
+
+        rows = []
+        for k in k_range:
+            consensus = np.zeros((N, N), dtype=np.float64)
+            losses = []
+            for _ in range(n_runs):
+                run_seed = int(rng.integers(0, 2**31 - 1))
+                W0, H0 = nmf_rs.random_init(self._V, int(k), seed=run_seed)
+                res = nmf_rs.nmf(
+                    self._V, rank=int(k), method=method,
+                    W0=W0, H0=H0, max_iter=int(max_iter),
+                    num_threads=self.num_threads,
+                    **kw_extras,
+                )
+                losses.append(0.5 * float(np.linalg.norm(self._V - res.fitted()) ** 2))
+                cluster = np.argmax(res.H[:, sub_idx], axis=0)
+                consensus += (cluster[:, None] == cluster[None, :]).astype(np.float64)
+            consensus /= n_runs
+            disp = float((4.0 * (consensus - 0.5) ** 2).mean())
+            sil = self._consensus_silhouette(consensus, int(k))
+            rows.append({
+                "rank": int(k),
+                "mean_loss": float(np.mean(losses)),
+                "dispersion": disp,
+                "silhouette": sil,
+            })
+
+        df = pd.DataFrame(rows)
+        self._k_selection = df
+        self._k_selection_mode = "brunet"
+        return df
+
+    @staticmethod
+    def _consensus_silhouette(consensus: np.ndarray, k: int) -> float:
+        """Silhouette of the K-cluster partition of the consensus matrix."""
+        try:
+            from scipy.cluster.hierarchy import linkage, fcluster
+            from scipy.spatial.distance import squareform
+            from sklearn.metrics import silhouette_score
+        except ImportError:
+            return float("nan")
+        if consensus.shape[0] < k + 1:
+            return float("nan")
+        dist = 1.0 - consensus
+        np.fill_diagonal(dist, 0.0)
+        cond = squareform(dist, checks=False)
+        Z = linkage(cond, method="average")
+        labels = fcluster(Z, t=k, criterion="maxclust")
+        if len(set(labels)) < 2:
+            return float("nan")
+        return float(silhouette_score(dist, labels, metric="precomputed"))
 
     def k_selection_plot(
         self,
         ax=None,
         *,
-        figsize: Tuple[int, int] = (5, 3),
+        figsize: Tuple[int, int] = (6, 3),
     ):
-        """Plot test-MSE vs rank from the most recent ``select_k`` run."""
-        if self._k_selection is None:
-            raise RuntimeError("call select_k() first")
+        """Plot rank-selection curves from the most recent ``select_k*`` run.
+
+        - ``select_k`` (CV mode): single-axis plot of test-MSE vs K.
+        - ``select_k_brunet`` (consensus mode): twin-axis plot of stability
+          (dispersion coefficient, left) and reconstruction error (right) vs K,
+          mirroring cNMF's ``k_selection_plot``. Recommended K is where the
+          stability curve has its kink and the error curve has flattened.
+        """
+        if getattr(self, "_k_selection", None) is None:
+            raise RuntimeError("call select_k() or select_k_brunet() first")
         import matplotlib.pyplot as plt
+        df = self._k_selection
+        mode = getattr(self, "_k_selection_mode", "cv")
         if ax is None:
             fig, ax = plt.subplots(figsize=figsize)
         else:
             fig = ax.figure
-        agg = self._k_selection.groupby("rank")["test_mse"].agg(["mean", "std"])
-        ax.errorbar(agg.index, agg["mean"], yerr=agg["std"], fmt="-o",
-                    capsize=3, lw=1.5, color="#cc6677")
-        ax.set_xlabel("rank (number of factors)")
-        ax.set_ylabel("held-out test MSE")
-        ax.set_title("CV rank selection — test-MSE plateau picks K")
-        ax.grid(alpha=0.3)
+
+        if mode == "cv":
+            agg = df.groupby("rank")["test_mse"].agg(["mean", "std"])
+            ax.errorbar(agg.index, agg["mean"], yerr=agg["std"], fmt="-o",
+                        capsize=3, lw=1.5, color="#cc6677")
+            ax.set_xlabel("rank (number of factors)")
+            ax.set_ylabel("held-out test MSE")
+            ax.set_title("CV rank selection — test-MSE plateau picks K")
+            ax.grid(alpha=0.3)
+        else:
+            # Brunet mode: stability (left axis) + reconstruction (right axis)
+            agg = df.set_index("rank").sort_index()
+            ax.plot(agg.index, agg["dispersion"], "o-", lw=1.8,
+                    color="#cc6677", label="dispersion ρ (stability)")
+            ax.plot(agg.index, agg["silhouette"], "s--", lw=1.2,
+                    color="#882255", alpha=0.7, label="silhouette")
+            ax.set_xlabel("rank (number of factors)")
+            ax.set_ylabel("stability (higher = better)", color="#cc6677")
+            ax.tick_params(axis='y', labelcolor="#cc6677")
+            ax.set_ylim(-0.05, 1.05)
+            ax.grid(alpha=0.3)
+            ax2 = ax.twinx()
+            ax2.plot(agg.index, agg["mean_loss"], "^-", lw=1.8,
+                     color="#4477aa", label="mean reconstruction loss")
+            ax2.set_ylabel("reconstruction loss (lower = better)", color="#4477aa")
+            ax2.tick_params(axis='y', labelcolor="#4477aa")
+            lines1, labels1 = ax.get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax.legend(lines1 + lines2, labels1 + labels2,
+                      loc="lower center", bbox_to_anchor=(0.5, -0.45),
+                      ncol=2, fontsize=8)
+            ax.set_title("Brunet-style K selection — stability vs reconstruction")
         fig.tight_layout()
         return ax
 
@@ -485,6 +622,165 @@ class NMF:
         fig.colorbar(im, ax=ax, label="loading")
         fig.tight_layout()
         return ax
+
+    def consensus(
+        self,
+        *,
+        n_runs: int = 10,
+        method: Optional[str] = None,
+        init: str = "random",
+        max_iter: int = 25,
+        n_subsample: int = 3000,
+        sparsity: float = 0.0,
+        smoothness: float = 0.0,
+        seed: int = 0,
+    ) -> np.ndarray:
+        """Compute the Brunet 2004 consensus matrix.
+
+        Runs NMF ``n_runs`` times with different random seeds (so each run
+        finds a possibly different local minimum), assigns each cell to its
+        argmax-factor in every run, and averages the resulting binary
+        co-cluster matrices into a single consensus matrix C̄ (cells × cells,
+        values in [0, 1]). Stable factorisations have C̄ close to {0, 1}
+        (cells either always co-cluster or never).
+
+        Memory note: the consensus matrix is N × N where N = ``n_subsample``
+        (or ``n_cells`` if smaller). For 3000 cells it's 72 MB — manageable.
+        For atlas-scale data set ``n_subsample`` ≤ 3000 to keep memory bounded.
+
+        Parameters
+        ----------
+        n_runs : int
+            Number of independent NMF runs (Brunet et al. recommend 30+;
+            10 is fine for visualisation purposes).
+        method : str, optional
+            Algorithm to run; falls back to ``self.method`` (the most recent
+            ``fit()``) when ``None``.
+        init : {'random', 'nndsvd'}
+            Use ``'random'`` for proper consensus (NNDSVD is deterministic
+            given V/rank → all runs identical → consensus trivially 1.0).
+        n_subsample : int
+            Maximum cell count for the consensus matrix. Cells are randomly
+            sampled if there are more.
+
+        Returns
+        -------
+        consensus : (N, N) np.ndarray, with N = min(n_cells, n_subsample).
+
+        Side effects
+        ------------
+        Stores ``self._consensus`` and ``self._consensus_idx`` (the
+        subsampled cell indices) for use by :meth:`plot_consensus_heatmap`.
+        """
+        nmf_rs = _import_nmf_rs()
+        if self._V is None:
+            raise RuntimeError(
+                "call .fit() at least once first (consensus reuses the "
+                "preprocessed V)"
+            )
+        method = method or self.method or "dnmf"
+        n_cells = self._V.shape[1]
+        rng_top = np.random.default_rng(seed)
+        if n_subsample < n_cells:
+            sub_idx = rng_top.choice(n_cells, n_subsample, replace=False)
+            sub_idx.sort()
+        else:
+            sub_idx = np.arange(n_cells)
+        N = sub_idx.size
+
+        consensus = np.zeros((N, N), dtype=np.float64)
+        kw_extras = {}
+        if method.lower() in {"snmf/r", "snmf_r", "snmfr", "snmf/l", "snmf_l",
+                               "snmfl", "dnmf", "rcppml", "diag_nmf"}:
+            kw_extras["sparsity"] = float(sparsity)
+            kw_extras["smoothness"] = float(smoothness)
+
+        for run in range(n_runs):
+            if init == "nndsvd":
+                W0, H0 = nmf_rs.nndsvd_init(self._V, self.rank, fill="mean", seed=int(rng_top.integers(0, 2**31 - 1)))
+            else:
+                W0, H0 = nmf_rs.random_init(self._V, self.rank, seed=int(rng_top.integers(0, 2**31 - 1)))
+            res = nmf_rs.nmf(
+                self._V, rank=self.rank, method=method,
+                W0=W0, H0=H0, max_iter=int(max_iter),
+                num_threads=self.num_threads,
+                **kw_extras,
+            )
+            cluster = np.argmax(res.H[:, sub_idx], axis=0)
+            consensus += (cluster[:, None] == cluster[None, :]).astype(np.float64)
+        consensus /= n_runs
+        self._consensus = consensus
+        self._consensus_idx = sub_idx
+        return consensus
+
+    def plot_consensus_heatmap(
+        self,
+        *,
+        figsize: Tuple[int, int] = (6, 6),
+        cmap: str = "RdBu_r",
+        cluster_cmap: str = "Spectral",
+        show_dendrogram: bool = False,
+    ):
+        """Plot the consensus matrix re-ordered by hierarchical clustering.
+
+        Reproduces the canonical Brunet 2004 consensus heatmap. Cells along
+        both axes are reordered by average-linkage on ``1 - C̄``; a
+        secondary track on the left and top shows the K-means cluster
+        assignment from the same hierarchy. A perfectly stable factorisation
+        looks like K diagonal blocks of solid red against a blue background.
+        """
+        if not hasattr(self, "_consensus"):
+            raise RuntimeError("call .consensus() first")
+        from scipy.cluster.hierarchy import linkage, fcluster
+        from scipy.spatial.distance import squareform
+        import matplotlib.pyplot as plt
+        from matplotlib import gridspec
+
+        C = self._consensus
+        # Hierarchical clustering on 1-C̄ to get a row/column order.
+        cond = squareform(1.0 - C, checks=False)
+        Z = linkage(cond, method="average")
+        # K clusters for the side-track colour bar.
+        cluster = fcluster(Z, t=self.rank, criterion="maxclust")
+        # Order cells by cluster, then by original index within cluster.
+        order = np.lexsort((np.arange(C.shape[0]), cluster))
+
+        # Compose figure: cluster track (left), heatmap, colourbar.
+        fig = plt.figure(figsize=figsize)
+        gs = gridspec.GridSpec(
+            2, 3, figure=fig,
+            width_ratios=[0.04, 1.0, 0.04], height_ratios=[0.04, 1.0],
+            wspace=0.02, hspace=0.02,
+        )
+        # Top track.
+        ax_top = fig.add_subplot(gs[0, 1])
+        ax_top.imshow(cluster[order].reshape(1, -1), aspect="auto",
+                      cmap=cluster_cmap, interpolation="nearest")
+        ax_top.set_xticks([]); ax_top.set_yticks([])
+        # Left track.
+        ax_left = fig.add_subplot(gs[1, 0])
+        ax_left.imshow(cluster[order].reshape(-1, 1), aspect="auto",
+                       cmap=cluster_cmap, interpolation="nearest")
+        ax_left.set_xticks([]); ax_left.set_yticks([])
+        # Main heatmap.
+        ax_main = fig.add_subplot(gs[1, 1])
+        im = ax_main.imshow(
+            C[order, :][:, order],
+            aspect="auto", cmap=cmap, vmin=0.0, vmax=1.0,
+            interpolation="nearest",
+        )
+        ax_main.set_xticks([]); ax_main.set_yticks([])
+        ax_main.set_xlabel(f"cell (re-ordered, n={C.shape[0]})")
+        ax_main.set_ylabel("cell (re-ordered)")
+        # Colourbar.
+        ax_cb = fig.add_subplot(gs[1, 2])
+        fig.colorbar(im, cax=ax_cb)
+        ax_cb.set_ylabel("co-cluster fraction")
+        ax_main.set_title(
+            f"Consensus matrix ({self.method}, K={self.rank}, "
+            f"n_runs ≈ {C.shape[0]})"
+        )
+        return ax_main
 
     def plot_loss(self, ax=None, *, figsize: Tuple[int, int] = (5, 3)):
         """Plot the ``deviances`` trace (only available when ``stop='stationary'``)."""
