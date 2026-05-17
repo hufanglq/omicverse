@@ -5,7 +5,22 @@ import os
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from transformers.generation.utils import SampleDecoderOnlyOutput
+# See companion comment in model.py — defensive import to span the
+# pre/post-v4.45 transformers rename, with a local dataclass fallback.
+try:
+    from transformers.generation.utils import SampleDecoderOnlyOutput
+except ImportError:
+    try:
+        from transformers.generation.utils import (
+            GenerateDecoderOnlyOutput as SampleDecoderOnlyOutput,
+        )
+    except ImportError:
+        @dataclass
+        class SampleDecoderOnlyOutput:
+            sequences: Optional[torch.LongTensor] = None
+            scores: Optional[Tuple[torch.FloatTensor]] = None
+            attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+            hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
 
 
 class LayerNorm(nn.Module):
