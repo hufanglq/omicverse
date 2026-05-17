@@ -253,6 +253,7 @@ def _install_single_dependency_stubs():
         "omicverse.single._cellvote": {
             "get_cluster_celltype": object(),
             "CellVote": object(),
+            "cellvote_consensus_score": object(),
         },
         "omicverse.single._deg_ct": {"DCT": object(), "DEG": object()},
         "omicverse.single._lazy_function": {"lazy": object()},
