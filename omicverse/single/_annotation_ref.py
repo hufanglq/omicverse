@@ -64,6 +64,8 @@ class AnnotationRef(object):
         self.adata_query = adata_query
         self.adata_ref = adata_ref
         self.celltype_key = celltype_key
+        # TOSICA-trained classifier (populated by train(method='TOSICA'))
+        self._tosica_obj = None
 
         #check var names 
         both_var_names = list(set(adata_query.var_names) & set(adata_ref.var_names))
@@ -174,6 +176,44 @@ class AnnotationRef(object):
             self.adata_query.obsm['X_scanorama_anno']=self.adata_new[self.adata_query.obs.index].obsm['X_scanorama']
             self.adata_ref.obsm['X_scanorama_anno']=self.adata_new[self.adata_ref.obs.index].obsm['X_scanorama']
             print(f"Scanorama integrated embeddings saved to self.adata_query.obsm['X_scanorama'] and self.adata_ref.obsm['X_scanorama']")
+        elif method=='TOSICA':
+            # TOSICA is a transformer-based ref classifier — no shared
+            # embedding step. Train on the reference; the trained model
+            # is stashed on `self` so a subsequent predict(method='TOSICA')
+            # can use it without further setup.
+            from ._tosica import pyTOSICA
+            gmt_path = kwargs.pop('gmt_path', None)
+            project_path = kwargs.pop('project_path', 'tosica_project')
+            label_name = kwargs.pop('label_name', self.celltype_key)
+            epochs = kwargs.pop('epochs', 5)
+            lr = kwargs.pop('lr', 0.001)
+            lrf = kwargs.pop('lrf', 0.01)
+            pre_weights = kwargs.pop('pre_weights', '')
+            save_path = kwargs.pop('save_path', None)
+            # Pass-through TOSICA constructor knobs
+            tosica_ctor_keys = {
+                'mask_ratio', 'max_g', 'max_gs', 'n_unannotated',
+                'embed_dim', 'depth', 'num_heads', 'batch_size',
+                'device', 'auto_download',
+            }
+            ctor_kwargs = {k: kwargs.pop(k) for k in list(kwargs.keys()) if k in tosica_ctor_keys}
+            self._tosica_obj = pyTOSICA(
+                adata=self.adata_ref,
+                project_path=project_path,
+                gmt_path=gmt_path,
+                label_name=label_name,
+                **ctor_kwargs,
+            )
+            self._tosica_obj.train(
+                pre_weights=pre_weights, lr=lr, epochs=epochs, lrf=lrf,
+            )
+            if save_path:
+                self._tosica_obj.save(save_path=save_path)
+            print(
+                f"TOSICA model trained on reference "
+                f"(epochs={epochs}); "
+                "call predict(method='TOSICA') to score the query."
+            )
         else:
             raise ValueError(f"Unsupported method: {method}")
         return self.adata_query
@@ -186,8 +226,11 @@ class AnnotationRef(object):
 
         Parameters
         ----------
-        method : {'harmony', 'scVI', 'scanorama'}
-            Integration space used for kNN transfer.
+        method : {'harmony', 'scVI', 'scanorama', 'TOSICA'}
+            Label-transfer backend. ``harmony``/``scVI``/``scanorama``
+            run weighted kNN in a shared integrated embedding; ``TOSICA``
+            uses the transformer classifier trained by
+            ``train(method='TOSICA')`` to predict directly.
         n_neighbors : int
             Number of neighbors in the weighted kNN model.
         pred_key : str or None
@@ -236,9 +279,39 @@ class AnnotationRef(object):
             if uncert_key is None:
                 uncert_key='scanorama_uncertainty'
             emb_key='X_scanorama_anno'
+        elif method=='TOSICA':
+            # TOSICA uses a trained classifier rather than weighted kNN
+            # over a shared embedding. The trained model is on
+            # `self._tosica_obj` (set by `train(method='TOSICA')`); call
+            # its `predicted()` and merge labels back into adata_query.
+            if not hasattr(self, '_tosica_obj') or self._tosica_obj is None:
+                raise RuntimeError(
+                    "TOSICA model not trained. Call "
+                    "`train(method='TOSICA', ...)` first."
+                )
+            if pred_key is None:
+                pred_key = 'TOSICA_prediction'
+            if uncert_key is None:
+                uncert_key = 'TOSICA_probability'
+            new = self._tosica_obj.predicted(pre_adata=self.adata_query)
+            # `new.obs` is indexed by adata_query.obs_names — copy the
+            # two columns of interest back to the original query AnnData.
+            self.adata_query.obs[pred_key] = (
+                new.obs['Prediction']
+                   .reindex(self.adata_query.obs_names)
+                   .astype('category')
+            )
+            self.adata_query.obs[uncert_key] = (
+                new.obs['Probability']
+                   .reindex(self.adata_query.obs_names)
+                   .astype(float)
+            )
+            print(f"{pred_key} saved to adata.obs['{pred_key}']")
+            print(f"{uncert_key} saved to adata.obs['{uncert_key}']")
+            return self.adata_query
         else:
             raise ValueError(f"Unsupported method: {method}")
-        
+
         from ..utils._knn import weighted_knn_trainer,weighted_knn_transfer
         knn_transformer=weighted_knn_trainer(
             train_adata=self.adata_ref,

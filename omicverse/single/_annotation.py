@@ -388,7 +388,7 @@ class Annotation(object):
 
         Parameters
         ----------
-        method : {'celltypist', 'scsa', 'gpt4celltype', 'scMulan', 'harmony', 'scVI', 'scanorama'}
+        method : {'celltypist', 'scsa', 'gpt4celltype', 'scMulan', 'MetaTiME', 'harmony', 'scVI', 'scanorama', 'TOSICA'}
             Annotation backend.
         cluster_key : str
             Cluster label key used by marker-based methods (SCSA/GPT4CellType).
@@ -473,6 +473,46 @@ class Annotation(object):
             self.adata.obs['gpt4celltype_prediction'] = self.adata.obs[cluster_key].map(result).astype('category')
             print(f"GPT4celltype prediction saved to adata.obs['gpt4celltype_prediction']")
             return result
+        elif method=='MetaTiME':
+            # MetaTiME (Yan et al. *Nat Comm* 2023) projects cells onto a
+            # bank of pre-trained meta-components and assigns a TME
+            # cell-state label per overclustered group. The class is
+            # defined in `_anno.py` and gated by `check_metatime()` at
+            # __init__ — so the import is cheap even when the optional
+            # `metatime` dependency isn't installed.
+            from ._anno import MetaTiME
+
+            mode = kwargs.pop('mode', 'table')
+            resolution = kwargs.pop('resolution', 8)
+            overcluster_key = kwargs.pop('overcluster_key', 'overcluster')
+            save_obs_name = kwargs.pop('save_obs_name', 'MetaTiME')
+            random_state = kwargs.pop('random_state', 0)
+
+            time_obj = MetaTiME(self.adata, mode=mode)
+            time_obj.overcluster(
+                resolution=resolution,
+                clustercol=overcluster_key,
+                random_state=random_state,
+            )
+            time_obj.predictTiME(save_obs_name=save_obs_name)
+
+            # Mirror the *_prediction convention used by celltypist / scsa
+            # / gpt4celltype / scMulan so downstream tools (CellVote) can
+            # treat MetaTiME like any other method without special-casing
+            # the column name.
+            self.adata.obs['MetaTiME_prediction'] = (
+                self.adata.obs[save_obs_name].astype('category')
+            )
+            major_col = f'Major_{save_obs_name}'
+            if major_col in self.adata.obs.columns:
+                self.adata.obs['MetaTiME_major_prediction'] = (
+                    self.adata.obs[major_col].astype('category')
+                )
+            print(
+                f"MetaTiME prediction saved to adata.obs['{save_obs_name}'] "
+                "(alias: adata.obs['MetaTiME_prediction'])"
+            )
+            return time_obj
         elif method=='scMulan':
             # Lazy-import: scMulan pulls torch + a large checkpoint loader,
             # so we only touch it when this branch is actually requested.
@@ -546,10 +586,20 @@ class Annotation(object):
             )
 
             # Optional smoothing pass — writes a separate column so the
-            # raw vs smoothed labels can be compared.
+            # raw vs smoothed labels can be compared. scMulan stores its
+            # learned embedding under `obsm['X_scMulan']`, not the
+            # default `X_pca` that `cell_type_smoothing` expects, so
+            # point it at the right rep explicitly.
             if smoothing_threshold is not None:
+                smoothing_rep = (
+                    'X_scMulan'
+                    if 'X_scMulan' in scml.adata.obsm
+                    else 'X_pca'
+                )
                 _scmulan_mod.cell_type_smoothing(
-                    scml.adata, threshold=smoothing_threshold,
+                    scml.adata,
+                    threshold=smoothing_threshold,
+                    use_rep=smoothing_rep,
                 )
                 smooth_col = 'cell_type_from_mulan_smoothing'
                 if smooth_col in scml.adata.obs.columns:
@@ -586,6 +636,31 @@ class Annotation(object):
             annotation_ref.train(method='scanorama',**kwargs)
             annotation_ref.predict(method='scanorama',n_neighbors=15,
                 pred_key='scanorama_prediction',uncert_key='scanorama_uncertainty',**kwargs)
+            return annotation_ref.adata_query
+        elif method=='TOSICA':
+            # TOSICA is a transformer classifier — no shared embedding
+            # step. AnnotationRef.train(method='TOSICA') consumes the
+            # TOSICA-specific kwargs (gmt_path / project_path / epochs /
+            # lr / etc.) and stashes the trained model; .predict scores
+            # the query.
+            from ._annotation_ref import AnnotationRef
+            annotation_ref = AnnotationRef(
+                adata_query=self.adata,
+                adata_ref=self.adata_ref,
+                celltype_key=self.celltype_key,
+            )
+            # Split kwargs: train vs predict. predict takes only
+            # pred_key/uncert_key here.
+            pred_key = kwargs.pop('pred_key', 'TOSICA_prediction')
+            uncert_key = kwargs.pop('uncert_key', 'TOSICA_probability')
+            annotation_ref.train(method='TOSICA', **kwargs)
+            annotation_ref.predict(
+                method='TOSICA',
+                pred_key=pred_key,
+                uncert_key=uncert_key,
+            )
+            self.adata.obs[pred_key] = annotation_ref.adata_query.obs[pred_key]
+            self.adata.obs[uncert_key] = annotation_ref.adata_query.obs[uncert_key]
             return annotation_ref.adata_query
         else:
             raise ValueError(f"Unsupported method: {method}")

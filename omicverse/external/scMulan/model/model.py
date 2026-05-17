@@ -5,7 +5,29 @@ import os
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from transformers.generation.utils import SampleDecoderOnlyOutput
+# Transformers renamed SampleDecoderOnlyOutput → GenerateDecoderOnlyOutput
+# around v4.45; older versions only have the former. scMulan only uses this
+# as a return-type carrier (sequences/scores/attentions/hidden_states +
+# expression), so a local dataclass fallback is fine when neither name is
+# importable. This keeps the published checkpoint weight-compatible — no
+# retraining needed — while letting the package install across a wide
+# range of transformers versions.
+try:
+    from transformers.generation.utils import SampleDecoderOnlyOutput
+except ImportError:
+    try:
+        from transformers.generation.utils import (
+            GenerateDecoderOnlyOutput as SampleDecoderOnlyOutput,
+        )
+    except ImportError:
+        from dataclasses import dataclass
+        from typing import Optional, Tuple
+        @dataclass
+        class SampleDecoderOnlyOutput:
+            sequences: Optional["torch.LongTensor"] = None
+            scores: Optional[Tuple["torch.FloatTensor"]] = None
+            attentions: Optional[Tuple[Tuple["torch.FloatTensor"]]] = None
+            hidden_states: Optional[Tuple[Tuple["torch.FloatTensor"]]] = None
 
 
 class LayerNorm(nn.Module):

@@ -76,13 +76,27 @@ def global_imports(modulename,shortname = None, asfunction = False):
 metatime_install=False
 def check_metatime():
     r"""Check if metatime is installed and import it.
-    
+
     Returns
     -------
     None
         Raises ``ImportError`` if ``metatime`` is unavailable.
+
+    Notes
+    -----
+    `metatime` (current release 1.3.0) still references the deprecated
+    `np.float` alias that NumPy removed in 1.24. We restore the alias as
+    a compat shim before the import so the package keeps working on
+    modern NumPy — no upstream fork required.
     """
     global metatime_install
+    import numpy as _np
+    if not hasattr(_np, 'float'):
+        _np.float = float       # noqa: deprecated alias for compat
+    if not hasattr(_np, 'int'):
+        _np.int = int           # noqa: same for completeness
+    if not hasattr(_np, 'bool'):
+        _np.bool = bool         # noqa: same for completeness
     try:
         import metatime
         metatime_install=True
