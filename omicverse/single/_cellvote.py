@@ -1,6 +1,160 @@
 
+import re
 import requests
 from .._registry import register_function
+
+
+# ── Consensus score helpers ─────────────────────────────────────────────
+#
+# Used by CellVote.vote() to attach a per-cluster confidence score to the
+# final consensus label. Three complementary metrics are computed from the
+# 5 candidate labels (one per voting method) and the LLM-arbitrated pick:
+#
+#   n_unique         - number of distinct labels after normalisation (1..N)
+#   plurality        - fraction of methods agreeing with the most common label
+#   vote_agreement   - fraction of methods whose label is semantically
+#                       consistent with the final pick (Jaccard ≥ threshold
+#                       on normalised token sets)
+#   confidence       - (plurality + vote_agreement) / 2 ∈ [0, 1]
+#
+# Normalisation is intentionally simple — lowercase, strip punctuation,
+# drop noise tokens ('cell', 'positive', ...), expand acronyms
+# ('NK' → 'natural killer', 'DC' → 'dendritic', ...). It is *not* an
+# ontology lookup; the goal is to handle "B cell" vs "B cells" vs
+# "B-cells" and "CD14-positive monocyte" vs "Classical monocyte" — not
+# to resolve fine-grained ontology relations.
+
+_CONSENSUS_STOP_TOKENS = {
+    'cell', 'cells', 'positive', 'negative', 'high', 'low', 'classical',
+}
+
+_CONSENSUS_SYNONYMS = {
+    'mono': 'monocyte', 'monocytes': 'monocyte',
+    'macs': 'macrophage', 'mac': 'macrophage',
+    'nk': 'natural killer', 'killer': 'natural killer',
+    'platelet': 'megakaryocyte', 'platelets': 'megakaryocyte',
+    'mk': 'megakaryocyte', 'mks': 'megakaryocyte',
+    'dc': 'dendritic', 'dcs': 'dendritic',
+    'cdc': 'dendritic', 'pdc': 'dendritic',
+    'tcm': 'naive', 'tem': 'memory', 'trm': 'memory',
+}
+
+
+def _normalize_label(label):
+    """Tokenise a free-form cell-type label for consensus comparison.
+
+    Returns the token set after lowercasing, punctuation stripping, stop
+    word filtering, and acronym expansion. Two labels that map to the
+    same (or highly overlapping) sets are treated as the same celltype.
+    """
+    s = str(label).lower()
+    s = re.sub(r'[,\-+/().]', ' ', s)
+    toks = []
+    for t in s.split():
+        t = _CONSENSUS_SYNONYMS.get(t, t)
+        if t in _CONSENSUS_STOP_TOKENS:
+            continue
+        toks.append(t)
+    return set(toks)
+
+
+def _jaccard(a, b):
+    A, B = _normalize_label(a), _normalize_label(b)
+    if not (A | B):
+        return 0.0
+    return len(A & B) / len(A | B)
+
+
+def cellvote_consensus_score(
+    adata,
+    clusters_key,
+    celltype_keys,
+    cellvote_labels,
+    jaccard_threshold=0.34,
+):
+    """Score the agreement between method-level labels and CellVote picks.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Object holding per-cell labels for each method.
+    clusters_key : str
+        ``adata.obs`` column with cluster IDs (e.g. ``'leiden'``).
+    celltype_keys : list[str]
+        ``adata.obs`` columns produced by the upstream annotation
+        methods. Order does not matter.
+    cellvote_labels : dict
+        ``{cluster_id -> consensus_label}`` mapping (typically the
+        ``result`` dict returned by :meth:`CellVote.vote`).
+    jaccard_threshold : float, default ``0.34``
+        Minimum normalised-token Jaccard for a method's label to count
+        as supporting the consensus pick.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Per-cluster scores: ``n_cells, cellvote_label, n_unique,
+        plurality, vote_agreement, confidence, methods_supporting``.
+        Indexed by cluster ID (string).
+    """
+    import pandas as pd
+
+    n_methods = len(celltype_keys)
+    if n_methods == 0:
+        raise ValueError("`celltype_keys` must list at least one annotation column.")
+
+    # Dominant label per (cluster, method) — same heuristic vote() uses
+    per_method = pd.DataFrame({
+        col: adata.obs.groupby(clusters_key, observed=True)[col]
+                      .agg(lambda s: s.value_counts().index[0])
+        for col in celltype_keys
+    })
+
+    rows = []
+    cluster_sizes = adata.obs.groupby(clusters_key, observed=True).size()
+    for cid_raw, vote_label in cellvote_labels.items():
+        cid = str(cid_raw)
+        if cid not in per_method.index.astype(str).tolist():
+            # may happen if cellvote_labels keys mix int/str — try fallback
+            try:
+                row = per_method.loc[cid_raw]
+            except KeyError:
+                continue
+        else:
+            row = per_method.loc[per_method.index.astype(str) == cid].iloc[0]
+        labels = list(row)
+
+        # plurality (after token-set normalisation, ties broken by first occurrence)
+        norm_labels = [tuple(sorted(_normalize_label(l))) for l in labels]
+        counts = pd.Series(norm_labels).value_counts()
+        plurality = float(counts.iloc[0] / n_methods)
+        n_unique = int(len(counts))
+
+        # vote_agreement vs the final pick
+        sims = [_jaccard(l, vote_label) for l in labels]
+        n_agree = sum(s >= jaccard_threshold for s in sims)
+        vote_agreement = float(n_agree / n_methods)
+        confidence = float((plurality + vote_agreement) / 2)
+
+        # n_cells via the original (possibly non-string) cluster id
+        try:
+            n_cells = int(cluster_sizes.loc[cid_raw])
+        except KeyError:
+            n_cells = int(cluster_sizes.loc[cid])
+
+        rows.append({
+            'cluster':            cid,
+            'n_cells':            n_cells,
+            'cellvote_label':     vote_label,
+            'n_unique':           n_unique,
+            'plurality':          round(plurality, 3),
+            'vote_agreement':     round(vote_agreement, 3),
+            'confidence':         round(confidence, 3),
+            'methods_supporting': f'{n_agree}/{n_methods}',
+        })
+
+    df = pd.DataFrame(rows).set_index('cluster')
+    return df
 
 
 @register_function(
@@ -267,6 +421,29 @@ class CellVote(object):
             adata.obs["best_clusters"].map(result).astype("category")
         )
         adata.obs[result_key] = [i.capitalize() for i in adata.obs[result_key].tolist()]
+
+        # ── Per-cluster consensus score, written back to adata ─────────
+        # Quantifies how many of the candidate methods support the
+        # final label. Stored both per-cell (continuous) for plotting
+        # and as a per-cluster table in `uns` for inspection.
+        try:
+            score_df = cellvote_consensus_score(
+                adata,
+                clusters_key=clusters_key,
+                celltype_keys=celltype_keys,
+                cellvote_labels=result,
+            )
+            confidence_col = f'{result_key}_confidence'
+            adata.obs[confidence_col] = (
+                adata.obs[clusters_key].astype(str)
+                     .map(score_df['confidence'].to_dict())
+                     .astype(float)
+            )
+            adata.uns[f'{result_key}_score_table'] = score_df.reset_index().to_dict('list')
+        except Exception as exc:
+            # Scoring is a convenience signal — never fail vote() on it.
+            print(f"⚠️  CellVote consensus score skipped: {exc}")
+
         return result
 
 
