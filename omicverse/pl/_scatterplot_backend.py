@@ -146,8 +146,9 @@ def embedding(
     ax: Optional[Axes] = None,
     return_fig: Optional[bool] = None,
     marker: Union[str, Sequence[str]] = '.',
-    arrow_scale: float = 10, 
+    arrow_scale: float = 10,
     arrow_width: float = 0.005,
+    layout: Literal['grid', 'flow'] = 'grid',
     **kwargs,
 ) -> Union[Figure, Axes, None]:
     r"""Scatter plot for user specified embedding basis (e.g. umap, pca, etc).
@@ -353,6 +354,13 @@ def embedding(
     # Plotting #
     ############
     axs = []
+    # Per-panel colorbar axes, keyed by id(panel_ax). Populated only for
+    # continuous-color panels rendered with frameon ∈ {'small', False}.
+    # `_flow_layout_panels` consults this dict to drag the colorbar
+    # alongside the panel when it gets repositioned, otherwise the
+    # colorbar stays pinned at its original figure coordinates while the
+    # panel migrates left/right — the visual bug visible at issue review.
+    panel_colorbars: dict = {}
 
     # use itertools.product to make a plot for each color and for each component
     # For example if color=[gene1, gene2] and components=['1,2, '2,3'].
@@ -611,6 +619,7 @@ def embedding(
                 # 手动创建colorbar轴：[left, bottom, width, height]
                 # Use ax.figure instead of pl.gcf() to ensure correct figure in multi-panel plots
                 cax1 = ax.figure.add_axes([pos.x1 + cb_pad, cb_bottom, cb_width, cb_height])
+                panel_colorbars[id(ax)] = cax1
 
                 cb = pl.colorbar(cax, cax=cax1, orientation="vertical")
                 # Remove integer=True to allow float values in colorbar ticks
@@ -626,6 +635,13 @@ def embedding(
             #pl.colorbar(
             #    cax, ax=ax, pad=0.01, fraction=0.08, aspect=30, location=colorbar_loc
             #)
+
+    # Flow layout: re-position panels left-to-right (with wrap) so that
+    # each panel + its external legend takes its actual footprint, never
+    # overlapping a neighboring panel. Only meaningful when multiple
+    # panels exist (i.e. grid is not None).
+    if layout == 'flow' and grid is not None and axs:
+        _flow_layout_panels(fig, axs, panel_colorbars=panel_colorbars)
 
     if return_fig is True:
         return fig
@@ -660,6 +676,135 @@ def _panel_grid(hspace, wspace, ncols, num_panels):
         wspace=wspace,
     )
     return fig, gs
+
+
+def _flow_layout_panels(fig, axs, panel_colorbars=None, gap=0.3, margin=0.3):
+    r"""Reposition multi-panel axes left-to-right with wrap.
+
+    Each panel's "footprint" includes its external categorical legend
+    (if any) *and* any per-panel colorbar axes registered in
+    ``panel_colorbars``, so panels are guaranteed not to overlap
+    regardless of legend label length / category count / colorbar
+    presence. Wraps to the next row when a panel would exceed
+    ``fig_width - margin``. Resizes the figure height if total layout
+    exceeds the initial height.
+
+    Parameters
+    ----------
+    fig : matplotlib.figure.Figure
+        Figure containing ``axs``.
+    axs : list[matplotlib.axes.Axes]
+        Panel axes in plotting order. Each axes may carry an external
+        legend created via ``ax.legend(bbox_to_anchor=...,
+        bbox_transform=ax.transAxes)``; the legend follows the axes
+        when ``set_position`` is called, so this routine only needs to
+        re-position the axes themselves.
+    panel_colorbars : dict[int, matplotlib.axes.Axes] or None
+        Mapping of ``id(panel_ax) -> colorbar_ax`` for panels that
+        rendered a continuous-color colorbar via
+        ``fig.add_axes([...])`` (the ``frameon='small' / False``
+        branch). The colorbar's offset is captured *before* the panel
+        moves, then re-applied relative to the new panel position so
+        the colorbar travels with its panel. Unlike legends, colorbars
+        live in figure coordinates and do not follow the panel
+        automatically.
+    """
+    if not axs:
+        return
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    inv = fig.dpi_scale_trans.inverted()
+    fig_w_in = fig.get_figwidth()
+
+    # ── Pass 1: measure each panel's full footprint in inches ───────
+    items = []
+    for ax in axs:
+        ax_bbox = ax.get_window_extent(renderer).transformed(inv)
+        x0, x1 = ax_bbox.x0, ax_bbox.x1
+        y0, y1 = ax_bbox.y0, ax_bbox.y1
+
+        lg = ax.get_legend()
+        if lg is not None:
+            lg_bbox = lg.get_window_extent(renderer).transformed(inv)
+            x0 = min(x0, lg_bbox.x0); x1 = max(x1, lg_bbox.x1)
+            y0 = min(y0, lg_bbox.y0); y1 = max(y1, lg_bbox.y1)
+
+        # Include per-panel colorbar bbox so the panel reserves space for it
+        cb_ax = (panel_colorbars or {}).get(id(ax))
+        cb_pos_pre = cb_ax.get_position() if cb_ax is not None else None
+        ax_pos_pre = ax.get_position()  # for delta computation
+        if cb_ax is not None:
+            cb_bbox = cb_ax.get_window_extent(renderer).transformed(inv)
+            x0 = min(x0, cb_bbox.x0); x1 = max(x1, cb_bbox.x1)
+            y0 = min(y0, cb_bbox.y0); y1 = max(y1, cb_bbox.y1)
+
+        items.append({
+            'ax': ax,
+            'full_w': x1 - x0,
+            'full_h': y1 - y0,
+            'ax_dx': ax_bbox.x0 - x0,   # axes offset within full bbox
+            'ax_dy': ax_bbox.y0 - y0,
+            'ax_w':  ax_bbox.width,
+            'ax_h':  ax_bbox.height,
+            'cb_ax': cb_ax,
+            'cb_pos_pre': cb_pos_pre,
+            'ax_pos_pre': ax_pos_pre,
+        })
+
+    # ── Pass 2: assign positions left-to-right with wrap ─────────────
+    placements = []
+    cursor_x = margin
+    cumulative_top = 0.0   # inches from top of current logical layout
+    row_max_h = 0.0
+    for it in items:
+        if cursor_x + it['full_w'] > fig_w_in - margin and cursor_x > margin:
+            # wrap to next row
+            cursor_x = margin
+            cumulative_top += row_max_h + gap
+            row_max_h = 0.0
+        placements.append((cursor_x, cumulative_top))
+        cursor_x += it['full_w'] + gap
+        row_max_h = max(row_max_h, it['full_h'])
+
+    total_h_in = cumulative_top + row_max_h + 2 * margin
+    if total_h_in > fig.get_figheight():
+        fig.set_figheight(total_h_in)
+    fig_h_in = fig.get_figheight()
+
+    # ── Pass 3: apply positions (figure-relative) ────────────────────
+    for it, (x_in, top_in) in zip(items, placements):
+        # full bbox top in figure coords (measured from figure bottom)
+        full_top_y = fig_h_in - margin - top_in
+        full_bot_y = full_top_y - it['full_h']
+        ax_x = x_in + it['ax_dx']
+        ax_y = full_bot_y + it['ax_dy']
+        new_pos_norm = [
+            ax_x / fig_w_in,
+            ax_y / fig_h_in,
+            it['ax_w'] / fig_w_in,
+            it['ax_h'] / fig_h_in,
+        ]
+        it['ax'].set_position(new_pos_norm)
+
+        # Drag the panel's colorbar along by re-applying the same
+        # (figure-normalised) offset it had from the panel pre-move.
+        cb_ax = it['cb_ax']
+        if cb_ax is not None:
+            ap = it['ax_pos_pre']
+            cp = it['cb_pos_pre']
+            # offset of cb origin from panel origin, normalised by panel size
+            dx_rel = (cp.x0 - ap.x0) / ap.width if ap.width else 0
+            dy_rel = (cp.y0 - ap.y0) / ap.height if ap.height else 0
+            cb_w_rel = cp.width / ap.width if ap.width else cp.width
+            cb_h_rel = cp.height / ap.height if ap.height else cp.height
+            new_panel_w = new_pos_norm[2]
+            new_panel_h = new_pos_norm[3]
+            cb_ax.set_position([
+                new_pos_norm[0] + dx_rel * new_panel_w,
+                new_pos_norm[1] + dy_rel * new_panel_h,
+                cb_w_rel * new_panel_w,
+                cb_h_rel * new_panel_h,
+            ])
 
 
 def _get_vboundnorm(
