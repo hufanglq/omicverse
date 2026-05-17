@@ -364,6 +364,7 @@ class Annotation(object):
         self.celltypist_models_df = None
         self._llm_client = None
         self.scsa_db_path = None
+        self.scmulan_ckpt_path: Optional[str] = None
         self._llm_runtime_config: Optional[Dict[str, Any]] = None
         self._llm_config_signature: Optional[str] = None
 
@@ -387,12 +388,19 @@ class Annotation(object):
 
         Parameters
         ----------
-        method : {'celltypist', 'scsa', 'gpt4celltype', 'harmony', 'scVI', 'scanorama'}
+        method : {'celltypist', 'scsa', 'gpt4celltype', 'scMulan', 'harmony', 'scVI', 'scanorama'}
             Annotation backend.
         cluster_key : str
             Cluster label key used by marker-based methods (SCSA/GPT4CellType).
         **kwargs
-            Additional backend-specific keyword arguments.
+            Additional backend-specific keyword arguments. For ``scMulan``
+            the most useful ones are ``ckp_path`` (override the local
+            checkpoint), ``uniform_genes`` (default ``True``;
+            run :func:`omicverse.external.scMulan.GeneSymbolUniform`
+            so the input gene panel matches what the model expects),
+            ``smoothing_threshold`` (default ``0.1``; pass ``None`` to
+            skip the post-hoc smoothing pass), and ``parallel`` /
+            ``n_process`` forwarded to scMulan's inference loop.
 
         Returns
         -------
@@ -404,6 +412,8 @@ class Annotation(object):
         --------
         >>> anno.annotate(method='celltypist')
         >>> anno.annotate(method='gpt4celltype', cluster_key='leiden')
+        >>> anno.download_scmulan_ckpt()
+        >>> anno.annotate(method='scMulan', smoothing_threshold=0.1)
         """
         # Predictions land deterministically at obs['<method>_prediction'].
         # Declare the report's viz/backend up front; @tracked discards the
@@ -463,6 +473,99 @@ class Annotation(object):
             self.adata.obs['gpt4celltype_prediction'] = self.adata.obs[cluster_key].map(result).astype('category')
             print(f"GPT4celltype prediction saved to adata.obs['gpt4celltype_prediction']")
             return result
+        elif method=='scMulan':
+            # Lazy-import: scMulan pulls torch + a large checkpoint loader,
+            # so we only touch it when this branch is actually requested.
+            from ..external import scMulan as _scmulan_mod
+            from scipy.sparse import csc_matrix, issparse
+
+            # Resolve checkpoint path (kwarg overrides instance attr).
+            ckp_path = kwargs.pop('ckp_path', None) or self.scmulan_ckpt_path
+            if ckp_path is None or not os.path.exists(ckp_path):
+                raise FileNotFoundError(
+                    "scMulan checkpoint not found at "
+                    f"{ckp_path!r}. Pass `ckp_path=...` or call "
+                    "`obj.download_scmulan_ckpt()` first to fetch the "
+                    "pretrained weights from the Tsinghua mirror."
+                )
+
+            uniform_genes = kwargs.pop('uniform_genes', True)
+            output_dir = kwargs.pop('output_dir', './data')
+            output_prefix = kwargs.pop('output_prefix', 'scmulan_input')
+            parallel = kwargs.pop('parallel', True)
+            n_process = kwargs.pop('n_process', 1)
+            smoothing_threshold = kwargs.pop('smoothing_threshold', 0.1)
+
+            # scMulan expects CSC sparse counts on the gene panel it was
+            # trained against. Do not mutate self.adata — keep a working
+            # copy that we map predictions back from.
+            adata_for_scml = self.adata
+            if uniform_genes:
+                adata_for_scml = self.adata.copy()
+                if not issparse(adata_for_scml.X) or not isinstance(
+                    adata_for_scml.X, csc_matrix,
+                ):
+                    adata_for_scml.X = csc_matrix(adata_for_scml.X)
+                adata_for_scml = _scmulan_mod.GeneSymbolUniform(
+                    input_adata=adata_for_scml,
+                    output_dir=output_dir,
+                    output_prefix=output_prefix,
+                )
+
+            # The model expects log1p-normalised counts to 1e4. Skip if
+            # the matrix is already in that scale.
+            try:
+                _xmax = float(adata_for_scml.X.max())
+            except (TypeError, ValueError):
+                _xmax = None
+            if _xmax is not None and _xmax > 10:
+                sc.pp.normalize_total(adata_for_scml, target_sum=1e4)
+                sc.pp.log1p(adata_for_scml)
+
+            scml = _scmulan_mod.model_inference(
+                ckp_path, adata_for_scml, **kwargs,
+            )
+            try:
+                scml.cuda_count()
+            except Exception:
+                # cuda_count is informational — not having CUDA is OK
+                pass
+            scml.get_cell_types_and_embds_for_adata(
+                parallel=parallel, n_process=n_process,
+            )
+
+            # Map predictions back to self.adata.obs by obs_names.
+            pred = pd.Series(
+                scml.adata.obs['cell_type_from_scMulan'].values,
+                index=scml.adata.obs_names,
+            ).reindex(self.adata.obs_names)
+            self.adata.obs['scMulan_prediction'] = pred.astype('category')
+            print(
+                "scMulan prediction saved to "
+                "adata.obs['scMulan_prediction']"
+            )
+
+            # Optional smoothing pass — writes a separate column so the
+            # raw vs smoothed labels can be compared.
+            if smoothing_threshold is not None:
+                _scmulan_mod.cell_type_smoothing(
+                    scml.adata, threshold=smoothing_threshold,
+                )
+                smooth_col = 'cell_type_from_mulan_smoothing'
+                if smooth_col in scml.adata.obs.columns:
+                    smoothed = pd.Series(
+                        scml.adata.obs[smooth_col].values,
+                        index=scml.adata.obs_names,
+                    ).reindex(self.adata.obs_names)
+                    self.adata.obs[
+                        'scMulan_smoothed_prediction'
+                    ] = smoothed.astype('category')
+                    print(
+                        "scMulan smoothed prediction saved to "
+                        "adata.obs['scMulan_smoothed_prediction']"
+                    )
+
+            return scml.adata
         elif method=='harmony':
             from ._annotation_ref import AnnotationRef
             annotation_ref=AnnotationRef(adata_query=self.adata,adata_ref=self.adata_ref,celltype_key=self.celltype_key)
@@ -617,6 +720,46 @@ class Annotation(object):
             f"Failed to download SCSA database from all mirrors. "
             f"Last error: {str(last_error)}"
         )
+
+    def download_scmulan_ckpt(
+        self,
+        save_path: str = './ckpt/ckpt_scMulan.pt',
+        force_download: bool = False,
+    ) -> str:
+        """Download the pretrained scMulan checkpoint.
+
+        Fetches ``ckpt_scMulan.pt`` from the Tsinghua mirror and stores
+        the local path on ``self.scmulan_ckpt_path`` so
+        :meth:`annotate(method='scMulan')` can pick it up automatically.
+
+        Parameters
+        ----------
+        save_path : str, default ``'./ckpt/ckpt_scMulan.pt'``
+            Where the checkpoint will be written.
+        force_download : bool, default ``False``
+            If ``False`` and the file already exists, the cached copy
+            is reused. Set ``True`` to overwrite.
+
+        Returns
+        -------
+        str
+            Resolved local path of the checkpoint.
+        """
+        url = 'https://cloud.tsinghua.edu.cn/f/2250c5df51034b2e9a85/?dl=1'
+
+        if os.path.exists(save_path) and not force_download:
+            print(f"scMulan checkpoint already present at {save_path}; "
+                   "pass force_download=True to overwrite.")
+            self.scmulan_ckpt_path = save_path
+            return save_path
+
+        parent_dir = os.path.dirname(save_path)
+        file_name = os.path.basename(save_path)
+        target_dir = parent_dir if parent_dir else '.'
+        download_data(url=url, file_path=file_name, dir=target_dir)
+        print(f"scMulan checkpoint saved to {save_path}")
+        self.scmulan_ckpt_path = save_path
+        return save_path
 
     def download_reference_pkl(
         self, 
