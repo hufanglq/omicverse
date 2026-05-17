@@ -79,6 +79,7 @@ _LAZY_MODULES = {
     'utils',
     'io',
     'datasets',
+    'es',
     'external',
     'llm',
     'agent',
