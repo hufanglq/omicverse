@@ -148,7 +148,7 @@ def embedding(
     marker: Union[str, Sequence[str]] = '.',
     arrow_scale: float = 10,
     arrow_width: float = 0.005,
-    layout: Literal['grid', 'flow'] = 'grid',
+    layout: Literal['grid', 'flow'] = 'flow',
     **kwargs,
 ) -> Union[Figure, Axes, None]:
     r"""Scatter plot for user specified embedding basis (e.g. umap, pca, etc).
