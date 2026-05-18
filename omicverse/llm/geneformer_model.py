@@ -1271,18 +1271,225 @@ class GeneformerModel(SCLLMBase):
             raise RuntimeError(f"Cell type prediction failed: {e}") from e
     
     def _predict_perturbation(self, adata: AnnData, **kwargs) -> Dict[str, Any]:
+        """In-silico gene perturbation via real Geneformer forward passes.
+
+        Pipeline:
+
+        1. Tokenize ``adata`` once (rank-value encoded ``input_ids`` per cell).
+        2. Forward-pass through the model to get baseline cell embeddings.
+        3. For every target gene, build a perturbed dataset (token removed for
+           ``delete``, prepended for ``overexpress``) and forward-pass again.
+        4. Compute per-cell cosine similarity ``original ↔ perturbed`` —
+           lower similarity = larger biological impact of the knockout.
+
+        Required kwargs:
+
+        - ``target_genes`` : list of gene symbols or ENSEMBL IDs.
+        - ``perturb_type`` : ``'delete'`` (default) | ``'overexpress'``.
+
+        Optional:
+
+        - ``max_ncells`` : cap on cells used (default 500 — each gene needs
+          one extra forward pass over every cell).
+        - ``forward_batch_size`` : default 50.
+
+        Returns a dict with:
+
+        - ``cosine_similarities`` : ``DataFrame`` (cell × gene) of per-cell cos sim
+        - ``stats`` : ``DataFrame`` (gene × {mean, std, n_perturbed}) summary
+        - ``original_embeddings`` : ``np.ndarray`` (n_cells × d)
+        - ``perturbed_embeddings`` : ``dict[gene_label, np.ndarray]``
+        - ``perturb_type``, ``target_genes``, ``cell_indices``
         """
-        Perform in silico perturbation experiments using real Geneformer mechanism.
-        
-        This implementation follows the official Geneformer InSilicoPerturber approach:
-        1. Tokenize AnnData using TranscriptomeTokenizer
-        2. Apply perturbations directly on token sequences
-        3. Forward pass through Geneformer model  
-        4. Calculate cosine similarities between original and perturbed embeddings
-        """
-        SCLLMOutput.status(f"Performing in silico perturbation with Geneformer...", "predicting")
-        
-        #To do
+        import os
+        import pickle
+        import tempfile
+
+        import numpy as np
+        import pandas as pd
+
+        target_genes = kwargs.get("target_genes")
+        if not target_genes:
+            raise ValueError("'target_genes' is required (list of gene symbols or ENSEMBL IDs).")
+        if isinstance(target_genes, str):
+            target_genes = [target_genes]
+
+        perturb_type = kwargs.get("perturb_type", "delete")
+        if perturb_type not in {"delete", "overexpress"}:
+            raise ValueError(f"perturb_type must be 'delete' or 'overexpress', got {perturb_type!r}")
+
+        max_ncells = int(kwargs.get("max_ncells", 500))
+        forward_batch_size = int(kwargs.get("forward_batch_size", 50))
+
+        if not self.is_loaded:
+            raise ValueError("Model not loaded. Call load_model() first.")
+        if self.tokenizer is None:
+            raise ValueError(
+                "Tokenizer not initialized — pass gene_median_file / token_dictionary_file / "
+                "gene_mapping_file to load_model()."
+            )
+
+        SCLLMOutput.status(f"Geneformer in-silico {perturb_type} of {len(target_genes)} gene(s) on {min(max_ncells, adata.n_obs)} cells", "predicting")
+
+        # 1) load token dict + ensembl mapping ------------------------------------
+        token_dict_path = self.dict_files.get("token_dictionary_file") if hasattr(self, "dict_files") else None
+        ensembl_map_path = self.dict_files.get("gene_mapping_file") if hasattr(self, "dict_files") else None
+        if token_dict_path is None or ensembl_map_path is None:
+            raise ValueError("Token / ensembl-mapping dict file paths not stored on the model — re-run load_model() with explicit file paths.")
+        with open(token_dict_path, "rb") as f:
+            gene_token_dict: Dict[str, int] = pickle.load(f)
+        with open(ensembl_map_path, "rb") as f:
+            # symbol → ensembl; some files are inverted, normalise both ways
+            raw_map = pickle.load(f)
+        # Build symbol→ensembl and ensembl→symbol lookups robust to either direction.
+        sym_to_ens: Dict[str, str] = {}
+        for k, v in raw_map.items():
+            ks, vs = str(k), str(v)
+            if ks.startswith("ENSG") and not vs.startswith("ENSG"):
+                sym_to_ens[vs] = ks
+            elif vs.startswith("ENSG") and not ks.startswith("ENSG"):
+                sym_to_ens[ks] = vs
+            else:
+                sym_to_ens.setdefault(ks, vs)
+
+        # 2) resolve target_genes → token ids ------------------------------------
+        resolved: list[tuple[str, str, int]] = []  # (display_label, ensembl_id, token_id)
+        for g in target_genes:
+            gstr = str(g)
+            ens = gstr if gstr.startswith("ENSG") else sym_to_ens.get(gstr)
+            if ens is None:
+                SCLLMOutput.status(f"Skipping {gstr!r}: no ENSEMBL mapping found", "warning", indent=1)
+                continue
+            token = gene_token_dict.get(ens)
+            if token is None:
+                SCLLMOutput.status(f"Skipping {gstr!r} ({ens}): not in token dictionary", "warning", indent=1)
+                continue
+            resolved.append((gstr, ens, int(token)))
+        if not resolved:
+            raise ValueError("None of the requested target_genes are present in the Geneformer token dictionary.")
+
+        # 3) tokenize the adata ---------------------------------------------------
+        adata_subset = adata[:max_ncells].copy() if adata.n_obs > max_ncells else adata.copy()
+        if hasattr(adata_subset.X, "toarray"):
+            adata_subset.X = adata_subset.X.toarray()
+        if "n_counts" not in adata_subset.obs.columns:
+            adata_subset.obs["n_counts"] = np.asarray(adata_subset.X.sum(axis=1)).flatten()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = os.path.join(temp_dir, "input.h5ad")
+            adata_subset.write_h5ad(input_path)
+            self.tokenizer.tokenize_data(
+                data_directory=temp_dir,
+                output_directory=temp_dir,
+                output_prefix="tokenized",
+                file_format="h5ad",
+            )
+            from datasets import load_from_disk
+
+            ds_path = os.path.join(temp_dir, "tokenized.dataset")
+            if not os.path.exists(ds_path):
+                raise RuntimeError(f"Tokenized dataset not produced at {ds_path}")
+            base_dataset = load_from_disk(ds_path)
+
+        # 4) load Geneformer + helpers; one forward pass for baseline -------------
+        from .geneformer import perturber_utils as pu
+        from .geneformer.emb_extractor import get_embs
+
+        if getattr(self, "is_fine_tuned", False) and hasattr(self, "fine_tuned_base_model"):
+            model = self.fine_tuned_base_model
+            model.eval()
+        else:
+            model = pu.load_model("Pretrained", 0, str(self.model_path), mode="eval")
+        layer_to_quant = pu.quant_layers(model) + (-1)
+        pad_token_id = gene_token_dict.get("<pad>", 0)
+
+        def _embed(dataset):
+            embs = get_embs(
+                model=model,
+                filtered_input_data=dataset,
+                emb_mode="cell",
+                layer_to_quant=layer_to_quant,
+                pad_token_id=pad_token_id,
+                forward_batch_size=forward_batch_size,
+                token_gene_dict={},
+                summary_stat=None,
+            )
+            arr = embs.cpu().numpy() if hasattr(embs, "cpu") else np.asarray(embs)
+            return arr
+
+        SCLLMOutput.status(f"Baseline forward pass...", "info", indent=1)
+        original_embeddings = _embed(base_dataset)
+
+        # 5) per-gene perturbed pass ---------------------------------------------
+        def _delete_token(row, tok):
+            ids = list(row["input_ids"])
+            new_ids = [i for i in ids if i != tok]
+            row["input_ids"] = new_ids
+            row["length"] = len(new_ids)
+            return row
+
+        def _overexpress_token(row, tok):
+            ids = [i for i in row["input_ids"] if i != tok]
+            new_ids = [tok] + ids
+            row["input_ids"] = new_ids
+            row["length"] = len(new_ids)
+            return row
+
+        perturbed_embeddings: Dict[str, np.ndarray] = {}
+        cos_sims: Dict[str, np.ndarray] = {}
+        stats_rows = []
+        for label, ens, token in resolved:
+            SCLLMOutput.status(f"Perturbing {label} ({ens}, token {token})", "info", indent=1)
+            fn = _delete_token if perturb_type == "delete" else _overexpress_token
+            perturbed_ds = base_dataset.map(lambda r: fn(r, token))
+            # Cells that actually carried the gene — only these are meaningfully perturbed.
+            has_gene = np.asarray(
+                [token in set(r) for r in base_dataset["input_ids"]],
+                dtype=bool,
+            )
+            pert_emb = _embed(perturbed_ds)
+            perturbed_embeddings[label] = pert_emb
+            # cosine sim per cell
+            a = original_embeddings
+            b = pert_emb
+            denom = np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1) + 1e-12
+            cs = np.sum(a * b, axis=1) / denom
+            # Cells where the gene was absent should show ~1.0 cos sim (no-op); set them
+            # to nan so the user can summarise over only the truly-perturbed cells.
+            cs = np.where(has_gene, cs, np.nan)
+            cos_sims[label] = cs.astype(np.float32)
+            valid = cs[~np.isnan(cs)]
+            stats_rows.append({
+                "gene": label,
+                "ensembl_id": ens,
+                "token_id": token,
+                "n_cells_perturbed": int(has_gene.sum()),
+                "n_cells_total": int(has_gene.size),
+                "cosine_mean": float(np.nan if valid.size == 0 else valid.mean()),
+                "cosine_std": float(np.nan if valid.size == 0 else valid.std()),
+                "cosine_min": float(np.nan if valid.size == 0 else valid.min()),
+            })
+
+        # 6) build return ---------------------------------------------------------
+        # Cell indices in the original adata that got scored — adata is positional
+        # subsetting up to max_ncells.
+        cell_idx = np.arange(min(adata.n_obs, max_ncells))
+        cos_df = pd.DataFrame(
+            {label: cos_sims[label] for label, _, _ in resolved},
+            index=adata.obs_names[cell_idx],
+        )
+        stats_df = pd.DataFrame(stats_rows).set_index("gene")
+        SCLLMOutput.status(f"Perturbation complete — see stats_df / cosine_similarities", "info", indent=1)
+        return {
+            "cosine_similarities": cos_df,
+            "stats": stats_df,
+            "original_embeddings": original_embeddings,
+            "perturbed_embeddings": perturbed_embeddings,
+            "perturb_type": perturb_type,
+            "target_genes": [r[0] for r in resolved],
+            "cell_indices": cell_idx,
+            "obs_names": list(adata.obs_names[cell_idx]),
+        }
 
     def _tokenize_adata_for_perturbation(self, adata: AnnData, max_ncells: int) -> Dataset:
         """
