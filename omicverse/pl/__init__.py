@@ -154,6 +154,7 @@ from ._flowsig import (
     plot_flowsig_network,
 )
 from ._embedding import embedding_atlas
+from ._cnv import cnv_heatmap, cnv_summary, cnv_umap
 from ._density import add_density_contour, calculate_gene_density
 from ._plot1cell import plot1cell
 from ._cpdbviz import CellChatViz
@@ -392,4 +393,8 @@ __all__ = [
     "plot_pca_variance_ratio",
     "plot_pca_variance_ratio1",
     "gen_mpl_labels",
+    # @ _cnv
+    "cnv_heatmap",
+    "cnv_summary",
+    "cnv_umap",
 ]

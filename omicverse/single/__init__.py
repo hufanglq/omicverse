@@ -98,6 +98,11 @@ from ._lazy_checkpoint import lazy_checkpoint, resume_from_checkpoint, list_chec
 # Monocle2-style trajectory analysis (pure Python re-implementation).
 # Usage: mono = ov.single.Monocle(adata); mono.preprocess(); ...
 from ._monocle import Monocle
+
+# Single-cell CNV inference — pure-Python CopyKAT / inferCNV wrappers.
+# Usage: cnv = ov.single.CNV(adata, method='copykat'); cnv.run()
+from ._cnv import CNV
+
 from ._lazy_step_by_step import (
     lazy_step_qc, lazy_step_preprocess, lazy_step_scale, lazy_step_pca,
     lazy_step_cell_cycle, lazy_step_harmony, lazy_step_scvi, 
@@ -354,7 +359,10 @@ __all__ = [
     'MetaCell',
     'plot_metacells',
     'get_obs_value',
-    
+
+    # Single-cell CNV
+    'CNV',
+
     # Differential expression
     'DCT',
     'DEG',
