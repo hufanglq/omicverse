@@ -150,7 +150,7 @@ def _func_mlm_torch(
     round-off.
     """
     import torch
-    from omicverse.es._engine import torch_device
+    from omicverse.es._engine import torch_device, to_gpu_dense
 
     device = torch_device()
     n_features, n_fsets = np.asarray(adj).shape
@@ -159,7 +159,8 @@ def _func_mlm_torch(
     df = n_features - n_fsets - 1
 
     X = torch.as_tensor(A_ext, dtype=torch.float64, device=device)             # (n_var, p+1)
-    Y = torch.as_tensor(np.asarray(mat).T, dtype=torch.float64, device=device) # (n_var, n_cells)
+    # mlm wants Y = mat.T, so densify mat on GPU first then transpose.
+    Y = to_gpu_dense(mat, device, dtype=torch.float64).T                        # (n_var, n_cells)
     XtX = X.T @ X                                                              # (p+1, p+1)
     XtY = X.T @ Y                                                              # (p+1, n_cells)
     inv = torch.linalg.inv(XtX)
@@ -201,4 +202,5 @@ _mlm = MethodMeta(
     limits=(-np.inf, +np.inf),
     reference="https://doi.org/10.1093/bioadv/vbac016",
 )
+_func_mlm_torch._accepts_sparse = True
 mlm = Method(_method=_mlm)

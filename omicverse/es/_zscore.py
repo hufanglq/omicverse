@@ -110,14 +110,15 @@ def _func_zscore_torch(
     ``norm.sf`` was ~4 ms out of ~14 ms total).
     """
     import torch
-    from omicverse.es._engine import torch_device
+    from omicverse.es._engine import torch_device, to_gpu_dense
 
     assert isinstance(flavor, str) and flavor in ("KSEA", "RoKAI"), \
         "flavor must be str and KSEA or RoKAI"
     device = torch_device()
 
-    M = torch.as_tensor(np.asarray(mat), dtype=torch.float64, device=device)
-    A = torch.as_tensor(np.asarray(adj), dtype=torch.float64, device=device)
+    # Host-CSR → GPU densify when sparse (signalled via _accepts_sparse).
+    M = to_gpu_dense(mat, device, dtype=torch.float64)
+    A = to_gpu_dense(adj, device, dtype=torch.float64)
 
     # ``torch.std_mean`` fuses the two reductions into a single pass
     # over M (single CUDA kernel) — half the launches + half the
@@ -149,4 +150,5 @@ _zscore = MethodMeta(
     limits=(-np.inf, +np.inf),
     reference="https://doi.org/10.1038/s41467-021-21211-6",
 )
+_func_zscore_torch._accepts_sparse = True
 zscore = Method(_method=_zscore)

@@ -277,11 +277,11 @@ def _func_waggr_torch(
         return _func_waggr(mat, adj, fun=fun, times=times, seed=seed, verbose=verbose)
 
     import torch
-    from omicverse.es._engine import torch_device
+    from omicverse.es._engine import torch_device, to_gpu_dense
 
     device = torch_device()
-    M = torch.as_tensor(np.asarray(mat), dtype=torch.float64, device=device)
-    A = torch.as_tensor(np.asarray(adj), dtype=torch.float64, device=device)
+    M = to_gpu_dense(mat, device, dtype=torch.float64)
+    A = to_gpu_dense(adj, device, dtype=torch.float64)
 
     es = M @ A
     if fun == "wmean":
@@ -304,4 +304,5 @@ _waggr = MethodMeta(
     limits=(-np.inf, +np.inf),
     reference="https://doi.org/10.1093/bioadv/vbac016",
 )
+_func_waggr_torch._accepts_sparse = True
 waggr = Method(_method=_waggr)

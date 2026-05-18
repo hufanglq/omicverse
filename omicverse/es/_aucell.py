@@ -170,7 +170,7 @@ def _func_aucell_torch(
     running the GPU out of memory.
     """
     import torch
-    from omicverse.es._engine import torch_device, chunk_size_for
+    from omicverse.es._engine import torch_device, chunk_size_for, to_gpu_dense
 
     device = torch_device()
     nobs, nvar = mat.shape
@@ -178,9 +178,7 @@ def _func_aucell_torch(
     n_up = _validate_n_up(nvar, n_up)
     n_up_int = int(n_up)
 
-    if sps.issparse(mat):
-        mat = mat.toarray()
-    M = torch.as_tensor(np.asarray(mat), dtype=torch.float64, device=device)
+    M = to_gpu_dense(mat, device, dtype=torch.float64)
 
     # Per-cell argsort, stable → matches scipy 'ordinal'. Then keep only
     # the indices that land in the top `n_up`; that's all we need for
@@ -261,4 +259,5 @@ _aucell = MethodMeta(
     limits=(0, 1),
     reference="https://doi.org/10.1038/nmeth.4463",
 )
+_func_aucell_torch._accepts_sparse = True
 aucell = Method(_method=_aucell)

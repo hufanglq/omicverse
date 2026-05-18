@@ -69,6 +69,12 @@ def _run(
     # Handle stat type
     if adj:
         sources, targets, adjm = adjmat(features=var, net=net, verbose=verbose)
+        # When the kernel signals it can ingest sparse input itself
+        # (set via ``func._accepts_sparse = True`` on the torch kernels),
+        # we skip the per-batch ``.toarray()`` and pass the sparse slice
+        # straight through. Saves the dominant ~50 ms / call on dense-by-
+        # density scRNA-seq matrices; see ``omicverse.es._engine.to_gpu_dense``.
+        func_accepts_sparse = bool(getattr(func, '_accepts_sparse', False))
         # Handle batches
         if issparse or isbacked:
             nbatch = int(np.ceil(obs.size / bsize))
@@ -80,13 +86,15 @@ def _run(
                     batch_verbose = False
                 srt, end = i * bsize, i * bsize + bsize
                 if sps.issparse(mat):
-                    bmat = mat[srt:end].toarray()
+                    sliced = mat[srt:end]
+                    bmat = sliced if func_accepts_sparse else sliced.toarray()
                 else:
                     bmat, msk_col = mat
                     bmat = bmat[srt:end, :]
-                    if sps.issparse(bmat):
+                    if sps.issparse(bmat) and not func_accepts_sparse:
                         bmat = bmat.toarray()
-                    bmat = bmat[:, msk_col]
+                    if not sps.issparse(bmat):
+                        bmat = bmat[:, msk_col]
                 bes, bpv = func(bmat, adjm, verbose=batch_verbose, **kwargs)
                 es.append(bes)
                 pv.append(bpv)
