@@ -627,9 +627,16 @@ def embedding(
                 cb.update_ticks()
 
             else:
-                pl.colorbar(
+                # Capture the colorbar axes so _flow_layout_panels can both
+                # measure its footprint (so neighbouring panels don't overlap
+                # it) and drag it along when the panel is re-positioned.
+                # Previously this branch silently dropped the colorbar from
+                # the flow-layout bookkeeping, which is why default
+                # frameon=True multi-panel grids overlapped on the right.
+                cb_obj = pl.colorbar(
                     cax, ax=ax, pad=0.01, fraction=0.08, aspect=30, location=colorbar_loc
                 )
+                panel_colorbars[id(ax)] = cb_obj.ax
 
             
             #pl.colorbar(
@@ -728,6 +735,18 @@ def _flow_layout_panels(fig, axs, panel_colorbars=None, gap=0.3, margin=0.3):
             lg_bbox = lg.get_window_extent(renderer).transformed(inv)
             x0 = min(x0, lg_bbox.x0); x1 = max(x1, lg_bbox.x1)
             y0 = min(y0, lg_bbox.y0); y1 = max(y1, lg_bbox.y1)
+
+        # Include the title above the axes so multi-line / long titles
+        # don't bleed into the row above. ax.title is always present (even
+        # if empty); only fold it in when it has visible text.
+        title = ax.title
+        if title is not None and title.get_text():
+            try:
+                t_bbox = title.get_window_extent(renderer).transformed(inv)
+                x0 = min(x0, t_bbox.x0); x1 = max(x1, t_bbox.x1)
+                y0 = min(y0, t_bbox.y0); y1 = max(y1, t_bbox.y1)
+            except Exception:
+                pass
 
         # Include per-panel colorbar bbox so the panel reserves space for it
         cb_ax = (panel_colorbars or {}).get(id(ax))
