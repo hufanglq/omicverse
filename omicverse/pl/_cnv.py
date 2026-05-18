@@ -237,23 +237,24 @@ def _has_marsilea() -> bool:
     category="pl",
     description=(
         "Genome-wide CNV heatmap: cells × ordered genomic bins, gain in red "
-        "and loss in blue, with an alternating chromosome ideogram bar on top "
-        "and one or more coloured row-annotation strips on the left (e.g. "
-        "cell_type, cnv_prediction). Uses marsilea when available for clean "
-        "categorical legends; falls back to matplotlib text labels otherwise."
+        "and loss in blue, with an alternating chromosome ideogram bar on top, "
+        "row ordering by `groupby` (one adata.obs column) plus optional extra "
+        "coloured annotation strips for `annotations` columns. Uses marsilea "
+        "when available; matplotlib fallback otherwise."
     ),
     examples=[
         "ov.pl.cnv_heatmap(adata)",
         "ov.pl.cnv_heatmap(adata, groupby='cnv_prediction')",
-        "ov.pl.cnv_heatmap(adata, groupby=['cell_type', 'cnv_prediction'])",
-        "ov.pl.cnv_heatmap(adata, groupby='cell_type', max_value=0.6)",
+        "# rows ordered by cnv_prediction; cell_type drawn as a 2nd colour strip",
+        "ov.pl.cnv_heatmap(adata, groupby='cnv_prediction', annotations=['cell_type'])",
     ],
     related=["pl.cnv_summary", "pl.cnv_umap", "single.CNV"],
 )
 def cnv_heatmap(
     adata: AnnData,
     *,
-    groupby: Union[str, Sequence[str], None] = None,
+    groupby: Optional[str] = None,
+    annotations: Union[str, Sequence[str], None] = None,
     max_value: Optional[float] = None,
     figsize: tuple[float, float] = (8.0, 4.5),
     cmap=_CNV_CMAP,
@@ -269,45 +270,51 @@ def cnv_heatmap(
     adata : AnnData
         Must contain ``adata.obsm['X_cnv']`` and ``adata.uns['cnv']`` —
         populated by :class:`omicverse.single.CNV`.
-    groupby : str, list of str, or None
-        Column(s) in ``adata.obs`` used to sort cells and draw colour-coded
-        annotation strips on the left side of the heatmap. The first column
-        controls row ordering. Pass a list to stack multiple strips
-        (e.g. ``['cell_type', 'cnv_prediction']``).
+    groupby : str or None
+        Single column in ``adata.obs`` that controls **row ordering** (cells
+        are bucketed by this category, preserving within-bucket order) and
+        the group-divider lines. To compare cells under multiple labellings,
+        call ``cnv_heatmap`` once per labelling rather than mixing them
+        here; alternatively use ``annotations`` (below) to layer extra
+        colour strips without affecting the order.
+    annotations : str, list of str, or None
+        Additional ``adata.obs`` columns drawn as coloured strips on the
+        **left** of the heatmap, in the order given. These never change the
+        row order — they are decorative overlays so the reader can see how a
+        secondary category (e.g. ``cell_type``) lines up against the primary
+        grouping. ``groupby`` is automatically prepended if not already in
+        the list.
     max_value : float or None
         Symmetric colour limit. If ``None``, set to the 99th percentile of
-        ``|X_cnv|`` so a handful of extreme bins don't wash out the figure.
+        ``|X_cnv|``.
     figsize : tuple
         Figure size in inches.
     cmap : matplotlib Colormap
-        Diverging colormap. Default is a blue/white/red palette aligned with
-        the figures in Gao et al. 2021 / inferCNV publications.
+        Diverging colormap. Default is a blue/white/red palette.
     standard_chromosomes_only : bool, default True
-        Drop unplaced scaffolds / alt contigs (e.g. ``GL000220.1``) from the
-        plot so the right edge isn't crowded with tiny segments.
+        Drop unplaced scaffolds / alt contigs from the plot.
     backend : {'auto', 'marsilea', 'matplotlib'}
-        ``'auto'`` picks marsilea when installed (recommended — it handles
-        categorical legends + multi-strip annotations cleanly), else falls
-        back to the matplotlib renderer.
+        ``'auto'`` picks marsilea when installed (recommended for clean
+        categorical legends), else falls back to the matplotlib renderer.
     title : str or None
-        Optional figure title.
+        Optional title.
     show : bool, default True
-        Whether to render the figure (marsilea backend only — passed to
-        ``Heatmap.render()``).
+        Whether to render the figure (marsilea only).
 
     Returns
     -------
-    Marsilea backend: the rendered ``marsilea.Heatmap`` object (call
-        ``.figure`` for the matplotlib Figure).
-    Matplotlib backend: ``(fig, axes_dict)`` with keys
-        ``{'heatmap', 'ideogram', 'cbar'}``.
+    Marsilea backend: ``marsilea.Heatmap`` (call ``.figure`` for the Figure).
+    Matplotlib backend: ``(fig, axes_dict)``.
 
     Examples
     --------
     >>> import omicverse as ov
     >>> cnv = ov.single.CNV(adata, method='copykat').run()
+    >>> # rows ordered by aneuploid / diploid:
     >>> ov.pl.cnv_heatmap(adata, groupby='cnv_prediction')
-    >>> ov.pl.cnv_heatmap(adata, groupby=['cell_type', 'cnv_prediction'])
+    >>> # same ordering, with cell_type overlaid as a 2nd colour strip:
+    >>> ov.pl.cnv_heatmap(adata, groupby='cnv_prediction',
+    ...                   annotations=['cell_type'])
     """
     X, chr_pos, _ = _get_cnv_data(adata)
     n_cells, n_bins_total = X.shape
@@ -317,9 +324,17 @@ def cnv_heatmap(
     X = X[:, col_slice]
     n_bins = X.shape[1]
 
-    groupby_list = _to_list(groupby)
-    primary = groupby_list[0] if groupby_list else None
-    row_order, group_segs = _order_rows_by_group(adata, primary)
+    # Annotation strip order: groupby first (so it visually anchors the row
+    # ordering), then the rest of `annotations` (any duplicate removed).
+    ann_list = _to_list(annotations)
+    strips: list[str] = []
+    if groupby is not None:
+        strips.append(groupby)
+    for a in ann_list:
+        if a != groupby and a not in strips:
+            strips.append(a)
+
+    row_order, group_segs = _order_rows_by_group(adata, groupby)
     X_ord = X[row_order]
 
     if max_value is None:
@@ -340,7 +355,7 @@ def cnv_heatmap(
             X_ord=X_ord,
             segments=segments,
             row_order=row_order,
-            groupby_list=groupby_list,
+            strips=strips,
             max_value=max_value,
             figsize=figsize,
             cmap=cmap,
@@ -416,7 +431,7 @@ def _cnv_heatmap_marsilea(
     X_ord: np.ndarray,
     segments: list[tuple[str, int, int]],
     row_order: np.ndarray,
-    groupby_list: list[str],
+    strips: list[str],
     max_value: float,
     figsize: tuple[float, float],
     cmap,
@@ -466,10 +481,12 @@ def _cnv_heatmap_marsilea(
         pad=0.02,
     )
 
-    # Left: one colour strip per groupby column (cell_type, cnv_prediction, …).
+    # Left: one colour strip per requested column. The first one is `groupby`
+    # (which controls row ordering) — anchored flush against the heatmap;
+    # subsequent strips are decorative `annotations`.
     default_pal_28 = list(palette_28)
     default_pal_56 = list(palette_56)
-    for i, key in enumerate(groupby_list):
+    for i, key in enumerate(strips):
         if key not in adata.obs:
             continue
         values = adata.obs[key].astype(object).fillna("NA").values[row_order]
