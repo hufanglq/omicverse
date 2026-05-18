@@ -634,7 +634,7 @@ def embedding(
                 # the flow-layout bookkeeping, which is why default
                 # frameon=True multi-panel grids overlapped on the right.
                 cb_obj = pl.colorbar(
-                    cax, ax=ax, pad=0.01, fraction=0.04, aspect=30, location=colorbar_loc
+                    cax, ax=ax, pad=0.01, fraction=0.02, aspect=30, location=colorbar_loc
                 )
                 panel_colorbars[id(ax)] = cb_obj.ax
 
@@ -726,9 +726,19 @@ def _flow_layout_panels(fig, axs, panel_colorbars=None, gap=0.3, margin=0.3):
     # ── Pass 1: measure each panel's full footprint in inches ───────
     items = []
     for ax in axs:
+        # Use the *data* bbox for the panel's own position, but seed the
+        # footprint with the *tight* bbox so axis labels and tick labels
+        # (X_umap1 below, X_umap2 to the left) are included. Without this,
+        # tight-packed multi-panel grids let labels poke into adjacent
+        # panels' colorbars.
         ax_bbox = ax.get_window_extent(renderer).transformed(inv)
-        x0, x1 = ax_bbox.x0, ax_bbox.x1
-        y0, y1 = ax_bbox.y0, ax_bbox.y1
+        try:
+            tight = ax.get_tightbbox(renderer).transformed(inv)
+            x0, x1 = tight.x0, tight.x1
+            y0, y1 = tight.y0, tight.y1
+        except Exception:
+            x0, x1 = ax_bbox.x0, ax_bbox.x1
+            y0, y1 = ax_bbox.y0, ax_bbox.y1
 
         lg = ax.get_legend()
         if lg is not None:
@@ -748,12 +758,18 @@ def _flow_layout_panels(fig, axs, panel_colorbars=None, gap=0.3, margin=0.3):
             except Exception:
                 pass
 
-        # Include per-panel colorbar bbox so the panel reserves space for it
+        # Include per-panel colorbar bbox so the panel reserves space for it.
+        # Use tight bbox so the colorbar's *tick labels* (e.g. "0.30") are
+        # also counted — otherwise neighbouring panels' axis labels poke
+        # into the colorbar's number column.
         cb_ax = (panel_colorbars or {}).get(id(ax))
         cb_pos_pre = cb_ax.get_position() if cb_ax is not None else None
         ax_pos_pre = ax.get_position()  # for delta computation
         if cb_ax is not None:
-            cb_bbox = cb_ax.get_window_extent(renderer).transformed(inv)
+            try:
+                cb_bbox = cb_ax.get_tightbbox(renderer).transformed(inv)
+            except Exception:
+                cb_bbox = cb_ax.get_window_extent(renderer).transformed(inv)
             x0 = min(x0, cb_bbox.x0); x1 = max(x1, cb_bbox.x1)
             y0 = min(y0, cb_bbox.y0); y1 = max(y1, cb_bbox.y1)
 
