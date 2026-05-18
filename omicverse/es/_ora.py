@@ -286,10 +286,130 @@ def _func_ora(
     return es, pv
 
 
+def _func_ora_torch(
+    mat,
+    cnct,
+    starts,
+    offsets,
+    n_up=None,
+    n_bm: int | float = 0,
+    n_bg: int | float | None = 20_000,
+    ha_corr: int | float = 0.5,
+    verbose: bool = False,
+):
+    r"""Torch (GPU) port of ORA.
+
+    Algorithm
+    ---------
+    For each cell we form the "significant" gene set as ranks > n_up
+    (top of the distribution) **or** rank < n_bm (bottom). Then for
+    each (cell, signature) we tabulate
+
+        a = |significant ∩ signature|
+        b = |signature \\ significant| = |signature| − a
+        c = |significant \\ signature| = |significant| − a
+        d = n_bg − a − b − c   (or total - a-b-c when n_bg == 0)
+
+    and compute
+
+        log-OR(a,b,c,d)        — Haldane-Anscombe-corrected log odds
+        Fisher one-tail p      — hypergeometric ≥ a in (N, K, n) urn
+
+    Vectorisation: build a binary ``significant[nobs, nvar]`` mask via
+    ``argsort + scatter`` (top-N pattern), build the standard
+    ``membership[nvar, nsrc]``, then ``a = significant @ membership``
+    in one batched matmul. Per-cell + per-sig totals fall out of
+    bool reductions.
+
+    The Fisher exact test stays on scipy — ``scipy.stats.hypergeom.sf``
+    is vectorised in C and runs in a few ms for a (nobs, nsrc) batch,
+    which beats hand-rolling a torch betainc for typical workloads
+    (same finding as for ulm/mlm earlier in this PR).
+    """
+    import torch
+    import scipy.stats as _sts
+    from omicverse.es._engine import torch_device, to_gpu_dense
+
+    device = torch_device()
+    M = to_gpu_dense(mat, device, dtype=torch.float64)
+    nobs, nvar = M.shape
+    nsrc = starts.size
+
+    if n_up is None:
+        n_up = int(np.max([np.ceil(0.05 * nvar), 2]))
+    if n_bg is None:
+        n_bg_use = 0  # signal: use significant-gene-specific background later
+    else:
+        n_bg_use = int(n_bg)
+    n_up_int = int(n_up)
+    n_bm_int = int(n_bm)
+
+    # ``rankdata(..., method='ordinal')`` ⇔ ``argsort(stable=True)`` then
+    # invert the permutation to get 1..nvar ranks per cell.
+    sort_idx = torch.argsort(M, dim=1, stable=True)                 # ascending
+    ranks = torch.empty_like(sort_idx, dtype=torch.long)
+    seq = torch.arange(1, nvar + 1, dtype=torch.long, device=device).unsqueeze(0)
+    ranks.scatter_(1, sort_idx, seq.expand(nobs, -1))               # 1..nvar
+    significant = (ranks > n_up_int) | (ranks < n_bm_int)            # (nobs, nvar) bool
+
+    # Build the (nvar × nsrc) signature-membership matrix on GPU.
+    membership = torch.zeros(nvar, nsrc, dtype=torch.float32, device=device)
+    cnct_t = torch.as_tensor(cnct, dtype=torch.long, device=device)
+    sig_id = torch.as_tensor(
+        np.repeat(np.arange(nsrc, dtype=np.int64), offsets), device=device,
+    )
+    membership[cnct_t, sig_id] = 1.0
+
+    # a[i, j] = |significant_i ∩ fset_j|
+    a = significant.to(torch.float32) @ membership                  # (nobs, nsrc)
+    fset_size = membership.sum(dim=0)                               # (nsrc,)
+    sig_size = significant.sum(dim=1, dtype=torch.float32)           # (nobs,)
+    b = fset_size.unsqueeze(0) - a                                  # (nobs, nsrc)
+    c = sig_size.unsqueeze(1) - a                                   # (nobs, nsrc)
+    if n_bg_use == 0:
+        # Background = full panel size minus union of (a, b, c) — but
+        # since a+b is |fset| and a+c is |significant|, |union| =
+        # a + b + c (genes in either group). So d = nvar − a − b − c.
+        d = float(nvar) - a - b - c
+    else:
+        d = float(n_bg_use) - a - b - c
+
+    # Haldane-Anscombe corrected log odds ratio (GPU).
+    a_c = a + ha_corr
+    b_c = b + ha_corr
+    c_c = c + ha_corr
+    d_c = d + ha_corr
+    es = torch.log((a_c * d_c) / (b_c * c_c))                       # (nobs, nsrc)
+
+    # Move to CPU once for scipy hypergeom (cephes is faster than a
+    # torch impl at these sizes — same lesson as ulm's t.sf).
+    a_np = a.cpu().numpy().astype(np.int64)
+    b_np = b.cpu().numpy().astype(np.int64)
+    c_np = c.cpu().numpy().astype(np.int64)
+    d_np = d.cpu().numpy().astype(np.int64)
+    # P(X >= a) under hypergeometric: total = a+b+c+d, "good" = a+b,
+    # drawn = a+c. scipy's sf is P(X > k); use sf(a-1) for >=.
+    M_total = a_np + b_np + c_np + d_np
+    K_good = a_np + b_np
+    n_drawn = a_np + c_np
+    pv = _sts.hypergeom.sf(a_np - 1, M_total, K_good, n_drawn)
+
+    return es.cpu().numpy(), pv
+
+
 _ora = MethodMeta(
     name="ora",
     desc="Over Representation Analysis (ORA)",
     func=_func_ora,
+    # NOTE: ``_func_ora_torch`` exists above but is NOT wired in by default.
+    # The score computation (matmul-based contingency table) is faster on
+    # GPU, but the p-value step needs ``scipy.stats.hypergeom.sf`` over
+    # ~nobs×nsrc independent tests — scipy's vectorised but per-element
+    # log-gamma evaluation is slower than decoupler's numba ``_test1t``
+    # at typical biological workloads. Net effect: GPU ora was ~2-3×
+    # slower than the numba CPU kernel on PBMC3k (2562×5000, 50 sigs).
+    # The helper stays in the file as a reference for a future fully-GPU
+    # Fisher-exact implementation.
     stype="categorical",
     adj=False,
     weight=False,
