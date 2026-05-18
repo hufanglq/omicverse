@@ -11,7 +11,11 @@ import numpy as np
 import scipy.sparse as sps
 from tqdm.auto import tqdm
 
-from omicverse.es._method import Method, MethodMeta
+from .._monitor import monitor
+from .._registry import register_function
+
+from ._net import _resolve_net
+from ._run import _run
 from omicverse.es._gsea import _std
 from omicverse.es._net import _getset
 
@@ -628,17 +632,99 @@ def _func_gsva_torch(
 
     return es.cpu().numpy().astype(np.float64), None
 
-_gsva = MethodMeta(
-    name="gsva",
-    desc="Gene Set Variation Analysis (GSVA)",
-    func=_func_gsva,
-    func_torch=_func_gsva_torch,
-    stype="numerical",
-    adj=False,
-    weight=False,
-    test=False,
-    limits=(-1, +1),
-    reference="https://doi.org/10.1186/1471-2105-14-7",
-)
+
 _func_gsva_torch._accepts_sparse = True
-gsva = Method(_method=_gsva)
+
+
+@monitor
+@register_function(
+    aliases=['gsva', 'GSVA', '基因集变异分析'],
+    category="enrichment",
+    description=(
+        "Gene Set Variation Analysis (GSVA). Non-parametric CDF transform followed by a Kolmogorov–Smirnov-style random walk per cell."
+    ),
+    prerequisites={"optional_functions": ["preprocess"]},
+    requires={"var": ["gene symbols matching signature keys"]},
+    produces={"obsm": ["score_gsva"]},
+    auto_fix="none",
+    examples=[
+        "ov.es.gsva(adata, signatures=sigs)",
+        "ov.es.gsva(adata, signatures=pathway_dict, engine='gpu', tmin=3)",
+    ],
+    related=["aucell", "gsea", "ora", "ulm", "mlm", "waggr", "zscore", "viper", "mdt", "udt"],
+)
+def gsva(
+    data,
+    signatures=None,
+    *,
+    net=None,
+    tmin: int | float = 5,
+    raw: bool = False,
+    empty: bool = True,
+    bsize: int | float = 250_000,
+    verbose: bool = False,
+    engine: str = "auto",
+    kcdf: str | None = 'gaussian',
+    maxdiff: bool = True,
+    absrnk: bool = False,
+    tau: int | float = 1,
+):
+    r"""Sample-level pathway enrichment via the GSVA running-sum statistic.
+
+    .. math::
+
+        ES = \max_i L_i + \min_i L_i
+
+    Reference: `Hänzelmann et al., BMC Bioinf (2013) <https://doi.org/10.1186/1471-2105-14-7>`_.
+
+    Args:
+        data: AnnData (or DataFrame) containing the expression matrix.
+        signatures: Mapping ``{name → [gene, ...]}`` (binary) or
+            ``{name → {gene: weight}}`` (weighted / signed). Mutually
+            exclusive with ``net``.
+        net: Long-format ``source / target / weight`` DataFrame (decoupler
+            convention). Power-user escape hatch; ``signatures`` is the default.
+        tmin: Minimum number of targets per signature; sets below this are
+            silently dropped. Default 5.
+        raw: Score against ``adata.raw.X`` instead of ``adata.X``. Default False.
+        empty: Whether to write all-zero rows for signatures filtered out by
+            ``tmin``. Default True.
+        bsize: Cells per processing chunk (controls peak memory for sparse
+            inputs). Default 250 000.
+        verbose: Show per-cell tqdm progress bars. Default False.
+        engine: ``"auto"`` (default) picks GPU when available, ``"cpu"`` forces
+            the numba kernel, ``"gpu"`` forces the torch kernel.
+        kcdf: Non-parametric CDF kernel: ``'gaussian'`` (default), ``'poisson'`` (integer counts), or ``None`` (ECDF).
+        maxdiff: If True, ES is the signed sum of the running-sum max + min; else the single max-magnitude deviation.
+        absrnk: When ``maxdiff=True``, take the magnitude difference instead of the signed sum.
+        tau: Exponent applied to the symmetric rank weights.
+
+    Returns:
+        None. Writes ``adata.obsm['score_gsva']``.
+
+    Examples:
+        >>> import omicverse as ov
+        >>> ov.es.gsva(adata, signatures=sigs)
+    """
+    from ._engine import resolve_engine
+
+    eng = resolve_engine(engine, has_torch_kernel=True)
+    func = _func_gsva_torch if eng == "gpu" else _func_gsva
+    resolved_net = _resolve_net(signatures, net)
+    return _run(
+        name="gsva",
+        func=func,
+        adj=False,
+        test=False,
+        data=data,
+        net=resolved_net,
+        tmin=tmin,
+        raw=raw,
+        empty=empty,
+        bsize=bsize,
+        verbose=verbose,
+        kcdf=kcdf,
+        maxdiff=maxdiff,
+        absrnk=absrnk,
+        tau=tau,
+    )

@@ -8,7 +8,11 @@ import numba as nb
 import numpy as np
 import scipy.stats as sts
 
-from omicverse.es._method import Method, MethodMeta
+from .._monitor import monitor
+from .._registry import register_function
+
+from ._net import _resolve_net
+from ._run import _run
 
 @nb.njit(parallel=True, cache=True)
 def _fit(
@@ -186,17 +190,90 @@ def _func_mlm_torch(
     es = tval_np if tval else coef_np
     return es, pv
 
-_mlm = MethodMeta(
-    name="mlm",
-    desc="Multivariate Linear Model (MLM)",
-    func=_func_mlm,
-    func_torch=_func_mlm_torch,
-    stype="numerical",
-    adj=True,
-    weight=True,
-    test=True,
-    limits=(-np.inf, +np.inf),
-    reference="https://doi.org/10.1093/bioadv/vbac016",
-)
+
 _func_mlm_torch._accepts_sparse = True
-mlm = Method(_method=_mlm)
+
+
+@monitor
+@register_function(
+    aliases=['mlm', 'MLM', 'multivariate_linear_model'],
+    category="enrichment",
+    description=(
+        "Multivariate Linear Model (MLM). One joint OLS per cell with all signatures as covariates; per-signature ES is the t-statistic of its coefficient."
+    ),
+    prerequisites={"optional_functions": ["preprocess"]},
+    requires={"var": ["gene symbols matching signature keys"]},
+    produces={"obsm": ["score_mlm", "padj_mlm"]},
+    auto_fix="none",
+    examples=[
+        "ov.es.mlm(adata, signatures=sigs)",
+        "ov.es.mlm(adata, signatures=pathway_dict, engine='gpu', tmin=3)",
+    ],
+    related=["aucell", "gsea", "gsva", "ora", "ulm", "waggr", "zscore", "viper", "mdt", "udt"],
+)
+def mlm(
+    data,
+    signatures=None,
+    *,
+    net=None,
+    tmin: int | float = 5,
+    raw: bool = False,
+    empty: bool = True,
+    bsize: int | float = 250_000,
+    verbose: bool = False,
+    engine: str = "auto",
+    tval: bool = True,
+):
+    r"""Per-cell joint multivariate regression enrichment score.
+
+    .. math::
+
+        y = \beta_0 + \sum_j \beta_j x_j + \varepsilon,\quad ES_j = t_{\beta_j}
+
+    Reference: `Badia-i-Mompel et al., Bioinformatics Advances (2022) <https://doi.org/10.1093/bioadv/vbac016>`_.
+
+    Args:
+        data: AnnData (or DataFrame) containing the expression matrix.
+        signatures: Mapping ``{name → [gene, ...]}`` (binary) or
+            ``{name → {gene: weight}}`` (weighted / signed). Mutually
+            exclusive with ``net``.
+        net: Long-format ``source / target / weight`` DataFrame (decoupler
+            convention). Power-user escape hatch; ``signatures`` is the default.
+        tmin: Minimum number of targets per signature; sets below this are
+            silently dropped. Default 5.
+        raw: Score against ``adata.raw.X`` instead of ``adata.X``. Default False.
+        empty: Whether to write all-zero rows for signatures filtered out by
+            ``tmin``. Default True.
+        bsize: Cells per processing chunk (controls peak memory for sparse
+            inputs). Default 250 000.
+        verbose: Show per-cell tqdm progress bars. Default False.
+        engine: ``"auto"`` (default) picks GPU when available, ``"cpu"`` forces
+            the numba kernel, ``"gpu"`` forces the torch kernel.
+        tval: Return the slope t-value (default); set False to return the raw coefficient.
+
+    Returns:
+        None. Writes ``adata.obsm['score_mlm']`` and ``adata.obsm['padj_mlm']``.
+
+    Examples:
+        >>> import omicverse as ov
+        >>> ov.es.mlm(adata, signatures=sigs)
+    """
+    from ._engine import resolve_engine
+
+    eng = resolve_engine(engine, has_torch_kernel=True)
+    func = _func_mlm_torch if eng == "gpu" else _func_mlm
+    resolved_net = _resolve_net(signatures, net)
+    return _run(
+        name="mlm",
+        func=func,
+        adj=True,
+        test=True,
+        data=data,
+        net=resolved_net,
+        tmin=tmin,
+        raw=raw,
+        empty=empty,
+        bsize=bsize,
+        verbose=verbose,
+        tval=tval,
+    )

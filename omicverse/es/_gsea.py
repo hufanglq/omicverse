@@ -9,7 +9,11 @@ import numpy as np
 import scipy.sparse as sps
 from tqdm.auto import tqdm
 
-from omicverse.es._method import Method, MethodMeta
+from .._monitor import monitor
+from .._registry import register_function
+
+from ._net import _resolve_net
+from ._run import _run
 from omicverse.es._net import _getset
 
 @nb.njit(cache=True)
@@ -371,17 +375,93 @@ def _func_gsea_torch(
     pv = np.ones((nobs, nsrc), dtype=np.float64)
     return es_out.cpu().numpy(), pv
 
-_gsea = MethodMeta(
-    name="gsea",
-    desc="Gene Set Enrichment Analysis (GSEA)",
-    func=_func_gsea,
-    func_torch=_func_gsea_torch,
-    stype="numerical",
-    adj=False,
-    weight=False,
-    test=True,
-    limits=(-np.inf, +np.inf),
-    reference="https://doi.org/10.1073/pnas.0506580102",
-)
+
 _func_gsea_torch._accepts_sparse = True
-gsea = Method(_method=_gsea)
+
+
+@monitor
+@register_function(
+    aliases=['gsea', 'GSEA', 'enrichment_score', '通路富集'],
+    category="enrichment",
+    description=(
+        "Gene Set Enrichment Analysis (GSEA). Walks a per-cell ranked feature list and tracks the running deviation from a uniform null."
+    ),
+    prerequisites={"optional_functions": ["preprocess"]},
+    requires={"var": ["gene symbols matching signature keys"]},
+    produces={"obsm": ["score_gsea", "padj_gsea"]},
+    auto_fix="none",
+    examples=[
+        "ov.es.gsea(adata, signatures=sigs)",
+        "ov.es.gsea(adata, signatures=pathway_dict, engine='gpu', tmin=3)",
+    ],
+    related=["aucell", "gsva", "ora", "ulm", "mlm", "waggr", "zscore", "viper", "mdt", "udt"],
+)
+def gsea(
+    data,
+    signatures=None,
+    *,
+    net=None,
+    tmin: int | float = 5,
+    raw: bool = False,
+    empty: bool = True,
+    bsize: int | float = 250_000,
+    verbose: bool = False,
+    engine: str = "auto",
+    times: int | float = 1000,
+    seed: int | float = 42,
+):
+    r"""Per-cell pathway enrichment via the GSEA running-sum statistic.
+
+    .. math::
+
+        ES = L_{\arg\max_i |L_i|},\quad L_i = \sum_{j \le i} \delta(F, j)
+
+    Reference: `Subramanian et al., PNAS (2005) <https://doi.org/10.1073/pnas.0506580102>`_.
+
+    Args:
+        data: AnnData (or DataFrame) containing the expression matrix.
+        signatures: Mapping ``{name → [gene, ...]}`` (binary) or
+            ``{name → {gene: weight}}`` (weighted / signed). Mutually
+            exclusive with ``net``.
+        net: Long-format ``source / target / weight`` DataFrame (decoupler
+            convention). Power-user escape hatch; ``signatures`` is the default.
+        tmin: Minimum number of targets per signature; sets below this are
+            silently dropped. Default 5.
+        raw: Score against ``adata.raw.X`` instead of ``adata.X``. Default False.
+        empty: Whether to write all-zero rows for signatures filtered out by
+            ``tmin``. Default True.
+        bsize: Cells per processing chunk (controls peak memory for sparse
+            inputs). Default 250 000.
+        verbose: Show per-cell tqdm progress bars. Default False.
+        engine: ``"auto"`` (default) picks GPU when available, ``"cpu"`` forces
+            the numba kernel, ``"gpu"`` forces the torch kernel.
+        times: Permutations for empirical p-values. ``1`` skips permutations and keeps the GPU on-device.
+        seed: RNG seed for the permutation block.
+
+    Returns:
+        None. Writes ``adata.obsm['score_gsea']`` and ``adata.obsm['padj_gsea']``.
+
+    Examples:
+        >>> import omicverse as ov
+        >>> ov.es.gsea(adata, signatures=sigs)
+    """
+    from ._engine import resolve_engine
+
+    eng = resolve_engine(engine, has_torch_kernel=True)
+    func = _func_gsea_torch if eng == "gpu" else _func_gsea
+    resolved_net = _resolve_net(signatures, net)
+    return _run(
+        name="gsea",
+        func=func,
+        adj=False,
+        test=True,
+        data=data,
+        net=resolved_net,
+        tmin=tmin,
+        raw=raw,
+        empty=empty,
+        bsize=bsize,
+        verbose=verbose,
+        times=times,
+        seed=seed,
+    )

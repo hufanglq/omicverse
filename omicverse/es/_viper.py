@@ -9,7 +9,11 @@ import numpy as np
 import scipy.stats as sts
 from tqdm.auto import tqdm
 
-from omicverse.es._method import Method, MethodMeta
+from .._monitor import monitor
+from .._registry import register_function
+
+from ._net import _resolve_net
+from ._run import _run
 
 @nb.njit(cache=True)
 def _get_wts_posidxs(
@@ -481,17 +485,99 @@ def _func_viper_torch(
     pvals = pvals_t.cpu().numpy()
     return nes, pvals
 
-_viper = MethodMeta(
-    name="viper",
-    desc="Virtual Inference of Protein-activity by Enriched Regulon analysis (VIPER)",
-    func=_func_viper,
-    func_torch=_func_viper_torch,
-    stype="numerical",
-    adj=True,
-    weight=True,
-    test=True,
-    limits=(-np.inf, +np.inf),
-    reference="https://doi.org/10.1038/ng.3593",
-)
+
 _func_viper_torch._accepts_sparse = True
-viper = Method(_method=_viper)
+
+
+@monitor
+@register_function(
+    aliases=['viper', 'VIPER', 'aREA', 'regulon_activity'],
+    category="enrichment",
+    description=(
+        "Virtual Inference of Protein-activity by Enriched Regulon analysis (VIPER). Analytical rank-based enrichment (aREA) with optional pleiotropy correction."
+    ),
+    prerequisites={"optional_functions": ["preprocess"]},
+    requires={"var": ["gene symbols matching signature keys"]},
+    produces={"obsm": ["score_viper", "padj_viper"]},
+    auto_fix="none",
+    examples=[
+        "ov.es.viper(adata, signatures=sigs)",
+        "ov.es.viper(adata, signatures=pathway_dict, engine='gpu', tmin=3)",
+    ],
+    related=["aucell", "gsea", "gsva", "ora", "ulm", "mlm", "waggr", "zscore", "mdt", "udt"],
+)
+def viper(
+    data,
+    signatures=None,
+    *,
+    net=None,
+    tmin: int | float = 5,
+    raw: bool = False,
+    empty: bool = True,
+    bsize: int | float = 250_000,
+    verbose: bool = False,
+    engine: str = "auto",
+    pleiotropy: bool = True,
+    reg_sign: float = 0.05,
+    n_targets: int = 10,
+    penalty: int | float = 20,
+):
+    r"""Per-cell regulon activity via the aREA score with pleiotropy correction.
+
+    .. math::
+
+        ES = S_3 \sqrt{\sum_i l_i^2},\quad S_3 = (|S_2| + S_1)\,\mathrm{sgn}(S_2)\text{ if } S_1 > 0\text{ else }S_2
+
+    Reference: `Alvarez et al., Nat Genet (2016) <https://doi.org/10.1038/ng.3593>`_.
+
+    Args:
+        data: AnnData (or DataFrame) containing the expression matrix.
+        signatures: Mapping ``{name → [gene, ...]}`` (binary) or
+            ``{name → {gene: weight}}`` (weighted / signed). Mutually
+            exclusive with ``net``.
+        net: Long-format ``source / target / weight`` DataFrame (decoupler
+            convention). Power-user escape hatch; ``signatures`` is the default.
+        tmin: Minimum number of targets per signature; sets below this are
+            silently dropped. Default 5.
+        raw: Score against ``adata.raw.X`` instead of ``adata.X``. Default False.
+        empty: Whether to write all-zero rows for signatures filtered out by
+            ``tmin``. Default True.
+        bsize: Cells per processing chunk (controls peak memory for sparse
+            inputs). Default 250 000.
+        verbose: Show per-cell tqdm progress bars. Default False.
+        engine: ``"auto"`` (default) picks GPU when available, ``"cpu"`` forces
+            the numba kernel, ``"gpu"`` forces the torch kernel.
+        pleiotropy: Apply the pairwise pleiotropy correction (down-weights overlapping regulators).
+        reg_sign: P-value threshold for considering a regulator 'significant' before pleiotropy correction.
+        n_targets: Minimum number of shared targets required for a pairwise pleiotropy comparison.
+        penalty: Pleiotropy penalty exponent (higher = harsher down-weight).
+
+    Returns:
+        None. Writes ``adata.obsm['score_viper']`` and ``adata.obsm['padj_viper']``.
+
+    Examples:
+        >>> import omicverse as ov
+        >>> ov.es.viper(adata, signatures=sigs)
+    """
+    from ._engine import resolve_engine
+
+    eng = resolve_engine(engine, has_torch_kernel=True)
+    func = _func_viper_torch if eng == "gpu" else _func_viper
+    resolved_net = _resolve_net(signatures, net)
+    return _run(
+        name="viper",
+        func=func,
+        adj=True,
+        test=True,
+        data=data,
+        net=resolved_net,
+        tmin=tmin,
+        raw=raw,
+        empty=empty,
+        bsize=bsize,
+        verbose=verbose,
+        pleiotropy=pleiotropy,
+        reg_sign=reg_sign,
+        n_targets=n_targets,
+        penalty=penalty,
+    )

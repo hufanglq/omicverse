@@ -7,7 +7,11 @@
 import numpy as np
 import scipy.stats as sts
 
-from omicverse.es._method import Method, MethodMeta
+from .._monitor import monitor
+from .._registry import register_function
+
+from ._net import _resolve_net
+from ._run import _run
 
 def _cov(A: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.dot(b.T - b.mean(), A - A.mean(axis=0)) / (b.shape[0] - 1)
@@ -188,18 +192,84 @@ def _func_ulm_torch(
         es = (r * (std_b / std_A.unsqueeze(0))).cpu().numpy()
     return es, pv
 
-_ulm = MethodMeta(
-    name="ulm",
-    desc="Univariate Linear Model (ULM)",
-    func=_func_ulm,
-    func_torch=_func_ulm_torch,
-    stype="numerical",
-    adj=True,
-    weight=True,
-    test=True,
-    limits=(-np.inf, +np.inf),
-    reference="https://doi.org/10.1093/bioadv/vbac016",
-)
-# Signal to ``_run.py`` that this kernel handles sparse input itself.
+
 _func_ulm_torch._accepts_sparse = True
-ulm = Method(_method=_ulm)
+
+
+@monitor
+@register_function(
+    aliases=['ulm', 'ULM', 'univariate_linear_model'],
+    category="enrichment",
+    description=(
+        "Univariate Linear Model (ULM). Per (cell × signature), fits a univariate OLS of cell expression vs. signature weights; ES is the slope t-statistic."
+    ),
+    prerequisites={"optional_functions": ["preprocess"]},
+    requires={"var": ["gene symbols matching signature keys"]},
+    produces={"obsm": ["score_ulm", "padj_ulm"]},
+    auto_fix="none",
+    examples=[
+        "ov.es.ulm(adata, signatures=sigs)",
+        "ov.es.ulm(adata, signatures=pathway_dict, engine='gpu', tmin=3)",
+    ],
+    related=["aucell", "gsea", "gsva", "ora", "mlm", "waggr", "zscore", "viper", "mdt", "udt"],
+)
+def ulm(
+    data,
+    signatures=None,
+    *,
+    net=None,
+    tmin: int | float = 5,
+    raw: bool = False,
+    empty: bool = True,
+    bsize: int | float = 250_000,
+    verbose: bool = False,
+    engine: str = "auto",
+    tval: bool = True,
+):
+    r"""Per-cell univariate linear regression enrichment score.
+
+    .. math::
+
+        y_i = eta_0 + eta_1 x_i + arepsilon,\quad ES = t_{eta_1} = \hateta_1 / \mathrm{SE}(\hateta_1)
+
+    Reference: `Badia-i-Mompel et al., Bioinformatics Advances (2022) <https://doi.org/10.1093/bioadv/vbac016>`_.
+
+    Args:
+        data: AnnData (or DataFrame) containing the expression matrix.
+        signatures: Mapping ``{name → [gene, ...]}`` or ``{name → {gene: weight}}``.
+            Mutually exclusive with ``net``.
+        net: Long-format ``source / target / weight`` DataFrame.
+        tmin: Minimum number of targets per signature. Default 5.
+        raw: Score against ``adata.raw.X``. Default False.
+        empty: Write all-zero rows for filtered signatures. Default True.
+        bsize: Cells per processing chunk. Default 250 000.
+        verbose: Show tqdm progress bars. Default False.
+        engine: ``"auto"`` (default) / ``"cpu"`` / ``"gpu"``.
+        tval: Return the slope t-value (default); set False to return the raw coefficient.
+
+    Returns:
+        None. Writes ``adata.obsm['score_ulm']`` and ``adata.obsm['padj_ulm']``.
+
+    Examples:
+        >>> import omicverse as ov
+        >>> ov.es.ulm(adata, signatures=sigs)
+    """
+    from ._engine import resolve_engine
+
+    eng = resolve_engine(engine, has_torch_kernel=True)
+    func = _func_ulm_torch if eng == "gpu" else _func_ulm
+    resolved_net = _resolve_net(signatures, net)
+    return _run(
+        name="ulm",
+        func=func,
+        adj=True,
+        test=True,
+        data=data,
+        net=resolved_net,
+        tmin=tmin,
+        raw=raw,
+        empty=empty,
+        bsize=bsize,
+        verbose=verbose,
+        tval=tval,
+    )

@@ -360,3 +360,62 @@ def net_corr(
         .drop(columns=["abs_corr"])
     )
     return corr
+
+
+# ─────────────────── omicverse signature-dict helpers ───────────────────
+# Lifted from __init__.py during the ov.pp-style refactor so each method's
+# public function can resolve `signatures=` itself without re-importing
+# through __init__.
+
+from collections.abc import Mapping as _Mapping
+from typing import Mapping, Sequence, Union
+
+SignatureValue = Union[Sequence[str], Mapping[str, float]]
+Signatures = Mapping[str, SignatureValue]
+
+
+def signatures_to_net(
+    signatures: Signatures,
+    default_weight: float = 1.0,
+) -> pd.DataFrame:
+    """Convert a dict-of-genes / dict-of-weights into the long ``net`` DataFrame.
+
+    Args:
+        signatures: Mapping ``name → list[gene]`` (binary, all genes get
+            ``default_weight``) or ``name → {gene: weight}`` (signed/weighted,
+            passed through verbatim — viper / mlm / zscore use the sign).
+        default_weight: Weight applied when the value is an unweighted iterable.
+
+    Returns:
+        Long-format DataFrame with columns ``source / target / weight`` — the
+        shape every vendored kernel consumes internally.
+    """
+    rows = []
+    for name, item in signatures.items():
+        if isinstance(item, _Mapping):
+            for g, w in item.items():
+                rows.append({'source': name, 'target': str(g), 'weight': float(w)})
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            for g in item:
+                rows.append(
+                    {'source': name, 'target': str(g), 'weight': float(default_weight)}
+                )
+        else:
+            raise TypeError(
+                f"signatures[{name!r}] must be list / tuple / set / dict, "
+                f"got {type(item).__name__}"
+            )
+    if not rows:
+        raise ValueError("`signatures` is empty.")
+    return pd.DataFrame(rows)
+
+
+def _resolve_net(signatures, net):
+    """Either ``signatures`` (dict) or ``net`` (DataFrame), not both."""
+    if signatures is not None and net is not None:
+        raise ValueError("pass either `signatures` or `net`, not both")
+    if signatures is not None:
+        return signatures_to_net(signatures)
+    if net is None:
+        raise ValueError("must pass `signatures` (dict) or `net` (DataFrame)")
+    return net

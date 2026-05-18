@@ -56,18 +56,21 @@ import pandas as pd
 # call so users see what got added to ``adata.obsm`` for free.
 from .._monitor import monitor as _monitor
 
-# Vendored Method instances (decoupler kernels behind a `Method` facade).
-from ._aucell    import aucell    as _aucell_m
-from ._gsea      import gsea      as _gsea_m
-from ._gsva      import gsva      as _gsva_m
-from ._mdt       import mdt       as _mdt_m
-from ._mlm       import mlm       as _mlm_m
-from ._ora       import ora       as _ora_m
-from ._udt       import udt       as _udt_m
-from ._ulm       import ulm       as _ulm_m
-from ._viper     import viper     as _viper_m
-from ._waggr     import waggr     as _waggr_m
-from ._zscore    import zscore    as _zscore_m
+# Per-method public functions. Each module exposes `<name>()` directly
+# (ov.pp-style: decorator stack + Google docstring + inline dispatch).
+# The vendored numba CPU + torch GPU kernels live alongside them as
+# private helpers (`_func_<name>` / `_func_<name>_torch`).
+from ._aucell    import aucell
+from ._gsea      import gsea
+from ._gsva      import gsva
+from ._mdt       import mdt
+from ._mlm       import mlm
+from ._ora       import ora
+from ._udt       import udt
+from ._ulm       import ulm
+from ._viper     import viper
+from ._waggr     import waggr
+from ._zscore    import zscore
 from ._decouple  import decouple  as _decouple_fn
 from ._consensus import consensus as _consensus_fn
 from ._query_set import query_set as _query_set_fn
@@ -132,94 +135,6 @@ def _resolve_net(signatures, net):
     if net is None:
         raise ValueError("must pass `signatures` (dict) or `net` (DataFrame)")
     return net
-
-
-def _bind_method(method):
-    """Wrap a vendored ``Method`` so it accepts ``signatures=`` (dict)."""
-
-    def wrapped(
-        data,
-        signatures=None,
-        *,
-        net=None,
-        tmin=5,
-        raw=False,
-        empty=True,
-        bsize=250_000,
-        verbose=False,
-        engine: str = 'auto',
-        **kwargs,
-    ):
-        resolved_net = _resolve_net(signatures, net)
-        return method(
-            data,
-            net=resolved_net,
-            tmin=tmin,
-            raw=raw,
-            empty=empty,
-            bsize=bsize,
-            verbose=verbose,
-            engine=engine,
-            **kwargs,
-        )
-
-    wrapped.__name__ = method.name
-    wrapped.__qualname__ = f'ov.es.{method.name}'
-    wrapped.__doc__ = (
-        f"Run the ``{method.name}`` scoring kernel "
-        f"with omicverse-style dict input.\n"
-        f"\n"
-        f"Parameters\n"
-        f"----------\n"
-        f"data : AnnData | DataFrame\n"
-        f"    Expression matrix the kernel scores.\n"
-        f"signatures : dict, optional\n"
-        f"    Mapping ``{{name → list[gene]}}`` (binary) or\n"
-        f"    ``{{name → dict[gene, weight]}}`` (weighted/signed).\n"
-        f"    Mutually exclusive with ``net``.\n"
-        f"net : pandas.DataFrame, optional\n"
-        f"    Long-format DataFrame with ``source / target / weight``\n"
-        f"    columns. Power-user escape hatch; ``signatures`` is the\n"
-        f"    default.\n"
-        f"tmin : int, default 5\n"
-        f"    Minimum number of targets per source — sets below this are\n"
-        f"    silently dropped.\n"
-        f"raw : bool, default False\n"
-        f"    Use ``adata.raw.X`` instead of ``adata.X``.\n"
-        f"empty : bool, default True\n"
-        f"    Whether to write all-zero results for filtered-out sources.\n"
-        f"bsize : int, default 250000\n"
-        f"    Cells per processing chunk (controls peak memory).\n"
-        f"verbose : bool, default False\n"
-        f"    Stream progress bars / info logs.\n"
-        f"**kwargs\n"
-        f"    Method-specific options forwarded to the kernel.\n"
-        f"\n"
-        f"Returns\n"
-        f"-------\n"
-        f"None\n"
-        f"    Writes scores to ``adata.obsm['score_{method.name}']`` "
-        f"(and p-values to ``adata.obsm['padj_{method.name}']`` for "
-        f"methods that produce them).\n"
-        f"\n"
-        f"Original kernel docstring\n"
-        f"-------------------------\n"
-        f"{method.__doc__ or ''}"
-    )
-    return wrapped
-
-
-aucell = _monitor(_bind_method(_aucell_m))
-gsea = _monitor(_bind_method(_gsea_m))
-gsva = _monitor(_bind_method(_gsva_m))
-mdt = _monitor(_bind_method(_mdt_m))
-mlm = _monitor(_bind_method(_mlm_m))
-ora = _monitor(_bind_method(_ora_m))
-udt = _monitor(_bind_method(_udt_m))
-ulm = _monitor(_bind_method(_ulm_m))
-viper = _monitor(_bind_method(_viper_m))
-waggr = _monitor(_bind_method(_waggr_m))
-zscore = _monitor(_bind_method(_zscore_m))
 
 
 @_monitor

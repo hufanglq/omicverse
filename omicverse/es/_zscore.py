@@ -7,7 +7,11 @@
 import numpy as np
 import scipy.stats as sts
 
-from omicverse.es._method import Method, MethodMeta
+from .._monitor import monitor
+from .._registry import register_function
+
+from ._net import _resolve_net
+from ._run import _run
 
 def _func_zscore(
     mat: np.ndarray,
@@ -134,17 +138,90 @@ def _func_zscore_torch(
 
     return es.cpu().numpy(), pv.cpu().numpy()
 
-_zscore = MethodMeta(
-    name="zscore",
-    desc="Z-score (ZSCORE)",
-    func=_func_zscore,
-    func_torch=_func_zscore_torch,
-    stype="numerical",
-    adj=True,
-    weight=True,
-    test=True,
-    limits=(-np.inf, +np.inf),
-    reference="https://doi.org/10.1038/s41467-021-21211-6",
-)
+
 _func_zscore_torch._accepts_sparse = True
-zscore = Method(_method=_zscore)
+
+
+@monitor
+@register_function(
+    aliases=['zscore', 'z_score', 'KSEA', 'RoKAI'],
+    category="enrichment",
+    description=(
+        "Z-score (KSEA / RoKAI flavour). Standardises the signature mean against the per-cell distribution of all features."
+    ),
+    prerequisites={"optional_functions": ["preprocess"]},
+    requires={"var": ["gene symbols matching signature keys"]},
+    produces={"obsm": ["score_zscore", "padj_zscore"]},
+    auto_fix="none",
+    examples=[
+        "ov.es.zscore(adata, signatures=sigs)",
+        "ov.es.zscore(adata, signatures=pathway_dict, engine='gpu', tmin=3)",
+    ],
+    related=["aucell", "gsea", "gsva", "ora", "ulm", "mlm", "waggr", "viper", "mdt", "udt"],
+)
+def zscore(
+    data,
+    signatures=None,
+    *,
+    net=None,
+    tmin: int | float = 5,
+    raw: bool = False,
+    empty: bool = True,
+    bsize: int | float = 250_000,
+    verbose: bool = False,
+    engine: str = "auto",
+    flavor: str = 'RoKAI',
+):
+    r"""Per-cell z-score of the signature mean vs. the all-feature null.
+
+    .. math::
+
+        ES_{\mathrm{KSEA}} = \frac{(\mu_s - \mu_p)\sqrt{m}}{\sigma},\quad ES_{\mathrm{RoKAI}} = \frac{\mu_s \sqrt{m}}{\sigma}
+
+    Reference: `Yılmaz et al., Nat Commun (2021) <https://doi.org/10.1038/s41467-021-21211-6>`_.
+
+    Args:
+        data: AnnData (or DataFrame) containing the expression matrix.
+        signatures: Mapping ``{name → [gene, ...]}`` (binary) or
+            ``{name → {gene: weight}}`` (weighted / signed). Mutually
+            exclusive with ``net``.
+        net: Long-format ``source / target / weight`` DataFrame (decoupler
+            convention). Power-user escape hatch; ``signatures`` is the default.
+        tmin: Minimum number of targets per signature; sets below this are
+            silently dropped. Default 5.
+        raw: Score against ``adata.raw.X`` instead of ``adata.X``. Default False.
+        empty: Whether to write all-zero rows for signatures filtered out by
+            ``tmin``. Default True.
+        bsize: Cells per processing chunk (controls peak memory for sparse
+            inputs). Default 250 000.
+        verbose: Show per-cell tqdm progress bars. Default False.
+        engine: ``"auto"`` (default) picks GPU when available, ``"cpu"`` forces
+            the numba kernel, ``"gpu"`` forces the torch kernel.
+        flavor: Which formulation: ``'RoKAI'`` (default) or ``'KSEA'``.
+
+    Returns:
+        None. Writes ``adata.obsm['score_zscore']`` and ``adata.obsm['padj_zscore']``.
+
+    Examples:
+        >>> import omicverse as ov
+        >>> ov.es.zscore(adata, signatures=sigs)
+    """
+    from ._engine import resolve_engine
+
+    eng = resolve_engine(engine, has_torch_kernel=True)
+    func = _func_zscore_torch if eng == "gpu" else _func_zscore
+    resolved_net = _resolve_net(signatures, net)
+    return _run(
+        name="zscore",
+        func=func,
+        adj=True,
+        test=True,
+        data=data,
+        net=resolved_net,
+        tmin=tmin,
+        raw=raw,
+        empty=empty,
+        bsize=bsize,
+        verbose=verbose,
+        flavor=flavor,
+    )

@@ -7,7 +7,11 @@
 import numpy as np
 from tqdm.auto import tqdm
 
-from omicverse.es._method import Method, MethodMeta
+from .._monitor import monitor
+from .._registry import register_function
+
+from ._net import _resolve_net
+from ._run import _run
 from omicverse.es._odeps import _check_import, xgboost
 
 def _xgbr(
@@ -132,17 +136,99 @@ def _func_udt_torch(
 
     return es.cpu().numpy().astype(np.float64), None
 
-_udt = MethodMeta(
-    name="udt",
-    desc="Univariate Decision Tree (UDT)",
-    func=_func_udt,
-    func_torch=_func_udt_torch,
-    stype="numerical",
-    adj=True,
-    weight=True,
-    test=False,
-    limits=(0, 1),
-    reference="https://doi.org/10.1093/bioadv/vbac016",
-)
+
 _func_udt_torch._accepts_sparse = True
-udt = Method(_method=_udt)
+
+
+@monitor
+@register_function(
+    aliases=['udt', 'UDT', 'univariate_decision_tree'],
+    category="enrichment",
+    description=(
+        "Univariate Decision Tree (UDT). Per (cell × signature), fits a univariate GBDT on that signature's weights; ES is the model's R²."
+    ),
+    prerequisites={"optional_functions": ["preprocess"]},
+    requires={"var": ["gene symbols matching signature keys"]},
+    produces={"obsm": ["score_udt"]},
+    auto_fix="none",
+    examples=[
+        "ov.es.udt(adata, signatures=sigs)",
+        "ov.es.udt(adata, signatures=pathway_dict, engine='gpu', tmin=3)",
+    ],
+    related=["aucell", "gsea", "gsva", "ora", "ulm", "mlm", "waggr", "zscore", "viper", "mdt"],
+)
+def udt(
+    data,
+    signatures=None,
+    *,
+    net=None,
+    tmin: int | float = 5,
+    raw: bool = False,
+    empty: bool = True,
+    bsize: int | float = 250_000,
+    verbose: bool = False,
+    engine: str = "auto",
+    n_estimators: int = 10,
+    max_depth: int = 6,
+    learning_rate: float = 0.3,
+    reg_lambda: float = 1.0,
+):
+    r"""Per (cell, signature) univariate gradient-boosted-tree R² score.
+
+    .. math::
+
+        ES = R^2 = 1 - \frac{\sum_g (y_g - \hat{y}_g)^2}{\sum_g (y_g - \bar{y})^2}
+
+    Reference: `Badia-i-Mompel et al., Bioinformatics Advances (2022) <https://doi.org/10.1093/bioadv/vbac016>`_.
+
+    Args:
+        data: AnnData (or DataFrame) containing the expression matrix.
+        signatures: Mapping ``{name → [gene, ...]}`` (binary) or
+            ``{name → {gene: weight}}`` (weighted / signed). Mutually
+            exclusive with ``net``.
+        net: Long-format ``source / target / weight`` DataFrame (decoupler
+            convention). Power-user escape hatch; ``signatures`` is the default.
+        tmin: Minimum number of targets per signature; sets below this are
+            silently dropped. Default 5.
+        raw: Score against ``adata.raw.X`` instead of ``adata.X``. Default False.
+        empty: Whether to write all-zero rows for signatures filtered out by
+            ``tmin``. Default True.
+        bsize: Cells per processing chunk (controls peak memory for sparse
+            inputs). Default 250 000.
+        verbose: Show per-cell tqdm progress bars. Default False.
+        engine: ``"auto"`` (default) picks GPU when available, ``"cpu"`` forces
+            the numba kernel, ``"gpu"`` forces the torch kernel.
+        n_estimators: Number of boosting rounds per univariate fit.
+        max_depth: Maximum tree depth.
+        learning_rate: Boosting learning rate.
+        reg_lambda: L2 regularisation on leaf weights.
+
+    Returns:
+        None. Writes ``adata.obsm['score_udt']``.
+
+    Examples:
+        >>> import omicverse as ov
+        >>> ov.es.udt(adata, signatures=sigs)
+    """
+    from ._engine import resolve_engine
+
+    eng = resolve_engine(engine, has_torch_kernel=True)
+    func = _func_udt_torch if eng == "gpu" else _func_udt
+    resolved_net = _resolve_net(signatures, net)
+    return _run(
+        name="udt",
+        func=func,
+        adj=True,
+        test=False,
+        data=data,
+        net=resolved_net,
+        tmin=tmin,
+        raw=raw,
+        empty=empty,
+        bsize=bsize,
+        verbose=verbose,
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=learning_rate,
+        reg_lambda=reg_lambda,
+    )

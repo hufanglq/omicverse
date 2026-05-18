@@ -12,7 +12,11 @@ import scipy.sparse as sps
 import scipy.stats as sts
 from tqdm.auto import tqdm
 
-from omicverse.es._method import Method, MethodMeta
+from .._monitor import monitor
+from .._registry import register_function
+
+from ._net import _resolve_net
+from ._run import _run
 from omicverse.es._net import _getset
 
 def _maxn() -> int:
@@ -380,17 +384,99 @@ def _func_ora_torch(
 
     return es.cpu().numpy(), pv_t.cpu().numpy()
 
-_ora = MethodMeta(
-    name="ora",
-    desc="Over Representation Analysis (ORA)",
-    func=_func_ora,
-    func_torch=_func_ora_torch,
-    stype="categorical",
-    adj=False,
-    weight=False,
-    test=True,
-    limits=(-np.inf, +np.inf),
-    reference="https://doi.org/10.2307/2340521",
-)
+
 _func_ora_torch._accepts_sparse = True
-ora = Method(_method=_ora)
+
+
+@monitor
+@register_function(
+    aliases=['ora', 'ORA', 'over_representation', '超几何富集'],
+    category="enrichment",
+    description=(
+        "Over-Representation Analysis (ORA). Builds a per-cell 2×2 contingency table and reports the log odds ratio + Fisher exact tail."
+    ),
+    prerequisites={"optional_functions": ["preprocess"]},
+    requires={"var": ["gene symbols matching signature keys"]},
+    produces={"obsm": ["score_ora", "padj_ora"]},
+    auto_fix="none",
+    examples=[
+        "ov.es.ora(adata, signatures=sigs)",
+        "ov.es.ora(adata, signatures=pathway_dict, engine='gpu', tmin=3)",
+    ],
+    related=["aucell", "gsea", "gsva", "ulm", "mlm", "waggr", "zscore", "viper", "mdt", "udt"],
+)
+def ora(
+    data,
+    signatures=None,
+    *,
+    net=None,
+    tmin: int | float = 5,
+    raw: bool = False,
+    empty: bool = True,
+    bsize: int | float = 250_000,
+    verbose: bool = False,
+    engine: str = "auto",
+    n_up: int | float | None = None,
+    n_bm: int | float = 0,
+    n_bg: int | float = 20000,
+    ha_corr: float = 0.5,
+):
+    r"""Per-cell hypergeometric over-representation test for a signature.
+
+    .. math::
+
+        OR = \log\!\left(\frac{(a+0.5)(d+0.5)}{(b+0.5)(c+0.5)}\right),\quad p = P(X \ge a)\text{ under hypergeometric}
+
+    Reference: `Fisher, J R Stat Soc (1922) <https://doi.org/10.2307/2340521>`_.
+
+    Args:
+        data: AnnData (or DataFrame) containing the expression matrix.
+        signatures: Mapping ``{name → [gene, ...]}`` (binary) or
+            ``{name → {gene: weight}}`` (weighted / signed). Mutually
+            exclusive with ``net``.
+        net: Long-format ``source / target / weight`` DataFrame (decoupler
+            convention). Power-user escape hatch; ``signatures`` is the default.
+        tmin: Minimum number of targets per signature; sets below this are
+            silently dropped. Default 5.
+        raw: Score against ``adata.raw.X`` instead of ``adata.X``. Default False.
+        empty: Whether to write all-zero rows for signatures filtered out by
+            ``tmin``. Default True.
+        bsize: Cells per processing chunk (controls peak memory for sparse
+            inputs). Default 250 000.
+        verbose: Show per-cell tqdm progress bars. Default False.
+        engine: ``"auto"`` (default) picks GPU when available, ``"cpu"`` forces
+            the numba kernel, ``"gpu"`` forces the torch kernel.
+        n_up: Top-ranked features used as the 'significant' set per cell. ``None`` picks the top 5 %.
+        n_bm: Bottom-ranked features used as the 'background'. ``0`` means use all non-significant features.
+        n_bg: Total background population size for the hypergeometric tail.
+        ha_corr: Haldane–Anscombe continuity correction added to each cell of the 2×2 table.
+
+    Returns:
+        None. Writes ``adata.obsm['score_ora']`` and ``adata.obsm['padj_ora']``.
+
+    Examples:
+        >>> import omicverse as ov
+        >>> ov.es.ora(adata, signatures=sigs)
+    """
+    from ._engine import resolve_engine
+
+    eng = resolve_engine(engine, has_torch_kernel=True)
+    func = _func_ora_torch if eng == "gpu" else _func_ora
+    resolved_net = _resolve_net(signatures, net)
+    return _run(
+        name="ora",
+        func=func,
+        adj=False,
+        test=True,
+        data=data,
+        net=resolved_net,
+        tmin=tmin,
+        raw=raw,
+        empty=empty,
+        bsize=bsize,
+        verbose=verbose,
+        n_up=n_up,
+        n_bm=n_bm,
+        n_bg=n_bg,
+        ha_corr=ha_corr,
+    )
