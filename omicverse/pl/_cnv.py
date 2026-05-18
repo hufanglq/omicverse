@@ -193,6 +193,40 @@ def _order_rows_by_group(
     return np.asarray(order, dtype=int), segs
 
 
+def _to_list(x) -> list:
+    if x is None:
+        return []
+    if isinstance(x, str):
+        return [x]
+    return list(x)
+
+
+def _categorical_palette(
+    series: pd.Series, adata: AnnData, key: str, default_palette
+) -> dict:
+    """Pick a {category → colour} mapping for a categorical column.
+
+    Re-uses ``adata.uns[f'{key}_colors']`` if scanpy / omicverse already
+    assigned colours to this column; else samples from the supplied palette.
+    """
+    cats = pd.Categorical(series).categories.tolist()
+    cat_colors_key = f"{key}_colors"
+    if cat_colors_key in adata.uns:
+        existing = list(adata.uns[cat_colors_key])
+        if len(existing) >= len(cats):
+            return {c: existing[i] for i, c in enumerate(cats)}
+    pal = list(default_palette)
+    return {c: pal[i % len(pal)] for i, c in enumerate(cats)}
+
+
+def _has_marsilea() -> bool:
+    try:
+        import marsilea  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 # ----------------------------------------------------------------------
 # cnv_heatmap
 # ----------------------------------------------------------------------
@@ -204,11 +238,14 @@ def _order_rows_by_group(
     description=(
         "Genome-wide CNV heatmap: cells × ordered genomic bins, gain in red "
         "and loss in blue, with an alternating chromosome ideogram bar on top "
-        "and optional row grouping by adata.obs['cnv_prediction'] / cell_type."
+        "and one or more coloured row-annotation strips on the left (e.g. "
+        "cell_type, cnv_prediction). Uses marsilea when available for clean "
+        "categorical legends; falls back to matplotlib text labels otherwise."
     ),
     examples=[
         "ov.pl.cnv_heatmap(adata)",
         "ov.pl.cnv_heatmap(adata, groupby='cnv_prediction')",
+        "ov.pl.cnv_heatmap(adata, groupby=['cell_type', 'cnv_prediction'])",
         "ov.pl.cnv_heatmap(adata, groupby='cell_type', max_value=0.6)",
     ],
     related=["pl.cnv_summary", "pl.cnv_umap", "single.CNV"],
@@ -216,15 +253,15 @@ def _order_rows_by_group(
 def cnv_heatmap(
     adata: AnnData,
     *,
-    groupby: Optional[str] = None,
+    groupby: Union[str, Sequence[str], None] = None,
     max_value: Optional[float] = None,
     figsize: tuple[float, float] = (8.0, 4.5),
     cmap=_CNV_CMAP,
-    show_group_labels: bool = True,
     standard_chromosomes_only: bool = True,
-    ax: Optional[Axes] = None,
+    backend: str = "auto",
     title: Optional[str] = None,
-) -> tuple[Figure, dict[str, Axes]]:
+    show: bool = True,
+):
     r"""Plot the genome-wide CNV heatmap.
 
     Parameters
@@ -232,37 +269,45 @@ def cnv_heatmap(
     adata : AnnData
         Must contain ``adata.obsm['X_cnv']`` and ``adata.uns['cnv']`` —
         populated by :class:`omicverse.single.CNV`.
-    groupby : str or None
-        Column in ``adata.obs`` used to sort and visually separate cell rows
-        (e.g. ``'cnv_prediction'`` to show aneuploid vs. diploid cells in
-        separate bands, or ``'cell_type'``).
+    groupby : str, list of str, or None
+        Column(s) in ``adata.obs`` used to sort cells and draw colour-coded
+        annotation strips on the left side of the heatmap. The first column
+        controls row ordering. Pass a list to stack multiple strips
+        (e.g. ``['cell_type', 'cnv_prediction']``).
     max_value : float or None
         Symmetric colour limit. If ``None``, set to the 99th percentile of
         ``|X_cnv|`` so a handful of extreme bins don't wash out the figure.
     figsize : tuple
-        Figure size in inches. Ignored when ``ax`` is passed.
+        Figure size in inches.
     cmap : matplotlib Colormap
         Diverging colormap. Default is a blue/white/red palette aligned with
         the figures in Gao et al. 2021 / inferCNV publications.
-    show_group_labels : bool
-        Whether to draw the group names as left-side annotations.
-    ax : matplotlib Axes or None
-        Pre-allocated heatmap axes. If ``None``, a new figure with the
-        ideogram subplot is created.
+    standard_chromosomes_only : bool, default True
+        Drop unplaced scaffolds / alt contigs (e.g. ``GL000220.1``) from the
+        plot so the right edge isn't crowded with tiny segments.
+    backend : {'auto', 'marsilea', 'matplotlib'}
+        ``'auto'`` picks marsilea when installed (recommended — it handles
+        categorical legends + multi-strip annotations cleanly), else falls
+        back to the matplotlib renderer.
     title : str or None
         Optional figure title.
+    show : bool, default True
+        Whether to render the figure (marsilea backend only — passed to
+        ``Heatmap.render()``).
 
     Returns
     -------
-    fig : matplotlib.figure.Figure
-    axes : dict
-        ``{'heatmap': Axes, 'ideogram': Axes}`` — handles for further tuning.
+    Marsilea backend: the rendered ``marsilea.Heatmap`` object (call
+        ``.figure`` for the matplotlib Figure).
+    Matplotlib backend: ``(fig, axes_dict)`` with keys
+        ``{'heatmap', 'ideogram', 'cbar'}``.
 
     Examples
     --------
     >>> import omicverse as ov
     >>> cnv = ov.single.CNV(adata, method='copykat').run()
     >>> ov.pl.cnv_heatmap(adata, groupby='cnv_prediction')
+    >>> ov.pl.cnv_heatmap(adata, groupby=['cell_type', 'cnv_prediction'])
     """
     X, chr_pos, _ = _get_cnv_data(adata)
     n_cells, n_bins_total = X.shape
@@ -272,7 +317,9 @@ def cnv_heatmap(
     X = X[:, col_slice]
     n_bins = X.shape[1]
 
-    row_order, group_segs = _order_rows_by_group(adata, groupby)
+    groupby_list = _to_list(groupby)
+    primary = groupby_list[0] if groupby_list else None
+    row_order, group_segs = _order_rows_by_group(adata, primary)
     X_ord = X[row_order]
 
     if max_value is None:
@@ -280,21 +327,34 @@ def cnv_heatmap(
         if max_value <= 0:
             max_value = 1.0
 
-    if ax is None:
-        fig = plt.figure(figsize=figsize)
-        gs = fig.add_gridspec(
-            2, 1, height_ratios=(0.5, 9.5), hspace=0.05, top=0.92, bottom=0.10
+    use_marsilea = backend == "marsilea" or (backend == "auto" and _has_marsilea())
+    if backend == "marsilea" and not _has_marsilea():
+        raise ImportError(
+            "backend='marsilea' but the marsilea package is not installed.\n"
+            "Install with `pip install marsilea` (or pass backend='matplotlib')."
         )
-        ideo_ax = fig.add_subplot(gs[0, 0])
-        hm_ax = fig.add_subplot(gs[1, 0], sharex=ideo_ax)
-    else:
-        hm_ax = ax
-        fig = hm_ax.figure
-        # Carve a thin axes above the heatmap axes for the ideogram.
-        bbox = hm_ax.get_position()
-        ideo_ax = fig.add_axes(
-            [bbox.x0, bbox.y1 + 0.005, bbox.width, bbox.height * 0.05]
+
+    if use_marsilea:
+        return _cnv_heatmap_marsilea(
+            adata,
+            X_ord=X_ord,
+            segments=segments,
+            row_order=row_order,
+            groupby_list=groupby_list,
+            max_value=max_value,
+            figsize=figsize,
+            cmap=cmap,
+            title=title,
+            show=show,
         )
+
+    # --- matplotlib fallback ---
+    fig = plt.figure(figsize=figsize)
+    gs = fig.add_gridspec(
+        2, 1, height_ratios=(0.5, 9.5), hspace=0.05, top=0.92, bottom=0.10
+    )
+    ideo_ax = fig.add_subplot(gs[0, 0])
+    hm_ax = fig.add_subplot(gs[1, 0], sharex=ideo_ax)
 
     _draw_ideogram(ideo_ax, segments)
 
@@ -312,21 +372,20 @@ def cnv_heatmap(
     for _, _, end in segments[:-1]:
         hm_ax.axvline(end, color="white", linewidth=0.4, alpha=0.7)
 
-    # Group dividers — horizontal black lines + optional left-side labels.
-    if groupby is not None and len(group_segs) > 1:
+    # Group dividers — horizontal black lines + left-side labels.
+    if primary is not None and len(group_segs) > 1:
         for _, _, row_end in group_segs[:-1]:
             hm_ax.axhline(row_end, color="black", linewidth=0.8)
-        if show_group_labels:
-            for label, row_start, row_end in group_segs:
-                hm_ax.text(
-                    -n_bins * 0.01,
-                    (row_start + row_end) / 2,
-                    label,
-                    ha="right",
-                    va="center",
-                    fontsize=9,
-                    rotation=0,
-                )
+        for label, row_start, row_end in group_segs:
+            hm_ax.text(
+                -n_bins * 0.01,
+                (row_start + row_end) / 2,
+                label,
+                ha="right",
+                va="center",
+                fontsize=9,
+                rotation=0,
+            )
 
     hm_ax.set_xticks([])
     hm_ax.set_yticks([])
@@ -349,6 +408,86 @@ def cnv_heatmap(
     )
 
     return fig, {"heatmap": hm_ax, "ideogram": ideo_ax, "cbar": cax}
+
+
+def _cnv_heatmap_marsilea(
+    adata: AnnData,
+    *,
+    X_ord: np.ndarray,
+    segments: list[tuple[str, int, int]],
+    row_order: np.ndarray,
+    groupby_list: list[str],
+    max_value: float,
+    figsize: tuple[float, float],
+    cmap,
+    title: Optional[str],
+    show: bool,
+):
+    """Marsilea-backed heatmap with chromosome ideogram + multi-strip row annotations."""
+    import marsilea as ma
+    import marsilea.plotter as mp
+
+    from ._palette import palette_28, palette_56
+
+    n_cells, n_bins = X_ord.shape
+
+    # Build a per-bin "which chromosome" array for the top strip.
+    chrom_per_bin = np.empty(n_bins, dtype=object)
+    for chrom, start, end in segments:
+        chrom_per_bin[start:end] = chrom.replace("chr", "")
+    # Stable, perceptually-uniform alternation that matches the matplotlib
+    # ideogram: even-indexed chromosomes light grey, odd-indexed dark.
+    ideo_palette: dict[str, str] = {}
+    for i, (chrom, _, _) in enumerate(segments):
+        ideo_palette[chrom.replace("chr", "")] = "#d8d8d8" if i % 2 == 0 else "#444444"
+
+    h = ma.Heatmap(
+        X_ord,
+        width=float(figsize[0]),
+        height=float(figsize[1]),
+        cmap=cmap,
+        vmin=-max_value,
+        vmax=max_value,
+        label="CN (log ratio)",
+    )
+
+    # Top: chromosome ideogram as a colour strip + chunk labels for each chrom.
+    h.add_top(
+        mp.Colors(chrom_per_bin, palette=ideo_palette),
+        size=0.18,
+        pad=0.0,
+        legend=False,
+    )
+    chunk_labels = [c.replace("chr", "") for c, _, _ in segments]
+    h.group_cols(chrom_per_bin, order=chunk_labels)
+    h.add_top(
+        mp.Chunk(chunk_labels, fill_colors=None, fontsize=8, rotation=0),
+        size=0.12,
+        pad=0.02,
+    )
+
+    # Left: one colour strip per groupby column (cell_type, cnv_prediction, …).
+    default_pal_28 = list(palette_28)
+    default_pal_56 = list(palette_56)
+    for i, key in enumerate(groupby_list):
+        if key not in adata.obs:
+            continue
+        values = adata.obs[key].astype(object).fillna("NA").values[row_order]
+        n_cats = len(pd.unique(values))
+        base_palette = default_pal_28 if n_cats <= len(default_pal_28) else default_pal_56
+        cat_palette = _categorical_palette(pd.Series(values), adata, key, base_palette)
+        h.add_left(
+            mp.Colors(values, palette=cat_palette, label=key),
+            size=0.18,
+            pad=0.0 if i == 0 else 0.02,
+            legend=True,
+        )
+
+    h.add_legends()
+    if title:
+        h.add_title(title, fontsize=11)
+    h.render()
+    return h
 
 
 # ----------------------------------------------------------------------
