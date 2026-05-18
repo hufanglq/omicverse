@@ -89,10 +89,51 @@ def _func_zscore(
     return es, pv
 
 
+def _func_zscore_torch(
+    mat,
+    adj,
+    flavor: str = "RoKAI",
+    verbose: bool = False,
+):
+    r"""Torch (GPU) port of :func:`_func_zscore` — bit-for-bit equivalent.
+
+    Translates each numpy op verbatim: ``std`` with ``unbiased=True``
+    matches ``ddof=1``; the survival-function for the p-value stays on
+    scipy (no torch CDF for the standard normal that matches the
+    scipy reference to fp64). Inputs/outputs are numpy arrays so the
+    method slots cleanly into the existing :func:`_run` pipeline.
+    """
+    import torch
+    from omicverse.es._engine import torch_device
+
+    assert isinstance(flavor, str) and flavor in ("KSEA", "RoKAI"), \
+        "flavor must be str and KSEA or RoKAI"
+    device = torch_device()
+
+    M = torch.as_tensor(np.asarray(mat), dtype=torch.float64, device=device)
+    A = torch.as_tensor(np.asarray(adj), dtype=torch.float64, device=device)
+    nobs, nvar = M.shape
+    _, nsrc = A.shape
+
+    stds = M.std(dim=1, unbiased=True)                          # (nobs,)
+    if flavor == "RoKAI":
+        mean_all = M.mean(dim=1)                                # (nobs,)
+    else:
+        mean_all = torch.zeros_like(stds)
+    n = torch.sqrt((A != 0).sum(dim=0).to(torch.float64))       # (nsrc,)
+    mean = (M @ A) / A.abs().sum(dim=0)                         # (nobs, nsrc)
+    es = ((mean - mean_all.unsqueeze(1)) * n) / stds.unsqueeze(1)
+
+    es_np = es.cpu().numpy()
+    pv = 2 * sts.norm.sf(np.abs(es_np))
+    return es_np, pv
+
+
 _zscore = MethodMeta(
     name="zscore",
     desc="Z-score (ZSCORE)",
     func=_func_zscore,
+    func_torch=_func_zscore_torch,
     stype="numerical",
     adj=True,
     weight=True,

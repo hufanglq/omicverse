@@ -249,10 +249,54 @@ def _func_waggr(
     return es, pv
 
 
+def _func_waggr_torch(
+    mat,
+    adj,
+    fun: "str | Callable" = "wmean",
+    times: "int | float" = 1000,
+    seed: "int | float" = 42,
+    verbose: bool = False,
+):
+    r"""Torch (GPU) port of :func:`_func_waggr` for the deterministic
+    aggregation (``wmean`` / ``wsum``).
+
+    The aggregation reduces to a single matmul + per-column
+    normalisation:
+
+    - ``wsum``:  :math:`es = \mathrm{mat} @ \mathrm{adj}`
+    - ``wmean``: :math:`es = (\mathrm{mat} @ \mathrm{adj}) / \sum |w|`
+
+    Both are trivially vectorised on the GPU. The permutation path
+    (``times > 1``) requires a numba-only random-shuffle kernel and is
+    not yet ported — when permutations are requested we fall back to
+    the CPU kernel transparently.
+    """
+    if not isinstance(fun, str) or fun not in ("wsum", "wmean") or int(times) > 1:
+        # Custom ``fun`` callables and permutation-based p-values stay
+        # on the CPU path until a torch equivalent is written.
+        return _func_waggr(mat, adj, fun=fun, times=times, seed=seed, verbose=verbose)
+
+    import torch
+    from omicverse.es._engine import torch_device
+
+    device = torch_device()
+    M = torch.as_tensor(np.asarray(mat), dtype=torch.float64, device=device)
+    A = torch.as_tensor(np.asarray(adj), dtype=torch.float64, device=device)
+
+    es = M @ A
+    if fun == "wmean":
+        es = es / A.abs().sum(dim=0)
+
+    es_np = es.cpu().numpy()
+    pv = np.ones_like(es_np)
+    return es_np, pv
+
+
 _waggr = MethodMeta(
     name="waggr",
     desc="Weighted Aggregate (WAGGR)",
     func=_func_waggr,
+    func_torch=_func_waggr_torch,
     stype="numerical",
     adj=True,
     weight=True,

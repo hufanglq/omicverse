@@ -147,6 +147,7 @@ def _bind_method(method):
         empty=True,
         bsize=250_000,
         verbose=False,
+        engine: str = 'auto',
         **kwargs,
     ):
         resolved_net = _resolve_net(signatures, net)
@@ -158,6 +159,7 @@ def _bind_method(method):
             empty=empty,
             bsize=bsize,
             verbose=verbose,
+            engine=engine,
             **kwargs,
         )
 

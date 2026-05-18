@@ -24,6 +24,7 @@ class MethodMeta:
         test: bool,
         limits: tuple,
         reference: str,
+        func_torch: Callable | None = None,
     ):
         self.name = name
         self.desc = desc
@@ -34,6 +35,10 @@ class MethodMeta:
         self.test = test
         self.limits = limits
         self.reference = reference
+        # Optional torch GPU kernel — same signature as `func`. When
+        # not None, callers can request `engine='gpu'` and the Method
+        # will dispatch here instead.
+        self.func_torch = func_torch
 
     def meta(self) -> pd.DataFrame:
         meta = pd.DataFrame(
@@ -68,6 +73,7 @@ class Method(MethodMeta):
             test=_method.test,
             limits=_method.limits,
             reference=_method.reference,
+            func_torch=_method.func_torch,
         )
         self._method = _method
         self.__doc__ = self.func.__doc__
@@ -81,11 +87,16 @@ class Method(MethodMeta):
         empty: bool = True,
         bsize: int | float = 250_000,
         verbose: bool = False,
+        engine: str = 'auto',
         **kwargs,
     ):
+        from omicverse.es._engine import resolve_engine
+
+        eng = resolve_engine(engine, has_torch_kernel=self.func_torch is not None)
+        func = self.func_torch if eng == 'gpu' else self.func
         return _run(
             name=self.name,
-            func=self.func,
+            func=func,
             adj=self.adj,
             test=self.test,
             data=data,

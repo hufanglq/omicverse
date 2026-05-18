@@ -118,10 +118,97 @@ def _func_aucell(
     return es, None
 
 
+def _func_aucell_torch(
+    mat,
+    cnct,
+    starts,
+    offsets,
+    n_up=None,
+    verbose: bool = False,
+):
+    r"""Torch (GPU) port of :func:`_func_aucell` — bit-for-bit
+    equivalent on fp64.
+
+    Vectorisation strategy
+    ----------------------
+    1. **Rank** all genes per cell once via ``argsort(stable=True) +
+       scatter``. Matches ``scipy.stats.rankdata(..., method='ordinal')``
+       because both break ties by appearance order in the array.
+    2. For each signature, gather the ranks of that signature's genes
+       across **all cells** at once → shape ``(nobs, k_j)``. Mask
+       ranks above ``n_up`` by clamping them to ``n_up`` so they
+       contribute zero to the AUC integral after sorting + diff.
+    3. The integral matches the CPU formula exactly:
+       ``AUC = sum(diff([sorted_ranks, n_up]) * y) / max_auc`` where
+       ``max_auc`` is the per-signature scalar identical to the numba
+       version.
+
+    No p-values are produced (aucell is non-statistical), so ``pv``
+    returns ``None`` to match :func:`_func_aucell`.
+    """
+    import torch
+    from omicverse.es._engine import torch_device
+
+    device = torch_device()
+    nobs, nvar = mat.shape
+    nsrc = starts.size
+    n_up = _validate_n_up(nvar, n_up)
+
+    # Densify if sparse, then move to GPU.
+    if sps.issparse(mat):
+        mat = mat.toarray()
+    M = torch.as_tensor(np.asarray(mat), dtype=torch.float64, device=device)
+
+    # Per-cell rank, stable to match scipy 'ordinal'.
+    sort_idx = torch.argsort(-M, dim=1, stable=True)            # (nobs, nvar)
+    ranks = torch.empty_like(sort_idx, dtype=torch.long)
+    rank_vals = torch.arange(
+        1, nvar + 1, dtype=torch.long, device=device,
+    ).unsqueeze(0).expand(nobs, -1)
+    ranks.scatter_(1, sort_idx, rank_vals)
+
+    es = torch.zeros(nobs, nsrc, dtype=torch.float64, device=device)
+    n_up_int = int(n_up)
+
+    for j in range(nsrc):
+        # Numpy indices for the j-th feature set
+        fset_np = cnct[starts[j]:starts[j] + offsets[j]]
+        k = int(fset_np.shape[0])
+        # Per-signature scalar max_auc — identical to CPU code path.
+        x_th = np.arange(1, k + 1)
+        x_th = x_th[x_th < n_up_int]
+        max_auc = float(np.sum(np.diff(np.append(x_th, n_up_int)) * x_th))
+        if max_auc == 0:
+            continue
+
+        fset = torch.as_tensor(fset_np, dtype=torch.long, device=device)
+        x = ranks[:, fset]                                       # (nobs, k)
+        # Saturate at n_up so values above the threshold contribute 0 to
+        # the integral once sorted (`diff` between consecutive n_up's = 0).
+        x = torch.where(
+            x <= n_up_int,
+            x,
+            torch.full_like(x, n_up_int, dtype=x.dtype),
+        )
+        x_sorted, _ = torch.sort(x, dim=1)                       # (nobs, k)
+        last = torch.full(
+            (nobs, 1), n_up_int, dtype=x_sorted.dtype, device=device,
+        )
+        x_full = torch.cat([x_sorted, last], dim=1)              # (nobs, k+1)
+        dx = torch.diff(x_full, dim=1).to(torch.float64)         # (nobs, k)
+        y_seq = torch.arange(
+            1, k + 1, dtype=torch.float64, device=device,
+        ).unsqueeze(0)                                           # (1, k)
+        es[:, j] = (dx * y_seq).sum(dim=1) / max_auc
+
+    return es.cpu().numpy(), None
+
+
 _aucell = MethodMeta(
     name="aucell",
     desc="AUCell",
     func=_func_aucell,
+    func_torch=_func_aucell_torch,
     stype="categorical",
     adj=False,
     weight=False,

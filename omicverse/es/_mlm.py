@@ -130,10 +130,61 @@ def _func_mlm(
     return es, pv
 
 
+def _func_mlm_torch(
+    mat,
+    adj,
+    tval: bool = True,
+    verbose: bool = False,
+):
+    r"""Torch (GPU) port of :func:`_func_mlm`.
+
+    Replicates decoupler's pipeline: prepend an intercept column, then
+    for each cell solve the closed-form OLS
+
+    .. math::
+        \hat{\beta} = (X^\top X)^{-1} X^\top y,\quad
+        SE_j = \sqrt{(SSE_i / df) \cdot (X^\top X)^{-1}_{jj}}
+
+    Equivalent to ``numpy.linalg.lstsq`` in the all-finite, full-rank
+    regime decoupler enforces. Matches the CPU result to fp64
+    round-off.
+    """
+    import torch
+    from omicverse.es._engine import torch_device
+
+    device = torch_device()
+    n_features, n_fsets = np.asarray(adj).shape
+    # Prepend intercept column
+    A_ext = np.column_stack((np.ones((n_features,)), np.asarray(adj)))
+    df = n_features - n_fsets - 1
+
+    X = torch.as_tensor(A_ext, dtype=torch.float64, device=device)             # (n_var, p+1)
+    Y = torch.as_tensor(np.asarray(mat).T, dtype=torch.float64, device=device) # (n_var, n_cells)
+    XtX = X.T @ X                                                              # (p+1, p+1)
+    XtY = X.T @ Y                                                              # (p+1, n_cells)
+    inv = torch.linalg.inv(XtX)
+    coef = inv @ XtY                                                           # (p+1, n_cells)
+
+    # Residual SSE per cell, matching the lstsq-with-rcond path
+    resid = Y - X @ coef                                                       # (n_var, n_cells)
+    sse = (resid ** 2).sum(dim=0) / df                                         # (n_cells,)
+    diag_inv = torch.diagonal(inv)                                             # (p+1,)
+    se = torch.sqrt(sse.unsqueeze(0) * diag_inv.unsqueeze(1))                  # (p+1, n_cells)
+    tval_mat = coef / se                                                       # (p+1, n_cells)
+
+    coef_np = coef.T.cpu().numpy()[:, 1:]   # drop intercept column
+    tval_np = tval_mat.T.cpu().numpy()[:, 1:]
+    pv = 2 * (1 - sts.t.cdf(np.abs(tval_np), df=df))
+
+    es = tval_np if tval else coef_np
+    return es, pv
+
+
 _mlm = MethodMeta(
     name="mlm",
     desc="Multivariate Linear Model (MLM)",
     func=_func_mlm,
+    func_torch=_func_mlm_torch,
     stype="numerical",
     adj=True,
     weight=True,
