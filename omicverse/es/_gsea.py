@@ -273,10 +273,120 @@ def _func_gsea(
     return es, pv
 
 
+def _func_gsea_torch(
+    mat,
+    cnct,
+    starts,
+    offsets,
+    times: int | float = 1000,
+    seed: int | float = 42,
+    verbose: bool = False,
+):
+    r"""Torch (GPU) port of GSEA — deterministic ES via batched
+    running-max-deviation on the rank axis.
+
+    Algorithm (per cell, vectorised over all signatures)
+    ---------------------------------------------------
+    1. Sort row descending (``argsort(-row, stable=True)``) once,
+       giving ``sort_idx`` and ``row_abs_sorted``.
+    2. Build a binary ``membership[gene, sig]`` matrix once.
+       Reorder along the rank axis: ``mem_sorted = membership[sort_idx]``,
+       shape ``(B, nvar, nsrc)`` per cell-batch.
+    3. Per-cell-per-signature step:
+         delta_in_set  = |row_sorted| / sum_set
+         delta_out_set = -1 / (nvar - k)
+       Combine via ``where(mem_sorted, in_set, out_set)`` → step values.
+    4. ``cumsum`` along rank axis = running enrichment ``L(r)``.
+    5. ``es = sign(L_pos > -L_neg) * max(|L_pos|, |L_neg|)`` where
+       ``L_pos = max_r L(r)``, ``L_neg = min_r L(r)``.
+
+    No permutation path (NES + p-value) here — when ``times > 1`` we
+    fall back to the numba CPU kernel. Permutation requires a
+    pseudo-random batched-shuffle kernel that's a substantial
+    follow-up; GSEA without permutation (``times=1``) still gives the
+    canonical ES which is what most callers chart.
+
+    Memory model
+    ------------
+    Working tensor ``(B, nvar, nsrc)`` in fp32. Cell-batch size
+    chosen by :func:`chunk_size_for` to stay around 32 MB.
+    """
+    import torch
+    from omicverse.es._engine import torch_device, chunk_size_for, to_gpu_dense
+
+    if int(times) > 1:
+        # Permutation-based p-value path stays on the numba kernel.
+        return _func_gsea(
+            mat, cnct, starts, offsets, times=times, seed=seed, verbose=verbose,
+        )
+
+    device = torch_device()
+    M = to_gpu_dense(mat, device, dtype=torch.float64)
+    nobs, nvar = M.shape
+    nsrc = starts.size
+
+    # Build dense (gene → signature) membership once.
+    membership = torch.zeros(nvar, nsrc, dtype=torch.float32, device=device)
+    cnct_t = torch.as_tensor(cnct, dtype=torch.long, device=device)
+    sig_id = torch.as_tensor(
+        np.repeat(np.arange(nsrc, dtype=np.int64), offsets), device=device,
+    )
+    membership[cnct_t, sig_id] = 1.0
+    k = membership.sum(dim=0).to(torch.float64)                    # (nsrc,) signature sizes
+    dec = 1.0 / (nvar - k)                                          # (nsrc,) out-of-set decrement
+
+    # Cell-batch loop — same target-element budget as aucell.
+    cells_per_batch = chunk_size_for(nvar * nsrc, max_units=nobs)
+    es_out = torch.zeros(nobs, nsrc, dtype=torch.float64, device=device)
+    for b0 in range(0, nobs, cells_per_batch):
+        b1 = min(b0 + cells_per_batch, nobs)
+        Mb = M[b0:b1]                                              # (B, nvar)
+        sort_idx = torch.argsort(-Mb, dim=1, stable=True)          # (B, nvar)
+        row_abs_sorted = Mb.abs().gather(1, sort_idx)              # (B, nvar)
+
+        # sum_set[i, j] = Σ |row_i[g]| for g ∈ signature j
+        sum_set = Mb.abs() @ membership.to(torch.float64)           # (B, nsrc)
+
+        # mem_sorted[i, r, j] = membership[sort_idx[i, r], j]
+        mem_sorted = membership[sort_idx]                          # (B, nvar, nsrc) fp32
+
+        # Avoid 0/0 when sum_set == 0 (signature contributes nothing).
+        safe_sum = torch.where(sum_set == 0, torch.ones_like(sum_set), sum_set)
+
+        # Step values: numerator = |row_sorted| (B, nvar, 1), denom = sum_set (B, 1, nsrc).
+        in_step = row_abs_sorted.unsqueeze(2) / safe_sum.unsqueeze(1)   # (B, nvar, nsrc)
+        # (mem * in_step) + ((1 - mem) * -dec)
+        delta = mem_sorted * in_step.to(torch.float32) + \
+                (1.0 - mem_sorted) * (-dec.to(torch.float32))
+        # Zero out columns whose sum_set is 0 to match the CPU kernel's
+        # early-return ``return 0.0, 0, np.zeros(rnks.size)``.
+        zero_mask = (sum_set == 0)
+        if zero_mask.any():
+            delta[:, :, :] = torch.where(
+                zero_mask.unsqueeze(1).expand_as(delta),
+                torch.zeros_like(delta),
+                delta,
+            )
+
+        running = delta.cumsum(dim=1)                              # (B, nvar, nsrc)
+        # max+ and max- along rank axis
+        max_pos = running.amax(dim=1)                              # (B, nsrc)
+        max_neg = running.amin(dim=1)                              # (B, nsrc)
+        # ES = max_pos if |max_pos| > |max_neg| else max_neg
+        es_out[b0:b1] = torch.where(
+            max_pos > -max_neg, max_pos, max_neg,
+        ).to(torch.float64)
+
+    # No permutation → pv is all ones (matches CPU ``np.ones(nsrc)``).
+    pv = np.ones((nobs, nsrc), dtype=np.float64)
+    return es_out.cpu().numpy(), pv
+
+
 _gsea = MethodMeta(
     name="gsea",
     desc="Gene Set Enrichment Analysis (GSEA)",
     func=_func_gsea,
+    func_torch=_func_gsea_torch,
     stype="numerical",
     adj=False,
     weight=False,
@@ -284,4 +394,5 @@ _gsea = MethodMeta(
     limits=(-np.inf, +np.inf),
     reference="https://doi.org/10.1073/pnas.0506580102",
 )
+_func_gsea_torch._accepts_sparse = True
 gsea = Method(_method=_gsea)
