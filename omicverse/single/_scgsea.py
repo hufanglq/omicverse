@@ -9,6 +9,14 @@ from ._aucell import derive_auc_threshold,fast_rank,_rank_sparse_row,aucell
 from .._registry import register_function
 
 
+_OV_ES_AUCELL_NOTICE = (
+    "[ov.single AUCell] The new GPU-accelerated API is `ov.es.aucell` — "
+    "pass signatures as a dict, e.g. "
+    "`ov.es.aucell(adata, signatures={'name': genes}, engine='gpu')`. "
+    "The legacy function still works."
+)
+
+
 def geneset_aucell_tmp(adata, geneset_name, geneset, AUC_threshold=0.01, seed=42, chunk_size=10000):
     r"""Calculate the AUC-ell score for a given gene set.
 
@@ -32,6 +40,7 @@ def geneset_aucell_tmp(adata, geneset_name, geneset, AUC_threshold=0.01, seed=42
     None
         Writes AUCell score to ``adata.obs[f'{geneset_name}_aucell']``.
     """
+    print(_OV_ES_AUCELL_NOTICE)
     from ..external.ctxcore.recovery import aucs
 
     matrix = adata.X.copy()
@@ -98,6 +107,7 @@ def geneset_aucell(adata,geneset_name,geneset,AUC_threshold=0.01,seed=42):
     None
         Writes AUCell score to ``adata.obs[f'{geneset_name}_aucell']``.
     """
+    print(_OV_ES_AUCELL_NOTICE)
     from ..external.ctxcore.recovery import aucs
 
     matrix = adata.X.copy()
@@ -152,6 +162,7 @@ def pathway_aucell(adata,pathway_names,pathways_dict,AUC_threshold=0.01,seed=42)
     None
         Writes per-pathway AUCell scores to ``adata.obs``.
     """
+    print(_OV_ES_AUCELL_NOTICE)
     from ..external.ctxcore.recovery import aucs
 
     matrix = adata.X.copy()
@@ -200,6 +211,7 @@ def pathway_aucell_tmp(adata, pathway_names, pathways_dict, AUC_threshold=0.01, 
     None
         Writes per-pathway AUCell scores to ``adata.obs``.
     """
+    print(_OV_ES_AUCELL_NOTICE)
     from ..external.ctxcore.recovery import aucs
 
     matrix = adata.X.copy()
@@ -263,6 +275,7 @@ def pathway_aucell_enrichment(adata,pathways_dict,AUC_threshold=0.01,seed=42,num
     anndata.AnnData
         AnnData whose ``X`` stores pathway AUCell activity matrix.
     """
+    print(_OV_ES_AUCELL_NOTICE)
     from ..external.ctxcore.genesig import GeneSignature
 
     test_gmt=[]
@@ -308,6 +321,7 @@ def pathway_aucell_enrichment_tmp(adata, pathways_dict, AUC_threshold=0.01, seed
     anndata.AnnData
         AnnData whose ``X`` stores pathway AUCell activity matrix.
     """
+    print(_OV_ES_AUCELL_NOTICE)
     from tqdm import tqdm
     from ..external.ctxcore.genesig import GeneSignature
 

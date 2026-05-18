@@ -193,7 +193,18 @@ def aucell4r(
         A dataframe with the AUCs (n_cells x n_modules).
 
     """
-    from boltons.iterutils import chunked
+    # Lazy: pulled in here so installing omicverse without the SCENIC
+    # extras (boltons, frozendict) still works — only the legacy
+    # `ov.single.aucell` path needs them. Prefer `ov.es.aucell`.
+    try:
+        from boltons.iterutils import chunked
+    except ImportError as e:
+        raise ImportError(
+            "ov.single.aucell (the SCENIC-compatible legacy path) "
+            "requires `boltons` and `frozendict`. Install with "
+            "`pip install boltons frozendict`, or switch to "
+            "`ov.es.aucell` which has no such dependency."
+        ) from e
     from ..external.ctxcore.recovery import enrichment4cells
 
     if num_workers == 1:
@@ -311,6 +322,14 @@ def aucell(
 
     AUCell quantifies gene set enrichment by calculating the Area Under the Curve (AUC)
     of gene rankings for each cell, providing a robust measure of pathway activity.
+
+    .. note::
+       This is the SCENIC/ctxcore-based legacy implementation, kept for
+       back-compat with pySCENIC pipelines that depend on its exact
+       numerical output or weighted-regulon side products. For new code
+       prefer :func:`omicverse.es.aucell` — it is ~15-20× faster
+       single-threaded (numba-compiled, OpenMP parallel over signatures)
+       and shares preprocessing with the rest of the ``ov.es`` family.
 
     Parameters
     ----------
