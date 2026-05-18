@@ -634,7 +634,7 @@ def embedding(
                 # the flow-layout bookkeeping, which is why default
                 # frameon=True multi-panel grids overlapped on the right.
                 cb_obj = pl.colorbar(
-                    cax, ax=ax, pad=0.01, fraction=0.08, aspect=30, location=colorbar_loc
+                    cax, ax=ax, pad=0.01, fraction=0.04, aspect=30, location=colorbar_loc
                 )
                 panel_colorbars[id(ax)] = cb_obj.ax
 
