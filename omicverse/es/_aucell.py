@@ -170,7 +170,7 @@ def _func_aucell_torch(
     running the GPU out of memory.
     """
     import torch
-    from omicverse.es._engine import torch_device
+    from omicverse.es._engine import torch_device, chunk_size_for
 
     device = torch_device()
     nobs, nvar = mat.shape
@@ -216,11 +216,12 @@ def _func_aucell_torch(
         max_aucs_t,
     )
 
-    # Cell-batch loop. Budget ~1 GB of fp32 → cells_per_batch.
-    # working tensor = (B, n_up, nsrc) * 4 bytes ≈ 4 * B * n_up * nsrc
-    bytes_budget = 1 << 30  # 1 GB
-    per_batch_bytes = max(1, 4 * n_up_int * nsrc)
-    cells_per_batch = max(1, min(nobs, bytes_budget // per_batch_bytes))
+    # Cell-batch loop with a fixed target-element budget, mirroring
+    # ``ov.pp._pca._auto_dense_chunk_size``. Keeps the per-batch
+    # working tensor ``(B × n_up × nsrc)`` around ~32 MB so torch's
+    # caching allocator reuses the same blocks across batches without
+    # fragmentation or driver-side OOM.
+    cells_per_batch = chunk_size_for(n_up_int * nsrc, max_units=nobs)
 
     es = torch.zeros(nobs, nsrc, dtype=torch.float64, device=device)
     for b0 in range(0, nobs, cells_per_batch):
@@ -231,8 +232,7 @@ def _func_aucell_torch(
         cs = m_top.cumsum(dim=1)                         # (B, n_up, nsrc)
         total = cs.sum(dim=1)                            # (B, nsrc)
         k_valid = m_top.sum(dim=1)                       # (B, nsrc)
-        auc_unnorm = (total - k_valid).to(torch.float64)
-        es[b0:b1] = auc_unnorm / safe_max
+        es[b0:b1] = (total - k_valid).to(torch.float64) / safe_max
 
     # Columns where max_auc was 0 (signatures empty after pruning to n_up)
     # were rescued by `safe_max`; restore them as 0 to match CPU.

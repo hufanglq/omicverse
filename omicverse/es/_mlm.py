@@ -172,6 +172,9 @@ def _func_mlm_torch(
     se = torch.sqrt(sse.unsqueeze(0) * diag_inv.unsqueeze(1))                  # (p+1, n_cells)
     tval_mat = coef / se                                                       # (p+1, n_cells)
 
+    # P-values stay on scipy/cephes intentionally — see the comment in
+    # ``_func_ulm_torch``. cephes ``t.cdf`` is faster than a torch
+    # continued-fraction at the (p+1) × n_cells shapes typical for mlm.
     coef_np = coef.T.cpu().numpy()[:, 1:]   # drop intercept column
     tval_np = tval_mat.T.cpu().numpy()[:, 1:]
     pv = 2 * (1 - sts.t.cdf(np.abs(tval_np), df=df))
