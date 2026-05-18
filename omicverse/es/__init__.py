@@ -245,6 +245,109 @@ def decouple(
     )
 
 
+_SINGLE_METHOD_DISPATCH = {
+    'aucell': lambda: aucell, 'gsea':   lambda: gsea,
+    'gsva':   lambda: gsva,   'mdt':    lambda: mdt,
+    'mlm':    lambda: mlm,    'ora':    lambda: ora,
+    'udt':    lambda: udt,    'ulm':    lambda: ulm,
+    'viper':  lambda: viper,  'waggr':  lambda: waggr,
+    'zscore': lambda: zscore,
+}
+
+
+try:
+    from .._registry import register_function as _register_function
+except ImportError:  # pragma: no cover — keep es importable without registry
+    def _register_function(*_a, **_k):
+        return lambda f: f
+
+
+@_register_function(
+    aliases=[
+        "enrichment", "es",
+        "decoupler", "score_signatures",
+        "通路打分", "富集打分", "基因集打分",
+    ],
+    category="enrichment",
+    description=(
+        "Unified ov.es enrichment-score API. The ``method`` argument "
+        "picks one of 11 GPU-accelerated scoring kernels — aucell, gsea, "
+        "gsva, ora, ulm, mlm, waggr, zscore, viper, mdt, udt — each a "
+        "drop-in replacement of the corresponding ``decoupler.mt`` kernel "
+        "with an added ``engine='auto' | 'cpu' | 'gpu'`` selector. Writes "
+        "scores to ``adata.obsm['score_<method>']`` and (when applicable) "
+        "p-values to ``adata.obsm['padj_<method>']``."
+    ),
+    prerequisites={
+        "optional_functions": ["preprocess", "geneset_prepare"],
+    },
+    requires={
+        "var": ["gene symbols matching the signature dict keys"],
+    },
+    produces={
+        "obsm": ["score_<method>", "padj_<method>"],
+    },
+    auto_fix="none",
+    examples=[
+        "ov.es.decoupler(adata, signatures=sigs, method='aucell')",
+        "ov.es.decoupler(adata, signatures=sigs, method='gsea', engine='gpu', times=1)",
+        "ov.es.decoupler(adata, signatures=sigs, method='ulm', engine='cpu', tmin=3)",
+        "ov.es.decoupler(adata, signatures=sigs, method='viper', pleiotropy=False)",
+    ],
+    related=[
+        "aucell", "gsea", "gsva", "ora", "ulm", "mlm",
+        "waggr", "zscore", "viper", "mdt", "udt",
+        "decouple", "consensus",
+    ],
+)
+def decoupler(
+    data,
+    signatures=None,
+    *,
+    net=None,
+    method: str = 'aucell',
+    engine: str = 'auto',
+    **kwargs,
+):
+    r"""Unified dispatcher for the eleven ``ov.es`` scoring methods.
+
+    ``ov.es.decoupler(adata, signatures=sigs, method='aucell', engine='gpu')``
+    is equivalent to ``ov.es.aucell(adata, signatures=sigs, engine='gpu')``
+    — same kwargs, same outputs in ``adata.obsm[f'score_<method>']``. The
+    indirection is useful when the scoring choice should be a parameter
+    (sweeps, agent tool calls, configuration files).
+
+    Parameters
+    ----------
+    data
+        AnnData (or DataFrame) to score.
+    signatures
+        Mapping ``{name → list[gene]}`` or ``{name → dict[gene, weight]}``.
+        Mutually exclusive with ``net``.
+    net
+        Long-format ``source / target / weight`` DataFrame (decoupler
+        convention). Power-user escape hatch; ``signatures`` is the default.
+    method
+        Which kernel to run. One of: ``aucell``, ``gsea``, ``gsva``, ``ora``,
+        ``ulm``, ``mlm``, ``waggr``, ``zscore``, ``viper``, ``mdt``, ``udt``.
+    engine
+        ``'auto'`` (default) | ``'cpu'`` | ``'gpu'``.
+    **kwargs
+        Forwarded to the chosen kernel.
+
+    Examples
+    --------
+    >>> ov.es.decoupler(adata, signatures=sigs, method='aucell')
+    >>> ov.es.decoupler(adata, signatures=sigs, method='gsea', engine='gpu', times=1)
+    """
+    if method not in _SINGLE_METHOD_DISPATCH:
+        raise ValueError(
+            f"method must be one of {sorted(_SINGLE_METHOD_DISPATCH)}, got {method!r}"
+        )
+    fn = _SINGLE_METHOD_DISPATCH[method]()
+    return fn(data, signatures=signatures, net=net, engine=engine, **kwargs)
+
+
 def consensus(result, verbose: bool = False):
     """Build a consensus score across per-method outputs (Stouffer-like).
 
@@ -280,6 +383,6 @@ def query_set(
 __all__ = [
     'aucell', 'gsea', 'gsva', 'mdt', 'mlm', 'ora',
     'udt', 'ulm', 'viper', 'waggr', 'zscore',
-    'decouple', 'consensus', 'query_set',
+    'decouple', 'decoupler', 'consensus', 'query_set',
     'signatures_to_net',
 ]
