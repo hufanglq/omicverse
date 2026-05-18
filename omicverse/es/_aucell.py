@@ -189,26 +189,32 @@ def _func_aucell_torch(
     top_idx = sort_idx[:, :n_up_int].contiguous()               # (nobs, n_up)
 
     # Build the dense (gene → signature) binary membership matrix once.
-    # Use float32 — the cumulative sums fit comfortably in fp32 because
-    # entries are 0/1 and counts cap at the signature's size; the final
-    # division to fp64 reinstates precision.
+    # Vectorised: ``np.repeat(arange(nsrc), offsets)`` replaces the
+    # per-signature Python loop that filled ``sig_id_per_target``
+    # element-by-element. Use float32 because entries are 0/1 and the
+    # final division to fp64 reinstates precision.
     membership = torch.zeros(nvar, nsrc, dtype=torch.float32, device=device)
     cnct_t = torch.as_tensor(cnct, dtype=torch.long, device=device)
-    sig_id_per_target = torch.empty(cnct.size, dtype=torch.long, device=device)
-    cursor = 0
-    for j in range(nsrc):
-        sig_id_per_target[cursor:cursor + int(offsets[j])] = j
-        cursor += int(offsets[j])
+    sig_id_per_target = torch.as_tensor(
+        np.repeat(np.arange(nsrc, dtype=np.int64), offsets),
+        device=device,
+    )
     membership[cnct_t, sig_id_per_target] = 1.0
 
-    # Per-signature scalar max_auc (CPU; identical to numba kernel).
+    # Per-signature scalar max_auc — closed form, vectorised:
+    #
+    #   if k <  n_up:  max_auc = k(k-1)/2 + k(n_up - k)
+    #   if k >= n_up:  max_auc = (n_up - 1) * n_up / 2
+    #
+    # Derived by working through the CPU formula
+    # ``sum(diff(append(arange(1,k+1)[<n_up], n_up)) * arange(1,k+1)[<n_up])``
+    # in both regimes; identical to the numba kernel.
     sig_sizes = offsets.astype(np.int64)
-    max_aucs = np.zeros(nsrc, dtype=np.float64)
-    for j in range(nsrc):
-        k = int(sig_sizes[j])
-        x_th = np.arange(1, k + 1)
-        x_th = x_th[x_th < n_up_int]
-        max_aucs[j] = float(np.sum(np.diff(np.append(x_th, n_up_int)) * x_th))
+    max_aucs = np.where(
+        sig_sizes < n_up_int,
+        sig_sizes * (sig_sizes - 1) / 2.0 + sig_sizes * (n_up_int - sig_sizes),
+        (n_up_int - 1) * n_up_int / 2.0,
+    ).astype(np.float64)
     max_aucs_t = torch.as_tensor(max_aucs, dtype=torch.float64, device=device)
     safe_max = torch.where(
         max_aucs_t == 0,

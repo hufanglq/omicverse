@@ -119,9 +119,12 @@ def _func_zscore_torch(
     M = torch.as_tensor(np.asarray(mat), dtype=torch.float64, device=device)
     A = torch.as_tensor(np.asarray(adj), dtype=torch.float64, device=device)
 
-    stds = M.std(dim=1, unbiased=True)                          # (nobs,)
+    # ``torch.std_mean`` fuses the two reductions into a single pass
+    # over M (single CUDA kernel) — half the launches + half the
+    # memory traffic vs separate ``M.std()`` and ``M.mean()`` calls.
+    stds, row_mean = torch.std_mean(M, dim=1, unbiased=True)    # (nobs,) (nobs,)
     if flavor == "RoKAI":
-        mean_all = M.mean(dim=1)                                # (nobs,)
+        mean_all = row_mean
     else:
         mean_all = torch.zeros_like(stds)
     n = torch.sqrt((A != 0).sum(dim=0).to(torch.float64))       # (nsrc,)

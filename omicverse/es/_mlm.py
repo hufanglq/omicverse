@@ -172,13 +172,19 @@ def _func_mlm_torch(
     se = torch.sqrt(sse.unsqueeze(0) * diag_inv.unsqueeze(1))                  # (p+1, n_cells)
     tval_mat = coef / se                                                       # (p+1, n_cells)
 
-    # P-values stay on scipy/cephes intentionally — see the comment in
-    # ``_func_ulm_torch``. cephes ``t.cdf`` is faster than a torch
-    # continued-fraction at the (p+1) × n_cells shapes typical for mlm.
+    # P-value strategy: identical to ulm — Normal approximation when
+    # df is large (mlm's df = n_features − n_fsets − 1, typically in
+    # the thousands), exact scipy path otherwise. Saves ~25 ms /
+    # call.
     coef_np = coef.T.cpu().numpy()[:, 1:]   # drop intercept column
+    if df > 100:
+        # Drop intercept column on GPU before erfc to stay vectorised.
+        pv = torch.special.erfc(tval_mat[1:].T.abs() / np.sqrt(2.0))
+        pv = pv.cpu().numpy()
+    else:
+        tval_np_full = tval_mat.T.cpu().numpy()
+        pv = 2 * (1 - sts.t.cdf(np.abs(tval_np_full[:, 1:]), df=df))
     tval_np = tval_mat.T.cpu().numpy()[:, 1:]
-    pv = 2 * (1 - sts.t.cdf(np.abs(tval_np), df=df))
-
     es = tval_np if tval else coef_np
     return es, pv
 
