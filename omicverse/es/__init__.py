@@ -51,6 +51,11 @@ from typing import Sequence, Union
 
 import pandas as pd
 
+# omicverse's coloured pre/post-call summary box ("Duration / Shape /
+# CHANGES DETECTED" — same one `ov.pp.qc` etc. emit). Wraps each scoring
+# call so users see what got added to ``adata.obsm`` for free.
+from .._monitor import monitor as _monitor
+
 # Vendored Method instances (decoupler kernels behind a `Method` facade).
 from ._aucell    import aucell    as _aucell_m
 from ._gsea      import gsea      as _gsea_m
@@ -202,19 +207,20 @@ def _bind_method(method):
     return wrapped
 
 
-aucell = _bind_method(_aucell_m)
-gsea = _bind_method(_gsea_m)
-gsva = _bind_method(_gsva_m)
-mdt = _bind_method(_mdt_m)
-mlm = _bind_method(_mlm_m)
-ora = _bind_method(_ora_m)
-udt = _bind_method(_udt_m)
-ulm = _bind_method(_ulm_m)
-viper = _bind_method(_viper_m)
-waggr = _bind_method(_waggr_m)
-zscore = _bind_method(_zscore_m)
+aucell = _monitor(_bind_method(_aucell_m))
+gsea = _monitor(_bind_method(_gsea_m))
+gsva = _monitor(_bind_method(_gsva_m))
+mdt = _monitor(_bind_method(_mdt_m))
+mlm = _monitor(_bind_method(_mlm_m))
+ora = _monitor(_bind_method(_ora_m))
+udt = _monitor(_bind_method(_udt_m))
+ulm = _monitor(_bind_method(_ulm_m))
+viper = _monitor(_bind_method(_viper_m))
+waggr = _monitor(_bind_method(_waggr_m))
+zscore = _monitor(_bind_method(_zscore_m))
 
 
+@_monitor
 def decouple(
     data,
     signatures=None,
