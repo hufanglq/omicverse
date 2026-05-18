@@ -6,9 +6,9 @@
 
 import pandas as pd
 
-from omicverse.es._datatype import DataType
-from omicverse.es._consensus import consensus
-from omicverse.es._methods import _methods
+from ._datatype import DataType
+from ._consensus import consensus
+from ._methods import _methods
 
 def decouple(
     data: DataType,

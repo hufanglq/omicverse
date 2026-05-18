@@ -151,7 +151,7 @@ def _func_mlm_torch(
     round-off.
     """
     import torch
-    from omicverse.es._engine import torch_device, to_gpu_dense
+    from ._engine import torch_device, to_gpu_dense
 
     device = torch_device()
     n_features, n_fsets = np.asarray(adj).shape

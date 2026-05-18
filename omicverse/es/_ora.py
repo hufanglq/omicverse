@@ -17,7 +17,7 @@ from .._registry import register_function
 
 from ._net import _resolve_net
 from ._run import _run
-from omicverse.es._net import _getset
+from ._net import _getset
 
 def _maxn() -> int:
     l = 1
@@ -319,7 +319,7 @@ def _func_ora_torch(
     """
     import torch
     import scipy.stats as _sts
-    from omicverse.es._engine import torch_device, to_gpu_dense
+    from ._engine import torch_device, to_gpu_dense
 
     device = torch_device()
     M = to_gpu_dense(mat, device, dtype=torch.float64)
@@ -376,7 +376,7 @@ def _func_ora_torch(
     # (``hypergeom_sf_torch``). Replaces ``scipy.stats.hypergeom.sf``
     # which loops per element in C and was ~700× slower than the
     # batched torch path at the (nobs, nsrc) shapes ora produces.
-    from omicverse.es._engine import hypergeom_sf_torch
+    from ._engine import hypergeom_sf_torch
     pv_t = hypergeom_sf_torch(
         a.to(torch.long), b.to(torch.long),
         c.to(torch.long), d.to(torch.long),

@@ -14,7 +14,7 @@ from .._registry import register_function
 
 from ._net import _resolve_net
 from ._run import _run
-from omicverse.es._net import _getset
+from ._net import _getset
 
 @nb.njit(cache=True)
 def _std(
@@ -306,7 +306,7 @@ def _func_gsea_torch(
     chosen by :func:`chunk_size_for` to stay around 32 MB.
     """
     import torch
-    from omicverse.es._engine import torch_device, chunk_size_for, to_gpu_dense
+    from ._engine import torch_device, chunk_size_for, to_gpu_dense
 
     if int(times) > 1:
         # Permutation-based p-value path stays on the numba kernel.

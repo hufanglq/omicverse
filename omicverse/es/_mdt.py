@@ -12,7 +12,7 @@ from .._registry import register_function
 
 from ._net import _resolve_net
 from ._run import _run
-from omicverse.es._odeps import _check_import, xgboost
+from ._odeps import _check_import, xgboost
 
 def _xgbr(
     x: np.ndarray,
@@ -99,7 +99,7 @@ def _func_mdt_torch(
     ``_engine.py`` for the precise list of differences.
     """
     import torch
-    from omicverse.es._engine import torch_device, to_gpu_dense, gbdt_squared_loss_torch
+    from ._engine import torch_device, to_gpu_dense, gbdt_squared_loss_torch
 
     device = torch_device()
     nobs, nvar = mat.shape

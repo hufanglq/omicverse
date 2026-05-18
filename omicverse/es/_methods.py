@@ -4,17 +4,17 @@
 # license. Cross-module imports rewritten from `decoupler.*` to
 # `omicverse.es.*` (see scripts/vendor_decoupler.py).
 
-from omicverse.es._aucell import aucell
-from omicverse.es._gsea import gsea
-from omicverse.es._gsva import gsva
-from omicverse.es._mdt import mdt
-from omicverse.es._mlm import mlm
-from omicverse.es._ora import ora
-from omicverse.es._udt import udt
-from omicverse.es._ulm import ulm
-from omicverse.es._viper import viper
-from omicverse.es._waggr import waggr
-from omicverse.es._zscore import zscore
+from ._aucell import aucell
+from ._gsea import gsea
+from ._gsva import gsva
+from ._mdt import mdt
+from ._mlm import mlm
+from ._ora import ora
+from ._udt import udt
+from ._ulm import ulm
+from ._viper import viper
+from ._waggr import waggr
+from ._zscore import zscore
 
 _methods = [
     aucell,

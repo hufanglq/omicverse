@@ -11,7 +11,7 @@ from anndata import AnnData
 from numpy.random import default_rng
 from tqdm.auto import tqdm
 
-from omicverse.es._datatype import DataType
+from ._datatype import DataType
 
 def _extract(
     data: DataType,

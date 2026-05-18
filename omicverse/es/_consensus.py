@@ -10,8 +10,8 @@ import pandas as pd
 import scipy.stats as sts
 from anndata import AnnData
 
-from omicverse.es._gsea import _std
-from omicverse.es._run import _return
+from ._gsea import _std
+from ._run import _return
 
 @nb.njit(cache=True)
 def _zscore(

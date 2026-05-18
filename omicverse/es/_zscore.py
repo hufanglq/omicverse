@@ -111,7 +111,7 @@ def _func_zscore_torch(
     ``norm.sf`` was ~4 ms out of ~14 ms total).
     """
     import torch
-    from omicverse.es._engine import torch_device, to_gpu_dense
+    from ._engine import torch_device, to_gpu_dense
 
     assert isinstance(flavor, str) and flavor in ("KSEA", "RoKAI"), \
         "flavor must be str and KSEA or RoKAI"

@@ -16,8 +16,8 @@ from .._registry import register_function
 
 from ._net import _resolve_net
 from ._run import _run
-from omicverse.es._gsea import _std
-from omicverse.es._net import _getset
+from ._gsea import _std
+from ._net import _getset
 
 @nb.njit(cache=True)
 def _erf(
@@ -521,7 +521,7 @@ def _func_gsva_torch(
     path is uncommon in scRNA workflows.
     """
     import torch
-    from omicverse.es._engine import torch_device, chunk_size_for, to_gpu_dense
+    from ._engine import torch_device, chunk_size_for, to_gpu_dense
 
     if kcdf == "poisson":
         # Rare path; defer to CPU kernel to avoid a separate GPU impl.

@@ -449,7 +449,7 @@ def _func_viper_torch(
     """
     import torch
     import scipy.stats as _sts
-    from omicverse.es._engine import torch_device, to_gpu_dense
+    from ._engine import torch_device, to_gpu_dense
 
     device = torch_device()
     Mat = to_gpu_dense(mat, device, dtype=torch.float32)

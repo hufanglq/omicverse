@@ -15,7 +15,7 @@ from .._registry import register_function
 
 from ._net import _resolve_net
 from ._run import _run
-from omicverse.es._gsea import _ridx, _std
+from ._gsea import _ridx, _std
 
 @nb.njit(cache=True)
 def _wsum(
@@ -269,7 +269,7 @@ def _func_waggr_torch(
         return _func_waggr(mat, adj, fun=fun, times=times, seed=seed, verbose=verbose)
 
     import torch
-    from omicverse.es._engine import torch_device, to_gpu_dense
+    from ._engine import torch_device, to_gpu_dense
 
     device = torch_device()
     M = to_gpu_dense(mat, device, dtype=torch.float64)

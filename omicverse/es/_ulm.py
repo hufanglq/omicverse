@@ -139,7 +139,7 @@ def _func_ulm_torch(
     df ∈ [2, 50_000]).
     """
     import torch
-    from omicverse.es._engine import torch_device, to_gpu_dense
+    from ._engine import torch_device, to_gpu_dense
 
     device = torch_device()
     # Sparse inputs land here directly (``_run.py`` skips the CPU

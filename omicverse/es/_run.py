@@ -12,10 +12,10 @@ import scipy.sparse as sps
 from anndata import AnnData
 from tqdm.auto import tqdm
 
-from omicverse.es._datatype import DataType
-from omicverse.es._pv import _fdr_bh_axis1_numba
-from omicverse.es._data import extract
-from omicverse.es._net import adjmat, idxmat, prune
+from ._datatype import DataType
+from ._pv import _fdr_bh_axis1_numba
+from ._data import extract
+from ._net import adjmat, idxmat, prune
 
 def _return(
     name: str,

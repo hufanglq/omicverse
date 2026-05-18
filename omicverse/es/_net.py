@@ -10,8 +10,8 @@ import pandas as pd
 import scipy.stats as sts
 from tqdm.auto import tqdm
 
-from omicverse.es._datatype import DataType
-from omicverse.es._data import extract
+from ._datatype import DataType
+from ._data import extract
 
 def read_gmt(
     path: str,

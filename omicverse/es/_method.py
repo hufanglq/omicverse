@@ -8,8 +8,8 @@ from collections.abc import Callable
 
 import pandas as pd
 
-from omicverse.es._datatype import DataType
-from omicverse.es._run import _run
+from ._datatype import DataType
+from ._run import _run
 
 class MethodMeta:
     def __init__(
@@ -87,7 +87,7 @@ class Method(MethodMeta):
         engine: str = 'auto',
         **kwargs,
     ):
-        from omicverse.es._engine import resolve_engine
+        from ._engine import resolve_engine
 
         eng = resolve_engine(engine, has_torch_kernel=self.func_torch is not None)
         func = self.func_torch if eng == 'gpu' else self.func

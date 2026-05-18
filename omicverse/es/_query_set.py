@@ -8,8 +8,8 @@ import pandas as pd
 import scipy.stats as sts
 from tqdm.auto import tqdm
 
-from omicverse.es._ora import _oddsr
-from omicverse.es._net import prune
+from ._ora import _oddsr
+from ._net import prune
 
 def query_set(
     features: list,
