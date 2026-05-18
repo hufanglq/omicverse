@@ -597,51 +597,32 @@ def embedding(
                 multi_panel=bool(grid),
             )
         elif colorbar_loc is not None:
+            # Unified inset colorbar: regardless of frameon, draw a slim
+            # colorbar via add_axes at a controlled width (% of panel
+            # width) so matplotlib's auto-fraction logic doesn't bloat
+            # the bar. ``frameon='small'`` keeps the original 5 % width
+            # for back-compat; default (``frameon=True``) gets the 2.5 %
+            # slim look that matches the typical scanpy embedding style.
+            from matplotlib.ticker import MaxNLocator
 
-            if frameon=='small' or frameon==False:
-
-                from matplotlib.ticker import MaxNLocator
-
-                # 获取主轴的位置
-                pos = ax.get_position()
-
-                # 计算colorbar的高度（主轴高度的30%）
-                cb_height = pos.height * 0.3
-                # colorbar垂直居中
-                cb_bottom = pos.y0
-
-                # 计算colorbar的宽度（相对于subplot宽度，而不是figure宽度）
-                # 使用subplot宽度的5%作为colorbar宽度，这样在多子图时也能保持合适的宽度
+            pos = ax.get_position()
+            cb_height = pos.height * 0.3
+            cb_bottom = pos.y0
+            if frameon == 'small' or frameon is False:
                 cb_width = pos.width * 0.05
-                # colorbar与subplot的间距也相对于subplot宽度
                 cb_pad = pos.width * 0.05
-
-                # 手动创建colorbar轴：[left, bottom, width, height]
-                # Use ax.figure instead of pl.gcf() to ensure correct figure in multi-panel plots
-                cax1 = ax.figure.add_axes([pos.x1 + cb_pad, cb_bottom, cb_width, cb_height])
-                panel_colorbars[id(ax)] = cax1
-
-                cb = pl.colorbar(cax, cax=cax1, orientation="vertical")
-                # Remove integer=True to allow float values in colorbar ticks
-                cb.locator = MaxNLocator(nbins=3, integer=False)
-                cb.update_ticks()
-
             else:
-                # Capture the colorbar axes so _flow_layout_panels can both
-                # measure its footprint (so neighbouring panels don't overlap
-                # it) and drag it along when the panel is re-positioned.
-                # Previously this branch silently dropped the colorbar from
-                # the flow-layout bookkeeping, which is why default
-                # frameon=True multi-panel grids overlapped on the right.
-                cb_obj = pl.colorbar(
-                    cax, ax=ax, pad=0.01, fraction=0.02, aspect=30, location=colorbar_loc
-                )
-                panel_colorbars[id(ax)] = cb_obj.ax
+                cb_width = pos.width * 0.025
+                cb_pad = pos.width * 0.03
 
-            
-            #pl.colorbar(
-            #    cax, ax=ax, pad=0.01, fraction=0.08, aspect=30, location=colorbar_loc
-            #)
+            cax1 = ax.figure.add_axes([pos.x1 + cb_pad, cb_bottom, cb_width, cb_height])
+            panel_colorbars[id(ax)] = cax1
+
+            cb = pl.colorbar(cax, cax=cax1, orientation="vertical")
+            cb.locator = MaxNLocator(nbins=3, integer=False)
+            cb.update_ticks()
+            # Trim tick label font so the labels don't widen the colorbar block.
+            cb.ax.tick_params(labelsize=8)
 
     # Flow layout: re-position panels left-to-right (with wrap) so that
     # each panel + its external legend takes its actual footprint, never
@@ -791,20 +772,32 @@ def _flow_layout_panels(fig, axs, panel_colorbars=None, gap=0.3, margin=0.3):
     cursor_x = margin
     cumulative_top = 0.0   # inches from top of current logical layout
     row_max_h = 0.0
+    row_max_w = 0.0        # widest cursor reached per row (for width shrink)
+    used_w_in = 0.0
     for it in items:
         if cursor_x + it['full_w'] > fig_w_in - margin and cursor_x > margin:
             # wrap to next row
+            used_w_in = max(used_w_in, row_max_w)
             cursor_x = margin
             cumulative_top += row_max_h + gap
             row_max_h = 0.0
         placements.append((cursor_x, cumulative_top))
         cursor_x += it['full_w'] + gap
         row_max_h = max(row_max_h, it['full_h'])
+        # cursor_x has trailing gap; the actual row width ends `gap` earlier
+        row_max_w = max(row_max_w, cursor_x - gap + margin)
+    used_w_in = max(used_w_in, row_max_w)
 
     total_h_in = cumulative_top + row_max_h + 2 * margin
     if total_h_in > fig.get_figheight():
         fig.set_figheight(total_h_in)
+    # Reclaim unused right-side whitespace: the original figure width was
+    # sized assuming the previous (wider) colorbar; flow-layout panels now
+    # finish earlier, so shrink the figure to the actual used extent.
+    if used_w_in > 0 and used_w_in < fig_w_in:
+        fig.set_figwidth(used_w_in)
     fig_h_in = fig.get_figheight()
+    fig_w_in = fig.get_figwidth()
 
     # ── Pass 3: apply positions (figure-relative) ────────────────────
     for it, (x_in, top_in) in zip(items, placements):
