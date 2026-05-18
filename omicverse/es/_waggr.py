@@ -10,11 +10,8 @@ from collections.abc import Callable
 import numba as nb
 import numpy as np
 
-from omicverse.es._docs import docs
-from omicverse.es._log import _log
 from omicverse.es._method import Method, MethodMeta
 from omicverse.es._gsea import _ridx, _std
-
 
 @nb.njit(cache=True)
 def _wsum(
@@ -22,7 +19,6 @@ def _wsum(
     w: np.ndarray,
 ) -> float:
     return np.sum(x * w)
-
 
 @nb.njit(cache=True)
 def _wmean(
@@ -32,7 +28,6 @@ def _wmean(
     agg = _wsum(x, w)
     div: float = np.sum(np.abs(w))
     return agg / div
-
 
 def _fun(
     f: Callable,
@@ -53,9 +48,6 @@ def _fun(
     _f.__name__ = f.__name__
     if _f.__name__ not in _cfuncs:
         _cfuncs[f.__name__] = _f
-        m = f"waggr - using {_f.__name__} for the first time, will need to be compiled"
-        _log(m, level="info", verbose=verbose)
-
 
 _fun_dict = {
     "wsum": _wsum,
@@ -63,7 +55,6 @@ _fun_dict = {
 }
 
 _cfuncs: dict = {}
-
 
 def _validate_args(
     fun: Callable,
@@ -79,11 +70,8 @@ def _validate_args(
         if param.name not in required_args and param.default == inspect.Parameter.empty:
             assert AssertionError(), f"fun={fun.__name__} has an argument {param.name} without a default value"
     if not hasattr(fun, "func_code"):
-        m = f"waggr - {fun.__name__} will be compiled into numba code"
-        _log(m, level="info", verbose=verbose)
         fun = nb.njit(fun)
     return fun
-
 
 def _validate_func(
     fun: Callable,
@@ -97,10 +85,7 @@ def _validate_func(
         assert isinstance(res, int | float), "output of fun must be a single numerical value"
     except Exception as err:
         raise ValueError(f"fun failed to run with test data: fun(x={x}), w={w}") from err
-    m = f"waggr - using function {fun.__name__}"
-    _log(m, level="info", verbose=verbose)
     _fun(f=fun, verbose=verbose)
-
 
 @nb.njit(parallel=True, cache=True)
 def _perm(
@@ -142,8 +127,6 @@ def _perm(
     pvals = pvals * 2
     return nes, pvals
 
-
-@docs.dedent
 def _func_waggr(
     mat: np.ndarray,
     adj: np.ndarray,
@@ -201,9 +184,8 @@ def _func_waggr(
     - :math:`\mu` is the mean
     - :math:`\sigma` is the standard deviation
 
-    %(yestest)s
-
-    %(params)s
+    Parameters
+    ----------
 
     fun
         Function to compute enrichment statistic from omics readouts (``x``) and feature weights (``w``).
@@ -212,7 +194,12 @@ def _func_waggr(
     %(times)s
     %(seed)s
 
-    %(returns)s
+    Returns
+    -------
+    es : np.ndarray
+        Enrichment score matrix (observations × signatures).
+    pv : np.ndarray or None
+        P-value matrix; ``None`` for kernels without a statistical test.
 
     Example
     -------
@@ -236,18 +223,13 @@ def _func_waggr(
     times, seed = int(times), int(seed)
     nobs, nvar = mat.shape
     nvar, nsrc = adj.shape
-    m = f"waggr - calculating scores for {nsrc} sources across {nobs} observations"
-    _log(m, level="info", verbose=verbose)
     es = vfun(mat, adj)
     if times > 1:
-        m = f"waggr - comparing estimates against {times} random permutations"
-        _log(m, level="info", verbose=verbose)
         idx = _ridx(times=times, nvar=nvar, seed=seed)
         es, pv = _perm(fun=vfun, es=es, mat=mat, adj=adj, idx=idx)
     else:
         pv = np.ones(es.shape)
     return es, pv
-
 
 def _func_waggr_torch(
     mat,
@@ -296,7 +278,6 @@ def _func_waggr_torch(
     es_np = es.cpu().numpy()
     pv = np.ones_like(es_np)
     return es_np, pv
-
 
 _waggr = MethodMeta(
     name="waggr",

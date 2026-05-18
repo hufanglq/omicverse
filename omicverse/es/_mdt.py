@@ -7,11 +7,8 @@
 import numpy as np
 from tqdm.auto import tqdm
 
-from omicverse.es._docs import docs
-from omicverse.es._log import _log
 from omicverse.es._method import Method, MethodMeta
 from omicverse.es._odeps import _check_import, xgboost
-
 
 def _xgbr(
     x: np.ndarray,
@@ -27,8 +24,6 @@ def _xgbr(
     es = reg.feature_importances_
     return es
 
-
-@docs.dedent
 def _func_mdt(
     mat: np.ndarray,
     adj: np.ndarray,
@@ -44,13 +39,17 @@ def _func_mdt(
 
     The enrichment score :math:`ES` for each :math:`F` is then calculated as the importance of each covariate in the model.
 
-    %(notest)s
-
-    %(params)s
+    Parameters
+    ----------
 
     kwargs
         All other keyword arguments are passed to ``xgboost.XGBRegressor``.
-    %(returns)s
+    Returns
+    -------
+    es : np.ndarray
+        Enrichment score matrix (observations × signatures).
+    pv : np.ndarray or None
+        P-value matrix; ``None`` for kernels without a statistical test.
 
     Example
     -------
@@ -64,14 +63,11 @@ def _func_mdt(
     _check_import(xgboost, "xgboost")
     nobs = mat.shape[0]
     nvar, nsrc = adj.shape
-    m = f"mdt - fitting {nsrc} multivariate decision tree models (XGBoost) of {nvar} targets across {nobs} observations"
-    _log(m, level="info", verbose=verbose)
     es = np.zeros(shape=(nobs, nsrc))
     for i in tqdm(range(nobs), disable=not verbose):
         obs = mat[i]
         es[i, :] = _xgbr(x=adj, y=obs, **kwargs)
     return (es, None)
-
 
 def _func_mdt_torch(
     mat,
@@ -120,7 +116,6 @@ def _func_mdt_torch(
     importances = res['importances']                                    # (nsrc, nobs)
     es = importances.t().cpu().numpy().astype(np.float64)               # (nobs, nsrc)
     return es, None
-
 
 _mdt = MethodMeta(
     name="mdt",

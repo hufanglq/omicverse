@@ -11,7 +11,6 @@ import pandas as pd
 from omicverse.es._datatype import DataType
 from omicverse.es._run import _run
 
-
 class MethodMeta:
     def __init__(
         self,
@@ -56,8 +55,6 @@ class MethodMeta:
         )
         return meta
 
-
-# @docs.dedent
 class Method(MethodMeta):
     def __init__(
         self,
@@ -108,7 +105,6 @@ class Method(MethodMeta):
             verbose=verbose,
             **kwargs,
         )
-
 
 def _show_methods(methods):
     return pd.concat([method.meta() for method in methods]).reset_index(drop=True)

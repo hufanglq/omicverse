@@ -8,10 +8,7 @@ import numba as nb
 import numpy as np
 import scipy.stats as sts
 
-from omicverse.es._docs import docs
-from omicverse.es._log import _log
 from omicverse.es._method import Method, MethodMeta
-
 
 @nb.njit(parallel=True, cache=True)
 def _fit(
@@ -37,8 +34,6 @@ def _fit(
     tval = coef / se
     return coef[:, 1:], tval[:, 1:]
 
-
-@docs.dedent
 def _func_mlm(
     mat: np.ndarray,
     adj: np.ndarray,
@@ -94,11 +89,16 @@ def _func_mlm(
 
         p_{value} = 2 \times \mathrm{sf}(|ES|, \text{df})
 
-
-    %(params)s
+    Parameters
+    ----------
     %(tval)s
 
-    %(returns)s
+    Returns
+    -------
+    es : np.ndarray
+        Enrichment score matrix (observations × signatures).
+    pv : np.ndarray or None
+        P-value matrix; ``None`` for kernels without a statistical test.
 
     Example
     -------
@@ -116,8 +116,6 @@ def _func_mlm(
     # Compute inv and df for lm
     inv = np.linalg.inv(np.dot(adj.T, adj))
     df = n_features - n_fsets - 1
-    m = f"mlm - fitting {n_fsets} multivariate models of {n_features} observations with {df} degrees of freedom"
-    _log(m, level="info", verbose=verbose)
     # Compute tval
     coef, t = _fit(adj, mat.T, inv, df)
     # Compute pval
@@ -128,7 +126,6 @@ def _func_mlm(
     else:
         es = coef
     return es, pv
-
 
 def _func_mlm_torch(
     mat,
@@ -188,7 +185,6 @@ def _func_mlm_torch(
     tval_np = tval_mat.T.cpu().numpy()[:, 1:]
     es = tval_np if tval else coef_np
     return es, pv
-
 
 _mlm = MethodMeta(
     name="mlm",

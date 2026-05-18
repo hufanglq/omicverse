@@ -8,13 +8,9 @@ import pandas as pd
 import scipy.stats as sts
 from tqdm.auto import tqdm
 
-from omicverse.es._docs import docs
-from omicverse.es._log import _log
 from omicverse.es._ora import _oddsr
 from omicverse.es._net import prune
 
-
-@docs.dedent
 def query_set(
     features: list,
     net: pd.DataFrame,
@@ -61,8 +57,6 @@ def query_set(
     features_set: set = set(features)
     if n_bg is None:
         n_bg = 0
-        m = "query_set - not using n_bg, a feature specific background will be used instead"
-        _log(m, level="info", verbose=verbose)
     assert isinstance(n_bg, int | float) and n_bg >= 0, "n_bg must be numeric and positive"
     # Prune
     net = prune(features=None, net=net, tmin=tmin, verbose=verbose)

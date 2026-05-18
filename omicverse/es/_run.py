@@ -13,11 +13,9 @@ from anndata import AnnData
 from tqdm.auto import tqdm
 
 from omicverse.es._datatype import DataType
-from omicverse.es._log import _log
 from omicverse.es._pv import _fdr_bh_axis1_numba
 from omicverse.es._data import extract
 from omicverse.es._net import adjmat, idxmat, prune
-
 
 def _return(
     name: str,
@@ -28,8 +26,6 @@ def _return(
 ) -> tuple[pd.DataFrame, pd.DataFrame] | AnnData | None:
     if isinstance(data, AnnData):
         if data.obs_names.size != es.index.size:
-            m = "Provided AnnData contains empty observations, returning repaired object"
-            _log(m, level="warn", verbose=verbose)
             data = data[es.index, :].copy()
             data.obsm[f"score_{name}"] = es
             if pv is not None:
@@ -42,7 +38,6 @@ def _return(
             return None
     else:
         return es, pv
-
 
 def _run(
     name: str,
@@ -59,7 +54,6 @@ def _run(
     verbose: bool = False,
     **kwargs,
 ) -> tuple[pd.DataFrame, pd.DataFrame] | AnnData | None:
-    _log(f"{name} - Running {name}", level="info", verbose=verbose)
     # Process data
     mat, obs, var = extract(data, layer=layer, raw=raw, empty=empty, shuffle=True, verbose=verbose, bsize=bsize)
     issparse = sps.issparse(mat)
@@ -128,9 +122,7 @@ def _run(
         pv = np.vstack(pv)
         pv = pd.DataFrame(pv, index=obs, columns=sources)
         if name != "mlm":
-            _log(f"{name} - adjusting p-values by FDR", level="info", verbose=verbose)
             pv.loc[:, :] = _fdr_bh_axis1_numba(pv.values)
     else:
         pv = None
-    _log(f"{name} - done", level="info", verbose=verbose)
     return _return(name, data, es, pv, verbose=verbose)

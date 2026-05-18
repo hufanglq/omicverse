@@ -9,10 +9,7 @@ import numpy as np
 import scipy.stats as sts
 from tqdm.auto import tqdm
 
-from omicverse.es._docs import docs
-from omicverse.es._log import _log
 from omicverse.es._method import Method, MethodMeta
-
 
 @nb.njit(cache=True)
 def _get_wts_posidxs(
@@ -38,7 +35,6 @@ def _get_wts_posidxs(
         wts[:, x_idx] = x
     return wts, pos_idxs
 
-
 @nb.njit(cache=True)
 def _get_tmp_idxs(
     pval: np.ndarray,
@@ -60,7 +56,6 @@ def _get_tmp_idxs(
                         idxs[k, 1] = j
                         k += 1
     return tmp, idxs
-
 
 @nb.njit(cache=True)
 def _fill_pval_mat(
@@ -86,7 +81,6 @@ def _fill_pval_mat(
                 col[k] = (np.abs(sum1) + sum2 * (sum2 > 0)) / ww.size * ss * np.sqrt(ww.size)
     return col
 
-
 def _get_inter_pvals(
     nes_i: np.ndarray,
     ss_i: np.ndarray,
@@ -109,7 +103,6 @@ def _get_inter_pvals(
         pval[j] = _fill_pval_mat(j=j, reg=reg, n_targets=n_targets, s1=s1, s2=s2)
     pval = 1 - sts.norm.cdf(pval)
     return pval
-
 
 def _shadow_regulon(
     nes_i: np.ndarray,
@@ -148,7 +141,6 @@ def _shadow_regulon(
     idxs = np.where(msk_sign)[0][pos_idxs]
     return sub_net, wts, idxs
 
-
 def _aREA(mat: np.ndarray, net: np.ndarray, wts: None | np.ndarray = None) -> np.ndarray:
     if wts is None:
         wts = np.zeros(net.shape)
@@ -170,8 +162,6 @@ def _aREA(mat: np.ndarray, net: np.ndarray, wts: None | np.ndarray = None) -> np
     nes = tmp * nes
     return nes
 
-
-@docs.dedent
 def _func_viper(
     mat: np.ndarray,
     adj: np.ndarray,
@@ -275,9 +265,8 @@ def _func_viper(
     A new :math:`ES` and :math:`p_{value}` are calculated following all
     the previous steps but using the updated :math:`l_{orig}`
 
-    %(yestest)s
-
-    %(params)s
+    Parameters
+    ----------
 
     pleiotropy
         Whether correction for pleiotropic regulation should be performed.
@@ -288,7 +277,12 @@ def _func_viper(
     penalty
         If ``pleiotropy``, number higher than 1 indicating the penalty for the pleiotropic interactions. 1 = no penalty.
 
-    %(returns)s
+    Returns
+    -------
+    es : np.ndarray
+        Enrichment score matrix (observations × signatures).
+    pv : np.ndarray or None
+        P-value matrix; ``None`` for kernels without a statistical test.
 
     Example
     -------
@@ -301,13 +295,9 @@ def _func_viper(
     # Get number of batches
     n_samples = mat.shape[0]
     n_features, n_fsets = adj.shape
-    m = f"viper - calculating {n_fsets} scores across {n_samples} observations"
-    _log(m, level="info", verbose=verbose)
     # Compute score
     nes = _aREA(mat, adj)
     if pleiotropy:
-        m = "viper - refining scores based on pleiotropy"
-        _log(m, level="info", verbose=verbose)
         reg_sign = sts.norm.ppf(1 - (reg_sign / 2))
         for i in tqdm(range(nes.shape[0]), disable=not verbose):
             # Extract per sample
@@ -325,7 +315,6 @@ def _func_viper(
     # Get pvalues
     pvals = 2 * sts.norm.sf(np.abs(nes))
     return nes, pvals
-
 
 def _aREA_torch(Mat, Net, Wts=None):
     r"""Analytical Rank-based Enrichment Analysis on torch tensors.
@@ -391,7 +380,6 @@ def _aREA_torch(Mat, Net, Wts=None):
     nes = tmp * nes_factor.unsqueeze(0)
     return nes
 
-
 def _avg_rank_per_row(X):
     """Per-row average-rank, matching ``scipy.stats.rankdata(method='average', axis=1)``.
 
@@ -429,12 +417,10 @@ def _avg_rank_per_row(X):
     out.scatter_(1, order, sorted_avg)
     return out
 
-
 def _norm_ppf_torch(p):
     """Φ⁻¹(p) = √2 · erfinv(2p − 1)."""
     import torch
     return torch.special.erfinv(2.0 * p - 1.0) * (2.0 ** 0.5)
-
 
 def _func_viper_torch(
     mat,
@@ -494,7 +480,6 @@ def _func_viper_torch(
     pvals_t = torch.special.erfc(nes_t_final.abs() / (2.0 ** 0.5))
     pvals = pvals_t.cpu().numpy()
     return nes, pvals
-
 
 _viper = MethodMeta(
     name="viper",

@@ -8,7 +8,6 @@ import types
 import warnings
 from typing import TYPE_CHECKING
 
-
 def _try_import(name: str) -> types.ModuleType | None:
     try:
         with warnings.catch_warnings():
@@ -17,7 +16,6 @@ def _try_import(name: str) -> types.ModuleType | None:
         return module
     except ImportError:
         return None
-
 
 def _check_import(
     module: types.ModuleType,
@@ -30,7 +28,6 @@ def _check_import(
             "or install decoupler with full dependencies:\n"
             "  pip install 'decoupler[full]'"
         )
-
 
 # Handle optional dependencies
 ig = _try_import("igraph")

@@ -11,12 +11,9 @@ import numpy as np
 import scipy.sparse as sps
 from tqdm.auto import tqdm
 
-from omicverse.es._docs import docs
-from omicverse.es._log import _log
 from omicverse.es._method import Method, MethodMeta
 from omicverse.es._gsea import _std
 from omicverse.es._net import _getset
-
 
 @nb.njit(cache=True)
 def _erf(
@@ -29,7 +26,6 @@ def _erf(
     y = 1.0 - (((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * np.exp(-abs_x * abs_x))
     return sign * y
 
-
 @nb.njit(cache=True)
 def _norm_cdf(
     x: np.ndarray,
@@ -38,7 +34,6 @@ def _norm_cdf(
 ) -> np.ndarray:
     e = _erf((x - mu) / (sigma * np.sqrt(2.0)))
     return 0.5 * (1.0 + e)
-
 
 @nb.njit(cache=True)
 def _poisson_pmf(
@@ -52,7 +47,6 @@ def _poisson_pmf(
     log_pmf = -lam + k * np.log(lam) - math.lgamma(k + 1)
     return np.exp(log_pmf)
 
-
 @nb.njit(cache=True)
 def _ppois(k: float, lam: float) -> float:
     cdf_sum = 0.0
@@ -62,7 +56,6 @@ def _ppois(k: float, lam: float) -> float:
         cdf_sum = 1.0
     return cdf_sum
 
-
 @nb.njit(cache=True)
 def _init_cdfs() -> np.ndarray:
     pre_res = 10000
@@ -70,12 +63,10 @@ def _init_cdfs() -> np.ndarray:
     pre_cdf = _norm_cdf(np.arange(pre_res + 1) * max_pre / pre_res, 0, 1)
     return pre_cdf
 
-
 @nb.njit(cache=True)
 def _ecdf(arr):
     ecdf = np.searchsorted(np.sort(arr), arr, side="right") / len(arr)
     return ecdf
-
 
 @nb.njit(parallel=True, cache=True)
 def _mat_ecdf(mat: np.ndarray) -> np.ndarray:
@@ -83,7 +74,6 @@ def _mat_ecdf(mat: np.ndarray) -> np.ndarray:
     for j in range(mat.shape[1]):
         D[:, j] = _ecdf(mat[:, j])
     return D
-
 
 @nb.njit(cache=True)
 def _col_d(x: np.ndarray, gauss: bool, pre_cdf: np.ndarray) -> np.ndarray:
@@ -114,7 +104,6 @@ def _col_d(x: np.ndarray, gauss: bool, pre_cdf: np.ndarray) -> np.ndarray:
         col[j] = -1.0 * np.log((1.0 - left_tail) / left_tail)
     return col
 
-
 @nb.njit(parallel=True, cache=True)
 def _mat_d(mat: np.ndarray, gauss: bool) -> np.ndarray:
     pre_cdf = _init_cdfs()
@@ -122,7 +111,6 @@ def _mat_d(mat: np.ndarray, gauss: bool) -> np.ndarray:
     for j in nb.prange(mat.shape[1]):
         D[:, j] = _col_d(mat[:, j], gauss, pre_cdf)
     return D
-
 
 def _density(
     mat: np.ndarray,
@@ -141,7 +129,6 @@ def _density(
     elif kcdf is None:
         mat = _mat_ecdf(mat)
     return mat
-
 
 @nb.njit(cache=True)
 def _rankdata(values: np.ndarray) -> np.ndarray:
@@ -163,7 +150,6 @@ def _rankdata(values: np.ndarray) -> np.ndarray:
     for rank, idx in enumerate(sorted_indices, 1):
         ranks[idx] = rank
     return ranks
-
 
 @nb.njit(cache=True)
 def _dos_srs(r):
@@ -197,7 +183,6 @@ def _dos_srs(r):
             srs[i] = abs(half_p - r_dense[i])
     return dos, srs
 
-
 @nb.njit(parallel=True, cache=True)
 def _rankmat(mat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     n_rows, n_cols = mat.shape
@@ -207,7 +192,6 @@ def _rankmat(mat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         r = _rankdata(mat[i, :])
         dos_mat[i, :], srs_mat[i, :] = _dos_srs(r)
     return dos_mat, srs_mat
-
 
 @nb.njit(cache=True)
 def _rnd_walk(
@@ -249,7 +233,6 @@ def _rnd_walk(
                 walkstatneg = wlkstat
     return walkstatpos, walkstatneg
 
-
 @nb.njit(cache=True)
 def _score_geneset(
     gsetidx: np.ndarray,
@@ -273,7 +256,6 @@ def _score_geneset(
         es = walkstatpos if abs(walkstatpos) > abs(walkstatneg) else walkstatneg
     return es
 
-
 @nb.njit(parallel=True, cache=True)
 def _ks_fset(
     dos: np.ndarray,
@@ -292,8 +274,6 @@ def _ks_fset(
         res[i] = _score_geneset(genesetsrankidx, generanking, rankstat, maxdiff, absrnk, tau)
     return res
 
-
-@docs.dedent
 def _func_gsva(
     mat: np.ndarray,
     cnct: np.ndarray,
@@ -350,9 +330,8 @@ def _func_gsva(
 
         ES = \max_{1 \leq i \leq N} L_i + \min_{1 \leq i \leq N} L_i
 
-    %(notest)s
-
-    %(params)s
+    Parameters
+    ----------
     kcdf
         Which kernel to use during the non-parametric estimation of the cumulative distribution function.
         Options are gaussian, poisson or None. The default is gaussian.
@@ -367,7 +346,12 @@ def _func_gsva(
         If ``True``, feature sets with features enriched on either extreme (high or low)
         will be regarded as 'highly' activated.
 
-    %(returns)s
+    Returns
+    -------
+    es : np.ndarray
+        Enrichment score matrix (observations × signatures).
+    pv : np.ndarray or None
+        P-value matrix; ``None`` for kernels without a statistical test.
 
     Example
     -------
@@ -378,25 +362,18 @@ def _func_gsva(
         ov.es.gsva(adata, net, tmin=3)
     """
     if isinstance(mat, sps.csr_matrix):
-        m = "gsva - Converting sparse matrix to dense format before density transformation"
-        _log(m, level="info", verbose=verbose)
         mat = mat.toarray()
-    m = f"gsva - computing density with kcdf={kcdf}"
-    _log(m, level="info", verbose=verbose)
     # Compute density
     if mat.shape[0] > 1:
         mat = _density(mat, kcdf=kcdf)
     dos, srs = _rankmat(mat)
     # Compute GSVA
     nsrc = starts.size
-    m = f"gsva - calculating {nsrc} scores with maxdiff={maxdiff}, absrnk={absrnk}"
-    _log(m, level="info", verbose=verbose)
     es = np.zeros((dos.shape[0], nsrc))
     for j in tqdm(range(nsrc), disable=not verbose):
         fset = (_getset(cnct, starts, offsets, j) + 1).astype(int)
         es[:, j] = _ks_fset(dos=dos, srs=srs, fset=fset, maxdiff=maxdiff, absrnk=absrnk, tau=tau)
     return es, None
-
 
 def _gsva_density_gaussian_torch(X, device, dtype, gene_batch=128, ref_chunk=1024):
     r"""Stage 1 of GSVA (Gaussian kernel) on GPU — pairwise normal CDF.
@@ -469,7 +446,6 @@ def _gsva_density_gaussian_torch(X, device, dtype, gene_batch=128, ref_chunk=102
         D[:, constant_mask] = 0.0
     return D
 
-
 def _gsva_density_ecdf_torch(X):
     r"""Stage 1 (ECDF mode) — per-column empirical CDF on GPU.
 
@@ -485,7 +461,6 @@ def _gsva_density_ecdf_torch(X):
         sorted_X.t().contiguous(), X.t().contiguous(), right=True
     ).t()
     return pos.to(X.dtype) / S
-
 
 def _func_gsva_torch(
     mat,
@@ -652,7 +627,6 @@ def _func_gsva_torch(
         es[c0:c1] = es_b
 
     return es.cpu().numpy().astype(np.float64), None
-
 
 _gsva = MethodMeta(
     name="gsva",

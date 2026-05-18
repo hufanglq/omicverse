@@ -10,11 +10,8 @@ import scipy.sparse as sps
 import scipy.stats as sts
 from tqdm.auto import tqdm
 
-from omicverse.es._docs import docs
-from omicverse.es._log import _log
 from omicverse.es._method import Method, MethodMeta
 from omicverse.es._net import _getset
-
 
 @nb.njit(parallel=True, cache=True)
 def _auc(
@@ -44,7 +41,6 @@ def _auc(
         es[j] = np.sum(np.diff(x) * y) / max_auc
     return es
 
-
 def _validate_n_up(
     nvar: int,
     n_up: int | float | None = None,
@@ -58,8 +54,6 @@ def _validate_n_up(
     assert nvar >= n_up > 1, f"For nvar={nvar}, n_up={n_up} must be between 1 and {nvar}"
     return n_up
 
-
-@docs.dedent
 def _func_aucell(
     mat: np.ndarray,
     cnct: np.ndarray,
@@ -84,14 +78,18 @@ def _func_aucell(
     - :math:`F` is the feature set
     - :math:`{RecoveryCurve}_{i, F}(r_i)` is the proportion of features from :math:`F` recovered in the top :math:`r_i`-fraction of the ranked list for observation :math:`i`
 
-    %(notest)s
-
-    %(params)s
+    Parameters
+    ----------
     n_up
         Number of features to include in the AUC calculation.
         If ``None``, the top 5% of features based on their magnitude are selected.
 
-    %(returns)s
+    Returns
+    -------
+    es : np.ndarray
+        Enrichment score matrix (observations × signatures).
+    pv : np.ndarray or None
+        P-value matrix; ``None`` for kernels without a statistical test.
 
     Example
     -------
@@ -105,8 +103,6 @@ def _func_aucell(
     nobs, nvar = mat.shape
     nsrc = starts.size
     n_up = _validate_n_up(nvar, n_up)
-    m = f"aucell - calculating {nsrc} AUCs for {nvar} targets across {nobs} observations, categorizing features at rank={n_up}"
-    _log(m, level="info", verbose=verbose)
     es = np.zeros(shape=(nobs, nsrc))
     for i in tqdm(range(mat.shape[0]), disable=not verbose):
         if isinstance(mat, sps.csr_matrix):
@@ -116,7 +112,6 @@ def _func_aucell(
         row = sts.rankdata(a=-row, method="ordinal")
         es[i] = _auc(row=row, cnct=cnct, starts=starts, offsets=offsets, n_up=n_up, nsrc=nsrc)
     return es, None
-
 
 def _func_aucell_torch(
     mat,
@@ -245,7 +240,6 @@ def _func_aucell_torch(
         es[:, zero_cols] = 0.0
 
     return es.cpu().numpy(), None
-
 
 _aucell = MethodMeta(
     name="aucell",

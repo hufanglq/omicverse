@@ -7,7 +7,6 @@
 import numba as nb
 import numpy as np
 
-
 @nb.njit(cache=True)
 def _fdr_bh_single_row(ps_row, m):
     """Apply Benjamini-Hochberg correction to a single row."""
@@ -44,7 +43,6 @@ def _fdr_bh_single_row(ps_row, m):
 
     return ps_adj
 
-
 @nb.njit(parallel=True, cache=True)
 def _fdr_bh_parallel(ps, m):
     """Apply Benjamini-Hochberg correction to all rows in parallel."""
@@ -55,7 +53,6 @@ def _fdr_bh_parallel(ps, m):
         result[i] = _fdr_bh_single_row(ps[i], m)
 
     return result
-
 
 def _fdr_bh_axis1_numba(ps):
     """Benjamini–Hochberg adjusted p-values along axis=1 (rows)."""

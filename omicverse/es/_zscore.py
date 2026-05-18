@@ -7,12 +7,8 @@
 import numpy as np
 import scipy.stats as sts
 
-from omicverse.es._docs import docs
-from omicverse.es._log import _log
 from omicverse.es._method import Method, MethodMeta
 
-
-@docs.dedent
 def _func_zscore(
     mat: np.ndarray,
     adj: np.ndarray,
@@ -54,14 +50,18 @@ def _func_zscore(
 
         p = 2 \times \mathrm{sf}\bigl(\lvert \mathrm{ES} \rvert \bigr)
 
-    %(yestest)s
-
-    %(params)s
+    Parameters
+    ----------
 
     flavor
         Which flavor to use when calculating the z-score, either KSEA or RoKAI.
 
-    %(returns)s
+    Returns
+    -------
+    es : np.ndarray
+        Enrichment score matrix (observations × signatures).
+    pv : np.ndarray or None
+        P-value matrix; ``None`` for kernels without a statistical test.
 
     Example
     -------
@@ -75,8 +75,6 @@ def _func_zscore(
     assert isinstance(flavor, str) and flavor in ["KSEA", "RoKAI"], "flavor must be str and KSEA or RoKAI"
     nobs, nvar = mat.shape
     nvar, nsrc = adj.shape
-    m = f"zscore - calculating {nsrc} scores with flavor={flavor}"
-    _log(m, level="info", verbose=verbose)
     stds = np.std(mat, axis=1, ddof=1)
     if flavor == "RoKAI":
         mean_all = np.mean(mat, axis=1)
@@ -87,7 +85,6 @@ def _func_zscore(
     es = ((mean - mean_all.reshape(-1, 1)) * n) / stds.reshape(-1, 1)
     pv = 2 * sts.norm.sf(np.abs(es))
     return es, pv
-
 
 def _func_zscore_torch(
     mat,
@@ -136,7 +133,6 @@ def _func_zscore_torch(
     pv = torch.special.erfc(es.abs() / np.sqrt(2.0))
 
     return es.cpu().numpy(), pv.cpu().numpy()
-
 
 _zscore = MethodMeta(
     name="zscore",

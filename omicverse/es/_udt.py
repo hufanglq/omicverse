@@ -7,11 +7,8 @@
 import numpy as np
 from tqdm.auto import tqdm
 
-from omicverse.es._docs import docs
-from omicverse.es._log import _log
 from omicverse.es._method import Method, MethodMeta
 from omicverse.es._odeps import _check_import, xgboost
-
 
 def _xgbr(
     x: np.ndarray,
@@ -30,8 +27,6 @@ def _xgbr(
     es = np.clip(es, 0, 1)
     return es
 
-
-@docs.dedent
 def _func_udt(
     mat: np.ndarray,
     adj: np.ndarray,
@@ -48,13 +43,17 @@ def _func_udt(
 
     The enrichment score :math:`ES` is then calculated as the coefficient of determination :math:`R^2`.
 
-    %(notest)s
-
-    %(params)s
+    Parameters
+    ----------
 
     kwargs
         All other keyword arguments are passed to ``xgboost.XGBRegressor``.
-    %(returns)s
+    Returns
+    -------
+    es : np.ndarray
+        Enrichment score matrix (observations × signatures).
+    pv : np.ndarray or None
+        P-value matrix; ``None`` for kernels without a statistical test.
 
     Example
     -------
@@ -68,15 +67,12 @@ def _func_udt(
     _check_import(xgboost, "xgboost")
     nobs = mat.shape[0]
     nvar, nsrc = adj.shape
-    m = f"udt - fitting {nsrc} univariate decision tree models (XGBoost) of {nvar} targets across {nobs} observations"
-    _log(m, level="info", verbose=verbose)
     es = np.zeros(shape=(nobs, nsrc))
     for i in tqdm(range(nobs), disable=not verbose):
         obs = mat[i]
         for j in range(adj.shape[1]):
             es[i, j] = _xgbr(x=adj[:, j], y=obs, **kwargs)
     return es, None
-
 
 def _func_udt_torch(
     mat,
@@ -135,7 +131,6 @@ def _func_udt_torch(
         es[:, j] = r2.clamp(0.0, 1.0)
 
     return es.cpu().numpy().astype(np.float64), None
-
 
 _udt = MethodMeta(
     name="udt",

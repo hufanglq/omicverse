@@ -12,11 +12,8 @@ import scipy.sparse as sps
 import scipy.stats as sts
 from tqdm.auto import tqdm
 
-from omicverse.es._docs import docs
-from omicverse.es._log import _log
 from omicverse.es._method import Method, MethodMeta
 from omicverse.es._net import _getset
-
 
 def _maxn() -> int:
     l = 1
@@ -30,9 +27,7 @@ def _maxn() -> int:
         n = int((l + min(h, l * 3)) / 2)
     return n
 
-
 MAXN = _maxn()
-
 
 @nb.njit(cache=True)
 def _mlnTest2t(
@@ -110,7 +105,6 @@ def _mlnTest2t(
             st = st_new
     return max(0, pa - p0 - math.log(st))
 
-
 @nb.njit(cache=True)
 def _test1t(
     a: int,
@@ -120,7 +114,6 @@ def _test1t(
 ) -> float:
     # https://github.com/painyeph/FishersExactTest/blob/master/fisher.py
     return math.exp(-_mlnTest2t(a, a + b, a + c, a + b + c + d))
-
 
 @nb.njit(cache=True)
 def _oddsr(
@@ -140,7 +133,6 @@ def _oddsr(
     if log and r != 0.0:
         r = math.log(r)
     return r
-
 
 @nb.njit(parallel=True, cache=True)
 def _runora(
@@ -177,8 +169,6 @@ def _runora(
         pv[j] = _test1t(a=a, b=b, c=c, d=d)
     return es, pv
 
-
-@docs.dedent
 def _func_ora(
     mat: np.ndarray,
     cnct: np.ndarray,
@@ -231,9 +221,8 @@ def _func_ora(
 
     And the :math:`p_{value}` is obtained afer computing a two-tailed Fisher’s exact test with the same table.
 
-    %(yestest)s
-
-    %(params)s
+    Parameters
+    ----------
 
     n_up
         Number of top-ranked features, based on their magnitude, to select as observed features.
@@ -243,7 +232,12 @@ def _func_ora(
     %(n_bg)s
     %(ha_corr)s
 
-    %(returns)s
+    Returns
+    -------
+    es : np.ndarray
+        Enrichment score matrix (observations × signatures).
+    pv : np.ndarray or None
+        P-value matrix; ``None`` for kernels without a statistical test.
 
     Example
     -------
@@ -258,17 +252,11 @@ def _func_ora(
     nsrc = starts.size
     if n_up is None:
         n_up = int(np.max([np.ceil(0.05 * nvar), 2]))
-        m = f"ora - setting n_up={n_up}"
-        _log(m, level="info", verbose=verbose)
     if n_bg is None:
         n_bg = 0
-        m = "ora - not using n_bg, a feature specific background will be used instead"
-        _log(m, level="info", verbose=verbose)
     assert isinstance(n_up, int | float) and n_up > 0, "n_up must be numeric and > 0"
     assert isinstance(n_bm, int | float) and n_bm >= 0, "n_bm must be numeric and positive"
     assert isinstance(n_bg, int | float) and n_bg >= 0, "n_bg must be numeric and positive"
-    m = f"ora - calculating {nsrc} scores across {nobs} observations with n_up={n_up}, n_bm={n_bm}, n_bg={n_bg}"
-    _log(m, level="info", verbose=verbose)
     es = np.zeros((nobs, nsrc))
     pv = np.zeros((nobs, nsrc))
     ranks = np.arange(nvar, dtype=np.int_)
@@ -284,7 +272,6 @@ def _func_ora(
             row=set(row), ranks=set(ranks), cnct=cnct, starts=starts, offsets=offsets, n_bg=n_bg, ha_corr=ha_corr
         )
     return es, pv
-
 
 def _func_ora_torch(
     mat,
@@ -392,7 +379,6 @@ def _func_ora_torch(
     )
 
     return es.cpu().numpy(), pv_t.cpu().numpy()
-
 
 _ora = MethodMeta(
     name="ora",

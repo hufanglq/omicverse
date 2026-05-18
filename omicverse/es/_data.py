@@ -12,9 +12,6 @@ from numpy.random import default_rng
 from tqdm.auto import tqdm
 
 from omicverse.es._datatype import DataType
-from omicverse.es._docs import docs
-from omicverse.es._log import _log
-
 
 def _extract(
     data: DataType,
@@ -52,7 +49,6 @@ def _extract(
                 mat = mat.astype(float)
     return mat, row, col
 
-
 def _validate_mat(
     mat: np.ndarray, row: np.ndarray, col: np.ndarray, empty: bool = True, verbose: bool = False
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -67,8 +63,6 @@ def _validate_mat(
         msk_col = np.count_nonzero(mat, axis=0) == 0
     n_empty_col: float = np.sum(msk_col)
     if n_empty_col > 0 and empty:
-        m = f"{n_empty_col} features of mat are empty, they will be removed"
-        _log(m, level="warn", verbose=verbose)
         col = col[~msk_col]
         mat = mat[:, ~msk_col]
     # Check for repeated features
@@ -80,8 +74,6 @@ def _validate_mat(
         msk_row = np.count_nonzero(mat, axis=1) == 0
     n_empty_row: float = np.sum(msk_row)
     if n_empty_row > 0 and empty:
-        m = f"{n_empty_row} observations of mat are empty, they will be removed"
-        _log(m, level="warn", verbose=verbose)
         row = row[~msk_row]
         mat = mat[~msk_row]
     # Check for non finite values
@@ -89,7 +81,6 @@ def _validate_mat(
         "mat contains non finite values (nan or inf), set them to 0 or remove them"
     )
     return mat, row, col
-
 
 def _validate_backed(
     mat,
@@ -113,12 +104,10 @@ def _validate_backed(
     msk_col = np.logical_and.reduce(msk_col, axis=0)
     n_empty_col: float = np.sum(msk_col)
     if n_empty_col > 0 and empty:
-        m = f"{n_empty_col} features of mat are empty, they will be removed"
-        _log(m, level="warn", verbose=verbose)
+        pass
     else:
         msk_col[:] = False
     return msk_col
-
 
 def _break_ties(
     mat: np.ndarray,
@@ -131,8 +120,6 @@ def _break_ties(
     mat, features = mat[:, idx], features[idx]
     return mat, features
 
-
-@docs.dedent
 def extract(
     data: DataType,
     layer: str | None = None,
@@ -170,8 +157,6 @@ def extract(
     """
     # Extract
     mat, row, col = _extract(data=data, layer=layer, raw=raw)
-    m = f"Extracted omics mat with {row.size} rows (observations) and {col.size} columns (features)"
-    _log(m, level="info", verbose=verbose)
     # Validate
     isbacked = hasattr(data, "isbacked") and data.isbacked
     mat_tuple: tuple[np.ndarray, np.ndarray, np.ndarray] | tuple[tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray]

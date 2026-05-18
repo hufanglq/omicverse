@@ -7,12 +7,9 @@
 import pandas as pd
 
 from omicverse.es._datatype import DataType
-from omicverse.es._docs import docs
 from omicverse.es._consensus import consensus
 from omicverse.es._methods import _methods
 
-
-@docs.dedent
 def decouple(
     data: DataType,
     net: pd.DataFrame,

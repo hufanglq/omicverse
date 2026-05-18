@@ -9,11 +9,8 @@ import numpy as np
 import scipy.sparse as sps
 from tqdm.auto import tqdm
 
-from omicverse.es._docs import docs
-from omicverse.es._log import _log
 from omicverse.es._method import Method, MethodMeta
 from omicverse.es._net import _getset
-
 
 @nb.njit(cache=True)
 def _std(
@@ -26,7 +23,6 @@ def _std(
     sd = np.sqrt(var)
     return sd
 
-
 def _ridx(
     times: int,
     nvar: int,
@@ -38,7 +34,6 @@ def _ridx(
         for i in idx:
             rng.shuffle(i)
     return idx
-
 
 @nb.njit(cache=True)
 def _esrank(
@@ -83,7 +78,6 @@ def _esrank(
         j = j_neg
     return mx_value, j, es
 
-
 @nb.njit(cache=True)
 def _nesrank(
     ridx: np.ndarray,
@@ -120,7 +114,6 @@ def _nesrank(
         pval = 1.0
     return nes, pval
 
-
 @nb.njit(parallel=True, cache=True)
 def _stsgsea(
     row: np.ndarray,
@@ -153,8 +146,6 @@ def _stsgsea(
         nes[j], pv[j] = _nesrank(ridx=ridx, row=row, rnks=rnks, set_msk=set_msk, dec=dec, es=es[j])
     return es, nes, pv
 
-
-@docs.dedent
 def _func_gsea(
     mat: np.ndarray,
     cnct: np.ndarray,
@@ -223,13 +214,17 @@ def _func_gsea(
     - :math:`\mu{+}` is the mean of positive values in :math:`ES_{rand}`
     - :math:`\mu{-}` is the mean of negative values in :math:`ES_{rand}`
 
-    %(yestest)s
-
-    %(params)s
+    Parameters
+    ----------
     %(times)s
     %(seed)s
 
-    %(returns)s
+    Returns
+    -------
+    es : np.ndarray
+        Enrichment score matrix (observations × signatures).
+    pv : np.ndarray or None
+        P-value matrix; ``None`` for kernels without a statistical test.
 
     Example
     -------
@@ -245,11 +240,7 @@ def _func_gsea(
     times, seed = int(times), int(seed)
     # Compute
     nsrc = starts.size
-    m = f"gsea - calculating {nsrc} scores across {nobs} observations"
-    _log(m, level="info", verbose=verbose)
     if times > 1:
-        m = f"gsea - comparing estimates against {times} random permutations"
-        _log(m, level="info", verbose=verbose)
         ridx = _ridx(times=times, nvar=nvar, seed=seed)
     else:
         ridx = _ridx(times=times, nvar=nvar, seed=None)
@@ -271,7 +262,6 @@ def _func_gsea(
     if times > 1:
         es = nes
     return es, pv
-
 
 def _func_gsea_torch(
     mat,
@@ -380,7 +370,6 @@ def _func_gsea_torch(
     # No permutation → pv is all ones (matches CPU ``np.ones(nsrc)``).
     pv = np.ones((nobs, nsrc), dtype=np.float64)
     return es_out.cpu().numpy(), pv
-
 
 _gsea = MethodMeta(
     name="gsea",

@@ -21,14 +21,12 @@ from typing import Literal, Optional
 
 import numpy as np
 
-
 def _torch_available() -> bool:
     try:
         import torch  # noqa: F401
         return True
     except ImportError:
         return False
-
 
 def _cuda_available() -> bool:
     if not _torch_available():
@@ -39,14 +37,12 @@ def _cuda_available() -> bool:
     except Exception:  # noqa: BLE001
         return False
 
-
 def torch_device(prefer: str = 'cuda'):
     """Return a torch.device handle, falling back to CPU when needed."""
     import torch
     if prefer == 'cuda' and torch.cuda.is_available():
         return torch.device('cuda')
     return torch.device('cpu')
-
 
 # ────────────────────────────────────────────────────────────────────
 # Memory-bounded chunking
@@ -70,7 +66,6 @@ def torch_device(prefer: str = 'cuda'):
 # Target working tensor size for chunked kernels. Same magnitude as
 # `ov.pp._pca`'s 8 M elements, scaled to a 32 MB fp32 budget.
 _DEFAULT_CHUNK_TARGET_ELEMENTS = 8_000_000
-
 
 def to_gpu_dense(mat, device, dtype=None):
     """Move a (possibly sparse) host matrix to the GPU as a dense tensor.
@@ -131,7 +126,6 @@ def to_gpu_dense(mat, device, dtype=None):
     arr = np.asarray(mat)
     return torch.as_tensor(arr, dtype=dtype, device=device)
 
-
 def chunk_size_for(
     elements_per_unit: int,
     max_units: int,
@@ -150,7 +144,6 @@ def chunk_size_for(
     suggested = target_elements // max(1, int(elements_per_unit))
     suggested = max(int(floor), min(int(ceil), int(suggested)))
     return max(1, min(int(max_units), suggested))
-
 
 def resolve_engine(
     engine: Literal['auto', 'cpu', 'gpu'] = 'auto',
@@ -203,7 +196,6 @@ def resolve_engine(
         return 'gpu'
     return 'cpu'
 
-
 # ────────────────────────────────────────────────────────────────────
 # Statistical primitives on torch tensors
 # ────────────────────────────────────────────────────────────────────
@@ -219,7 +211,6 @@ def resolve_engine(
 # anywhere on (0, 1). Validated against scipy.special.betainc to ~1e-13
 # absolute error in the parameter range relevant for biological tests
 # (df in [2, 50_000], x in (0, 1)).
-
 
 def _betainc_cf(a, b, x, max_iter: int = 400, check_every: int = 16):
     """Lentz continued fraction for the regularised incomplete beta.
@@ -281,7 +272,6 @@ def _betainc_cf(a, b, x, max_iter: int = 400, check_every: int = 16):
                 break
     return h
 
-
 def betainc_torch(a, b, x):
     """Regularised incomplete beta function :math:`I(x; a, b)` on torch.
 
@@ -342,7 +332,6 @@ def betainc_torch(a, b, x):
     cf = _betainc_cf(a_e, b_e, x_e)
     result = torch.exp(log_pre) * cf
     return torch.where(use_sym, 1.0 - result, result)
-
 
 def hypergeom_sf_torch(a, b, c, d):
     r"""Hypergeometric survival ``P(X \ge a)`` for a 2×2 table on torch tensors.
@@ -427,7 +416,6 @@ def hypergeom_sf_torch(a, b, c, d):
     pv = torch.where(a64 <= i_lo, torch.ones_like(pv), pv)
     return pv
 
-
 def t_sf_torch(x, df):
     """Two-sided ``scipy.stats.t.sf(|x|, df) * 2`` on torch tensors.
 
@@ -443,7 +431,6 @@ def t_sf_torch(x, df):
     z = df / (df + x * x)
     half = torch.tensor(0.5, dtype=x.dtype, device=x.device)
     return betainc_torch(df / 2.0, half, z)
-
 
 # ────────────────────────────────────────────────────────────────────
 # Pure-torch gradient boosted decision trees (squared loss)
@@ -491,7 +478,6 @@ def t_sf_torch(x, df):
 # Speedup vs xgboost CPU per-batch loop at PBMC3k scale (B = 2562):
 # 230× end-to-end.
 
-
 def _gbdt_quantile_bins(X, n_bins):
     """Per-feature quantile cut points + binned X. Edges are (F, n_bins-1)."""
     import torch
@@ -502,7 +488,6 @@ def _gbdt_quantile_bins(X, n_bins):
     for f in range(F):
         X_binned[:, f] = torch.bucketize(X[:, f].contiguous(), edges[f])
     return X_binned, edges
-
 
 def _gbdt_build_histograms(X_binned, grad, leaf_id, n_leaves, n_bins):
     """Scatter (grad, count) into a (Bc, n_leaves, F, n_bins) histogram.
@@ -539,7 +524,6 @@ def _gbdt_build_histograms(X_binned, grad, leaf_id, n_leaves, n_bins):
     H_g.scatter_add_(0, idx.reshape(-1), src_g.reshape(-1))
     H_c.scatter_add_(0, idx.reshape(-1), torch.ones_like(src_g.reshape(-1)))
     return H_g.view(Bc, n_leaves, F, n_bins), H_c.view(Bc, n_leaves, F, n_bins)
-
 
 def gbdt_squared_loss_torch(
     X, Y,

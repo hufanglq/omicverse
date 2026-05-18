@@ -11,10 +11,7 @@ import scipy.stats as sts
 from tqdm.auto import tqdm
 
 from omicverse.es._datatype import DataType
-from omicverse.es._docs import docs
-from omicverse.es._log import _log
 from omicverse.es._data import extract
-
 
 def read_gmt(
     path: str,
@@ -55,7 +52,6 @@ def read_gmt(
     df = pd.DataFrame(df, columns=["source", "target"])
     return df
 
-
 def _validate_net(
     net=pd.DataFrame,
     verbose: bool = False,
@@ -73,8 +69,6 @@ def _validate_net(
     if "weight" not in net.columns:
         vnet = net[["source", "target"]].copy()
         vnet["weight"] = 1.0
-        m = "weight not found in net.columns, adding it as:\nnet['weight'] = 1"
-        _log(m, level="warn", verbose=verbose)
     else:
         vnet = net[["source", "target", "weight"]].copy()
     vnet["source"] = vnet["source"].astype("U")
@@ -82,8 +76,6 @@ def _validate_net(
     vnet["weight"] = vnet["weight"].astype(float)
     return vnet
 
-
-@docs.dedent
 def prune(
     features: np.ndarray | None,
     net: pd.DataFrame,
@@ -136,7 +128,6 @@ def prune(
     )
     return vnet
 
-
 def _adj(
     net: pd.DataFrame,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -147,7 +138,6 @@ def _adj(
     targets = X.index.values.astype("U")
     X = X.values.astype(float)
     return sources, targets, X
-
 
 def _order(
     features: np.ndarray,
@@ -164,8 +154,6 @@ def _order(
     madjmat[idxs, :] = adjmat[: len(idxs), :]
     return madjmat
 
-
-@docs.dedent
 def adjmat(
     features: np.ndarray,
     net: pd.DataFrame,
@@ -196,12 +184,8 @@ def adjmat(
     sources, targets, adjm = _adj(net=net)
     # Sort adjmat to match features
     adjm = _order(features, targets, adjm)
-    m = f"Network adjacency matrix has {targets.size} unique features and {sources.size} unique sources"
-    _log(m, level="info", verbose=verbose)
     return sources, features, adjm
 
-
-@docs.dedent
 def idxmat(
     features: np.ndarray,
     net: pd.DataFrame,
@@ -243,10 +227,7 @@ def idxmat(
     starts = np.zeros(offsets.shape[0], dtype=int)
     starts[1:] = np.cumsum(offsets)[:-1]
     targets = np.unique(cnct)
-    m = f"Network has {targets.size} unique features and {sources.size} unique sources"
-    _log(m, level="info", verbose=verbose)
     return sources, cnct, starts, offsets
-
 
 @nb.njit(cache=True)
 def _getset(cnct: np.ndarray, starts: np.ndarray, offsets: np.ndarray, j: int) -> np.ndarray:
@@ -255,8 +236,6 @@ def _getset(cnct: np.ndarray, starts: np.ndarray, offsets: np.ndarray, j: int) -
     fset = cnct[srt:off]
     return fset
 
-
-@docs.dedent
 def shuffle_net(
     net: pd.DataFrame, target: bool = True, weight: bool = False, seed: int = 42, same_seed: bool = True
 ) -> pd.DataFrame:
@@ -322,8 +301,6 @@ def shuffle_net(
         rnet["weight"] = vals
     return rnet.drop_duplicates(["source", "target"], keep="first")
 
-
-@docs.dedent
 def net_corr(
     net: pd.DataFrame, data: None | DataType = None, tmin: int = 5, verbose: bool = False, **kwargs
 ) -> pd.DataFrame:

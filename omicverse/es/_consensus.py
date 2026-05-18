@@ -10,11 +10,8 @@ import pandas as pd
 import scipy.stats as sts
 from anndata import AnnData
 
-from omicverse.es._docs import docs
-from omicverse.es._log import _log
 from omicverse.es._gsea import _std
 from omicverse.es._run import _return
-
 
 @nb.njit(cache=True)
 def _zscore(
@@ -30,7 +27,6 @@ def _zscore(
     # Compute z-score (mean is 0)
     z = (sel / _std(sel, 1))[:n_sel]
     return z
-
 
 @nb.njit(parallel=True, cache=True)
 def _mean_zscores(
@@ -63,8 +59,6 @@ def _mean_zscores(
             cons[i, j] = np.mean(ftr)
     return cons
 
-
-@docs.dedent
 def consensus(
     result: dict | AnnData,
     verbose: bool = False,
@@ -101,8 +95,6 @@ def consensus(
 
         p = 2 \times \mathrm{sf}\bigl(\lvert \mathrm{ES} \rvert \bigr)
 
-    %(yestest)s
-
     Parameters
     ----------
     result
@@ -137,8 +129,6 @@ def consensus(
         obs_names = result[keys[0]].index
         var_names = result[keys[0]].columns
     names = {k.split("_")[1] for k in keys}
-    m = f"consensus - running consensus using methods={names}"
-    _log(m, level="info", verbose=verbose)
     scores = np.array(scores)
     # Compute mean z-scores
     es = _mean_zscores(scores)
