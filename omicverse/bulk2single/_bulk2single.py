@@ -142,9 +142,20 @@ class Bulk2Single:
         genelenfile:str or None
             Gene-length file path when backend requires TPM transformation.
         mode:str
-            Inference mode for TAPE.
+            Inference mode for TAPE. ``'overall'`` (default) deconvolves all
+            samples jointly and returns a single signature matrix; pass
+            ``'high-resolution'`` (together with ``adaptive=True``) to run the
+            adaptive stage per sample, producing one ``(samples × genes)``
+            signature matrix **per cell type**. The per-sample matrices are
+            written to ``self.signature_matrix`` after the call returns:
+              * ``mode='overall'``        → ``DataFrame`` (cell-type × gene)
+              * ``mode='high-resolution'`` → ``dict[cell_type, DataFrame]``
+                                              (each DataFrame is sample × gene)
+            ``self.signature_matrix`` is ``None`` for ``method='scaden'`` or
+            when ``adaptive=False``.
         adaptive:bool
-            Whether adaptive feature filtering is enabled.
+            Whether adaptive feature filtering is enabled. Must be ``True``
+            for ``mode='high-resolution'``.
         variance_threshold:float
             Variance cutoff for selecting informative genes.
         save_model_name:str or None
@@ -165,8 +176,9 @@ class Bulk2Single:
         """
         from ..external.tape import Deconvolution,ScadenDeconvolution
         sc_ref=self.sc_ref.copy()
+        self.signature_matrix = None
         if method=='scaden':
-            CellFractionPrediction=ScadenDeconvolution(sc_ref, 
+            CellFractionPrediction=ScadenDeconvolution(sc_ref,
                            self.bulk_data.T, sep=sep,
                            batch_size=batch_size, epochs=epochs, scaler=scaler)
         elif method=='tape':
@@ -176,6 +188,11 @@ class Bulk2Single:
                             mode=mode, adaptive=adaptive, variance_threshold=variance_threshold,
                             save_model_name=save_model_name,
                             batch_size=batch_size, epochs=epochs, seed=seed)
+            # Surface the signature matrix to the user.
+            #   - mode='overall'         → DataFrame (cell-type × gene)
+            #   - mode='high-resolution' → dict[cell_type, DataFrame(sample × gene)]
+            #   - adaptive=False         → None
+            self.signature_matrix = SignatureMatrix
         else:
             raise ValueError('method must be scaden or tape')
         if self.bulk_group!=None:
