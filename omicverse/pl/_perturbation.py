@@ -57,6 +57,8 @@ from .._registry import register_function
 def perturbation_shift_violin(
     result: Dict,
     *,
+    adata: Optional[AnnData] = None,
+    groupby: Optional[str] = None,
     figsize: tuple[float, float] = (6.0, 3.5),
     color: str = "#5B8FF9",
     order: Optional[Sequence[str]] = None,
@@ -71,10 +73,15 @@ def perturbation_shift_violin(
         The dictionary returned by ``manager.perturb_genes(...)``. Must
         contain ``'cosine_similarities'`` — a ``DataFrame`` with one column
         per perturbed gene (cells × genes).
+    adata, groupby : AnnData and str
+        Optional — when both are passed and ``groupby`` is a column in
+        ``adata.obs``, the violin for each gene is split into one violin
+        per category (e.g. ``groupby='cell_type'`` reveals lineage-
+        specific perturbation effects).
     figsize : tuple
         Figure size in inches.
     color : str
-        Violin fill colour.
+        Default violin fill colour when ``groupby`` is not provided.
     order : sequence of str or None
         Gene plot order. ``None`` = sort by mean cosine ascending (strongest
         effect leftmost).
@@ -100,6 +107,91 @@ def perturbation_shift_violin(
     if order is None:
         order = df.mean(axis=0, skipna=True).sort_values().index.tolist()
     df = df[order]
+    # Drop genes that ended up entirely NaN (no cell carried the gene — typical
+    # for narrowly-expressed TFs when max_ncells is small).
+    nonempty = [c for c in df.columns if df[c].notna().any()]
+    skipped = [c for c in df.columns if c not in nonempty]
+    if skipped:
+        import warnings as _warnings
+        _warnings.warn(
+            f"Skipping genes with no perturbed cells: {skipped} "
+            f"(increase max_ncells or pick more broadly-expressed targets)."
+        )
+    df = df[nonempty]
+    order = nonempty
+    if df.empty:
+        raise ValueError("No genes have any perturbed cells to plot.")
+
+    # If a groupby is requested, render one violin per category per gene.
+    if groupby is not None and adata is not None:
+        if groupby not in adata.obs.columns:
+            raise KeyError(f"adata.obs[{groupby!r}] not found")
+        from ._palette import palette_28
+        group = adata.obs[groupby].astype(str)
+        # Align to the cells scored by perturb_genes (which used obs_names index)
+        cell_idx = result.get("cell_indices")
+        if cell_idx is not None:
+            group = group.iloc[cell_idx].reset_index(drop=True)
+            df_aligned = df.reset_index(drop=True)
+        else:
+            df_aligned = df.copy()
+            group = group.loc[df_aligned.index]
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize)
+        else:
+            fig = ax.figure
+        cats = sorted(group.unique())
+        pal = list(palette_28)
+        cat_to_color = {c: pal[i % len(pal)] for i, c in enumerate(cats)}
+        n_g = len(order)
+        n_c = len(cats)
+        width = 0.8 / max(n_c, 1)
+        # Cap each gene's group set to top-K most-perturbed categories (by mean
+        # |1-cos| over that gene), so the plot stays readable with many categories.
+        max_groups_per_gene = 6
+        for gi, g in enumerate(order):
+            shifts = (1 - df_aligned[g]).abs()
+            by_cat = shifts.groupby(group).mean().dropna()
+            top_cats = by_cat.sort_values(ascending=False).head(max_groups_per_gene).index.tolist()
+            for ci, c in enumerate(top_cats):
+                vals = df_aligned[g][(group == c) & df_aligned[g].notna()].values
+                if vals.size < 2:
+                    continue
+                pos = gi + (ci - (len(top_cats) - 1) / 2) * width
+                parts = ax.violinplot(
+                    [vals], positions=[pos], widths=width * 0.9,
+                    showmeans=True, showextrema=False,
+                )
+                for body in parts["bodies"]:
+                    body.set_facecolor(cat_to_color[c])
+                    body.set_edgecolor("#333333")
+                    body.set_alpha(0.75)
+                if "cmeans" in parts:
+                    parts["cmeans"].set_color("#222222")
+            # legend (once)
+            if gi == 0:
+                for c in top_cats:
+                    ax.scatter([], [], s=30, c=cat_to_color[c], label=str(c))
+        ax.set_xticks(range(len(order)))
+        ax.set_xticklabels(order)
+        ax.set_xlabel("Perturbed gene")
+        ax.set_ylabel("Cosine similarity\n(original ↔ perturbed)")
+        ax.axhline(1.0, color="#888888", linewidth=0.5, linestyle="--")
+        for spine_name in ("top", "right"):
+            ax.spines[spine_name].set_visible(False)
+        if ax.get_legend_handles_labels()[0]:
+            ax.legend(
+                loc="center left", bbox_to_anchor=(1.02, 0.5),
+                fontsize=7, frameon=False, title=groupby,
+            )
+        if title:
+            ax.set_title(title, fontsize=11)
+        elif result.get("perturb_type"):
+            ax.set_title(
+                f"Geneformer in-silico {result['perturb_type']} — by {groupby}",
+                fontsize=11,
+            )
+        return fig, ax
 
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
@@ -130,6 +222,96 @@ def perturbation_shift_violin(
             fontsize=11,
         )
 
+    return fig, ax
+
+
+# --------------------------------------------------------------------------- #
+# downstream genes: bar plot of top-shifted genes                              #
+# --------------------------------------------------------------------------- #
+
+
+@register_function(
+    aliases=["扰动下游基因", "perturbation_top_downstream_genes", "perturbation_top_genes"],
+    category="pl",
+    description=(
+        "Bar plot of the genes whose contextual embedding shifted most after "
+        "in-silico knockout of a target transcription factor — i.e. candidate "
+        "downstream targets ranked by 1 - cos(orig_emb, perturbed_emb)."
+    ),
+    examples=[
+        "result = manager.perturb_genes(adata, ['PAX5'], perturb_type='delete')",
+        "ov.pl.perturbation_top_downstream_genes(result, gene='PAX5', top_n=20)",
+    ],
+    related=["llm.SCLLMManager.perturb_genes", "pl.perturbation_shift_violin"],
+)
+def perturbation_top_downstream_genes(
+    result: Dict,
+    *,
+    gene: str,
+    top_n: int = 20,
+    figsize: tuple[float, float] = (6.5, 5.0),
+    bar_color: str = "#cd3a3a",
+    min_cells: int = 5,
+    title: Optional[str] = None,
+    ax: Optional[Axes] = None,
+):
+    r"""Plot the top-N most-shifted downstream genes after a TF knockout.
+
+    Requires ``manager.perturb_genes(..., compute_gene_shifts=True)`` (the
+    default). The shift metric per downstream gene is
+    ``mean_cells(1 - cos(emb_orig, emb_perturbed))`` — averaged over the
+    cells where both the target and the downstream gene were present in
+    the rank-encoded input. Higher = larger context shift = stronger
+    model-predicted downstream effect.
+
+    Parameters
+    ----------
+    result : dict
+        Output of ``manager.perturb_genes(...)``. Must contain
+        ``'gene_shifts'`` — a dict keyed by target-gene label.
+    gene : str
+        Which target gene's perturbation to summarise.
+    top_n : int
+        Number of downstream genes to display.
+    figsize, bar_color, title, ax
+        Standard matplotlib styling.
+    min_cells : int
+        Minimum number of cells in which a downstream gene must be present
+        for it to enter the ranking. Filters out noise from rare genes.
+
+    Returns
+    -------
+    fig, ax
+    """
+    shifts_by_target = result.get("gene_shifts") or {}
+    if gene not in shifts_by_target:
+        raise KeyError(
+            f"result['gene_shifts'] has no entry for {gene!r} (keys: "
+            f"{list(shifts_by_target.keys())}). Re-run perturb_genes with "
+            f"compute_gene_shifts=True (default)."
+        )
+    df = pd.DataFrame(shifts_by_target[gene])
+    if df.empty:
+        raise ValueError(f"No downstream-gene shifts recorded for {gene!r}.")
+    df = df[df["n_cells"] >= min_cells].sort_values("mean_shift", ascending=False).head(top_n)
+    if df.empty:
+        raise ValueError(f"No downstream genes pass min_cells={min_cells} filter.")
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    y_pos = np.arange(len(df))[::-1]  # tallest bar at the top
+    labels = df["gene"].astype(str).tolist()
+    ax.barh(y_pos, df["mean_shift"].values, color=bar_color, alpha=0.8, edgecolor="#333333")
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.set_xlabel("Mean 1 − cos(orig, perturbed)\n(higher = more shifted)")
+    ax.set_ylabel("Downstream gene")
+    for spine_name in ("top", "right"):
+        ax.spines[spine_name].set_visible(False)
+    ax.set_title(title or f"Top {len(df)} downstream genes shifted by {result.get('perturb_type', 'perturbation')} of {gene}", fontsize=11)
     return fig, ax
 
 

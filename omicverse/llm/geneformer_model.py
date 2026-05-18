@@ -1391,7 +1391,7 @@ class GeneformerModel(SCLLMBase):
                 raise RuntimeError(f"Tokenized dataset not produced at {ds_path}")
             base_dataset = load_from_disk(ds_path)
 
-        # 4) load Geneformer + helpers; one forward pass for baseline -------------
+        # 4) load Geneformer + helpers ---------------------------------------------
         from .geneformer import perturber_utils as pu
         from .geneformer.emb_extractor import get_embs
 
@@ -1403,11 +1403,13 @@ class GeneformerModel(SCLLMBase):
         layer_to_quant = pu.quant_layers(model) + (-1)
         pad_token_id = gene_token_dict.get("<pad>", 0)
 
-        def _embed(dataset):
+        compute_gene_shifts: bool = bool(kwargs.get("compute_gene_shifts", True))
+
+        def _embed(dataset, *, mode: str):
             embs = get_embs(
                 model=model,
                 filtered_input_data=dataset,
-                emb_mode="cell",
+                emb_mode=mode,
                 layer_to_quant=layer_to_quant,
                 pad_token_id=pad_token_id,
                 forward_batch_size=forward_batch_size,
@@ -1417,8 +1419,57 @@ class GeneformerModel(SCLLMBase):
             arr = embs.cpu().numpy() if hasattr(embs, "cpu") else np.asarray(embs)
             return arr
 
+        def _cell_from_gene_embs(gene_embs: np.ndarray, lengths: np.ndarray) -> np.ndarray:
+            """Mean-pool per-token gene embeddings into per-cell embeddings, masking pads."""
+            n_cells, max_len, d = gene_embs.shape
+            # mask: (n_cells, max_len) — 1 for real tokens, 0 for padding
+            ar = np.arange(max_len)[None, :]
+            mask = (ar < lengths[:, None]).astype(gene_embs.dtype)
+            summed = (gene_embs * mask[..., None]).sum(axis=1)
+            denom = mask.sum(axis=1, keepdims=True)
+            return summed / np.maximum(denom, 1)
+
         SCLLMOutput.status(f"Baseline forward pass...", "info", indent=1)
-        original_embeddings = _embed(base_dataset)
+        if compute_gene_shifts:
+            orig_gene_embs = _embed(base_dataset, mode="gene")  # (n_cells, max_len, d)
+            orig_lengths = np.asarray([len(r) for r in base_dataset["input_ids"]])
+            original_embeddings = _cell_from_gene_embs(orig_gene_embs, orig_lengths)
+            orig_input_ids = list(base_dataset["input_ids"])
+        else:
+            original_embeddings = _embed(base_dataset, mode="cell")
+            orig_gene_embs = None
+            orig_lengths = None
+            orig_input_ids = None
+
+        # ENSG → symbol lookup. `gene_mapping_file` is `symbol → ENSG` (many
+        # symbols can alias to the same ENSG) — for human-readable downstream-
+        # gene labels we use the input `adata.var`'s annotations, which the
+        # user controls. Two layouts handled: (a) gene_name + ensembl_id
+        # columns side by side, (b) gene symbols as var_names + ENSG in a
+        # gene_id column.
+        ens_to_sym: Dict[str, str] = {}
+        if isinstance(adata.var, pd.DataFrame):
+            ens_col = next(
+                (c for c in ("ensembl_id", "ensg", "gene_id", "ensembl") if c in adata.var.columns),
+                None,
+            )
+            sym_col = next(
+                (c for c in ("gene_name", "gene_names", "symbol", "feature_name") if c in adata.var.columns),
+                None,
+            )
+            if ens_col is not None and sym_col is not None:
+                ens_to_sym.update(
+                    dict(zip(adata.var[ens_col].astype(str), adata.var[sym_col].astype(str)))
+                )
+            elif ens_col is not None:
+                # var_names are likely the symbols.
+                ens_to_sym.update(
+                    dict(zip(adata.var[ens_col].astype(str), adata.var_names.astype(str)))
+                )
+        # Fall back: invert sym_to_ens (first symbol wins).
+        for sym, ens in sym_to_ens.items():
+            ens_to_sym.setdefault(str(ens), str(sym))
+        token_to_ens = {tok: ens for ens, tok in gene_token_dict.items()}
 
         # 5) per-gene perturbed pass ---------------------------------------------
         def _delete_token(row, tok):
@@ -1437,6 +1488,7 @@ class GeneformerModel(SCLLMBase):
 
         perturbed_embeddings: Dict[str, np.ndarray] = {}
         cos_sims: Dict[str, np.ndarray] = {}
+        gene_shifts_per_target: Dict[str, pd.DataFrame] = {}
         stats_rows = []
         for label, ens, token in resolved:
             SCLLMOutput.status(f"Perturbing {label} ({ens}, token {token})", "info", indent=1)
@@ -1447,18 +1499,83 @@ class GeneformerModel(SCLLMBase):
                 [token in set(r) for r in base_dataset["input_ids"]],
                 dtype=bool,
             )
-            pert_emb = _embed(perturbed_ds)
+
+            if compute_gene_shifts:
+                pert_gene_embs = _embed(perturbed_ds, mode="gene")
+                pert_lengths = np.asarray([len(r) for r in perturbed_ds["input_ids"]])
+                pert_input_ids = list(perturbed_ds["input_ids"])
+                pert_emb = _cell_from_gene_embs(pert_gene_embs, pert_lengths)
+            else:
+                pert_emb = _embed(perturbed_ds, mode="cell")
+
             perturbed_embeddings[label] = pert_emb
-            # cosine sim per cell
+            # cell-level cosine sim per cell
             a = original_embeddings
             b = pert_emb
             denom = np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1) + 1e-12
             cs = np.sum(a * b, axis=1) / denom
-            # Cells where the gene was absent should show ~1.0 cos sim (no-op); set them
-            # to nan so the user can summarise over only the truly-perturbed cells.
             cs = np.where(has_gene, cs, np.nan)
             cos_sims[label] = cs.astype(np.float32)
             valid = cs[~np.isnan(cs)]
+
+            # ---------- per-gene downstream-shift table ----------
+            if compute_gene_shifts:
+                # For each cell with the gene present, look up each non-target
+                # token's position in both original and perturbed sequences,
+                # and compute 1 - cos(orig_emb, pert_emb).
+                #
+                # Aggregate across cells → mean shift per downstream gene.
+                tok_shift_sum: Dict[int, float] = {}
+                tok_shift_count: Dict[int, int] = {}
+                for ci in np.where(has_gene)[0]:
+                    orig_ids = orig_input_ids[ci]
+                    pert_ids = pert_input_ids[ci]
+                    pert_pos = {t: j for j, t in enumerate(pert_ids)}
+                    for j, t in enumerate(orig_ids):
+                        if t == token or t == pad_token_id:
+                            continue
+                        jp = pert_pos.get(t)
+                        if jp is None:
+                            continue
+                        e_orig = orig_gene_embs[ci, j]
+                        e_pert = pert_gene_embs[ci, jp]
+                        n1 = np.linalg.norm(e_orig) + 1e-12
+                        n2 = np.linalg.norm(e_pert) + 1e-12
+                        cs_g = float(np.dot(e_orig, e_pert) / (n1 * n2))
+                        tok_shift_sum[t] = tok_shift_sum.get(t, 0.0) + (1.0 - cs_g)
+                        tok_shift_count[t] = tok_shift_count.get(t, 0) + 1
+                # Threshold the minimum number of cells per downstream gene at
+                # 2 (lower => more noise; the plot helpers filter further by
+                # min_cells parameter).
+                min_n = 2
+                rows = []
+                for t, ssum in tok_shift_sum.items():
+                    n = tok_shift_count[t]
+                    if n < min_n:
+                        continue
+                    ens_t = token_to_ens.get(t, str(t))
+                    sym_t = ens_to_sym.get(ens_t, ens_t)
+                    rows.append({
+                        "gene": sym_t,
+                        "ensembl_id": ens_t,
+                        "token_id": int(t),
+                        "n_cells": int(n),
+                        "mean_shift": ssum / n,  # = 1 - mean(cos sim)
+                    })
+                if rows:
+                    gene_shifts_df = (
+                        pd.DataFrame(rows)
+                        .sort_values("mean_shift", ascending=False)
+                        .reset_index(drop=True)
+                    )
+                else:
+                    gene_shifts_df = pd.DataFrame(
+                        columns=["gene", "ensembl_id", "token_id", "n_cells", "mean_shift"]
+                    )
+                gene_shifts_per_target[label] = gene_shifts_df
+                # Free the per-target gene-embedding tensor.
+                del pert_gene_embs
+
             stats_rows.append({
                 "gene": label,
                 "ensembl_id": ens,
@@ -1468,6 +1585,7 @@ class GeneformerModel(SCLLMBase):
                 "cosine_mean": float(np.nan if valid.size == 0 else valid.mean()),
                 "cosine_std": float(np.nan if valid.size == 0 else valid.std()),
                 "cosine_min": float(np.nan if valid.size == 0 else valid.min()),
+                "n_downstream_genes_scored": int(len(gene_shifts_per_target.get(label, pd.DataFrame()))),
             })
 
         # 6) build return ---------------------------------------------------------
@@ -1479,10 +1597,11 @@ class GeneformerModel(SCLLMBase):
             index=adata.obs_names[cell_idx],
         )
         stats_df = pd.DataFrame(stats_rows).set_index("gene")
-        SCLLMOutput.status(f"Perturbation complete — see stats_df / cosine_similarities", "info", indent=1)
+        SCLLMOutput.status(f"Perturbation complete — see stats / cosine_similarities / gene_shifts", "info", indent=1)
         return {
             "cosine_similarities": cos_df,
             "stats": stats_df,
+            "gene_shifts": gene_shifts_per_target,
             "original_embeddings": original_embeddings,
             "perturbed_embeddings": perturbed_embeddings,
             "perturb_type": perturb_type,

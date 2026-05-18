@@ -155,7 +155,7 @@ from ._flowsig import (
 )
 from ._embedding import embedding_atlas
 from ._cnv import cnv_heatmap, cnv_summary, cnv_umap
-from ._perturbation import perturbation_shift_violin, perturbation_embedding_shift
+from ._perturbation import perturbation_shift_violin, perturbation_embedding_shift, perturbation_top_downstream_genes
 from ._density import add_density_contour, calculate_gene_density
 from ._plot1cell import plot1cell
 from ._cpdbviz import CellChatViz
@@ -401,4 +401,5 @@ __all__ = [
     # @ _perturbation
     "perturbation_shift_violin",
     "perturbation_embedding_shift",
+    "perturbation_top_downstream_genes",
 ]
