@@ -381,35 +381,24 @@ def _func_ora_torch(
     d_c = d + ha_corr
     es = torch.log((a_c * d_c) / (b_c * c_c))                       # (nobs, nsrc)
 
-    # Move to CPU once for scipy hypergeom (cephes is faster than a
-    # torch impl at these sizes — same lesson as ulm's t.sf).
-    a_np = a.cpu().numpy().astype(np.int64)
-    b_np = b.cpu().numpy().astype(np.int64)
-    c_np = c.cpu().numpy().astype(np.int64)
-    d_np = d.cpu().numpy().astype(np.int64)
-    # P(X >= a) under hypergeometric: total = a+b+c+d, "good" = a+b,
-    # drawn = a+c. scipy's sf is P(X > k); use sf(a-1) for >=.
-    M_total = a_np + b_np + c_np + d_np
-    K_good = a_np + b_np
-    n_drawn = a_np + c_np
-    pv = _sts.hypergeom.sf(a_np - 1, M_total, K_good, n_drawn)
+    # Hypergeometric survival on GPU via lgamma-based PMF sum
+    # (``hypergeom_sf_torch``). Replaces ``scipy.stats.hypergeom.sf``
+    # which loops per element in C and was ~700× slower than the
+    # batched torch path at the (nobs, nsrc) shapes ora produces.
+    from omicverse.es._engine import hypergeom_sf_torch
+    pv_t = hypergeom_sf_torch(
+        a.to(torch.long), b.to(torch.long),
+        c.to(torch.long), d.to(torch.long),
+    )
 
-    return es.cpu().numpy(), pv
+    return es.cpu().numpy(), pv_t.cpu().numpy()
 
 
 _ora = MethodMeta(
     name="ora",
     desc="Over Representation Analysis (ORA)",
     func=_func_ora,
-    # NOTE: ``_func_ora_torch`` exists above but is NOT wired in by default.
-    # The score computation (matmul-based contingency table) is faster on
-    # GPU, but the p-value step needs ``scipy.stats.hypergeom.sf`` over
-    # ~nobs×nsrc independent tests — scipy's vectorised but per-element
-    # log-gamma evaluation is slower than decoupler's numba ``_test1t``
-    # at typical biological workloads. Net effect: GPU ora was ~2-3×
-    # slower than the numba CPU kernel on PBMC3k (2562×5000, 50 sigs).
-    # The helper stays in the file as a reference for a future fully-GPU
-    # Fisher-exact implementation.
+    func_torch=_func_ora_torch,
     stype="categorical",
     adj=False,
     weight=False,
@@ -417,4 +406,5 @@ _ora = MethodMeta(
     limits=(-np.inf, +np.inf),
     reference="https://doi.org/10.2307/2340521",
 )
+_func_ora_torch._accepts_sparse = True
 ora = Method(_method=_ora)
