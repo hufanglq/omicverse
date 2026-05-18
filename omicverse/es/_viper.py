@@ -327,10 +327,180 @@ def _func_viper(
     return nes, pvals
 
 
+def _aREA_torch(Mat, Net, Wts=None):
+    r"""Analytical Rank-based Enrichment Analysis on torch tensors.
+
+    Vectorised across all observations. Mirrors :func:`_aREA`:
+
+    1. Per-observation rank → quantile :math:`q = r / (G+1)`.
+    2. :math:`t_1 = |q - 0.5| \cdot 2 + (1 - \max t_1)/2`.
+    3. ``norm.ppf`` on :math:`t_1` and :math:`q` via ``erfinv``.
+    4. Two matmuls (sign + magnitude paths) + ``S_1 / S_2`` combine.
+    5. Multiply by per-regulon ``nes`` factor.
+
+    The CPU kernel guards a per-column ``msk`` (drop features with no
+    network membership) before the matmul. We keep the full feature
+    matrix on GPU and zero out the masked columns of ``Net`` / ``Wts``
+    — same matmul result, no fancy index slicing.
+    """
+    import torch
+    device = Mat.device
+    dtype = Mat.dtype
+    nobs, nvar = Mat.shape
+    _, nsrc = Net.shape
+
+    if Wts is None:
+        Wts = (Net != 0).to(dtype)
+
+    # Normalise weights per regulon (column).
+    wts_max = Wts.abs().amax(dim=0, keepdim=True).clamp(min=1e-30)
+    Wts = Wts / wts_max
+    nes_factor = torch.sqrt((Wts * Wts).sum(dim=0))                    # (nsrc,)
+    wts_sum = Wts.sum(dim=0, keepdim=True).clamp(min=1e-30)
+    Wts = Wts / wts_sum
+
+    # Rank per row (cell), average ties → quantile q in (0, 1).
+    # torch has no built-in average-rank, but `argsort(stable)` + average
+    # over tied groups is straightforward. For sparse expression the
+    # number of distinct values is small; this matches sts.rankdata(method='average').
+    rank = _avg_rank_per_row(Mat)
+    q = rank / (nvar + 1.0)
+    t1 = (q - 0.5).abs() * 2.0
+    t1 = t1 + (1.0 - t1.amax()) / 2.0
+
+    # Mask features absent from network.
+    msk = (Net != 0).any(dim=1)                                        # (nvar,)
+    if not msk.all():
+        keep = msk.to(dtype).unsqueeze(0)                              # (1, nvar)
+        Net = Net * keep.t()
+        Wts = Wts * keep.t()
+        # t1/q masked features contribute 0 after the matmul because the
+        # corresponding rows of Net/Wts are zero — no need to slice.
+
+    # ppf via erfinv: Φ⁻¹(p) = √2 · erfinv(2p − 1).
+    t1_z = _norm_ppf_torch(t1.clamp(min=1e-12, max=1.0 - 1e-12))
+    q_z = _norm_ppf_torch(q.clamp(min=1e-12, max=1.0 - 1e-12))
+
+    # Matmuls: shapes (nobs, nvar) @ (nvar, nsrc) → (nobs, nsrc).
+    weighted_net = Wts * Net                                            # (nvar, nsrc)
+    mag = (1.0 - Net.abs()) * Wts                                       # (nvar, nsrc)
+    sum1 = q_z @ weighted_net
+    sum2 = t1_z @ mag
+
+    tmp = (sum1.abs() + sum2 * (sum2 > 0)) * torch.sign(sum1)
+    nes = tmp * nes_factor.unsqueeze(0)
+    return nes
+
+
+def _avg_rank_per_row(X):
+    """Per-row average-rank, matching ``scipy.stats.rankdata(method='average', axis=1)``.
+
+    Stable argsort gives the assigned position of each entry; for runs
+    of tied values the average of their positions becomes their rank.
+    Implemented with a cumulative-position trick: sort positions per
+    row, identify tie groups, replace each tied element's rank with the
+    mean rank within its group.
+    """
+    import torch
+    nobs, nvar = X.shape
+    device = X.device
+    order = torch.argsort(X, dim=1, stable=True)                       # (nobs, nvar)
+    pos = torch.arange(1, nvar + 1, device=device, dtype=X.dtype).unsqueeze(0).expand(nobs, -1)
+    rank = torch.empty_like(X)
+    rank.scatter_(1, order, pos)                                        # (nobs, nvar)
+
+    sorted_X = torch.gather(X, 1, order)                                # (nobs, nvar)
+    # Tied groups: identify run boundaries
+    boundary = torch.ones_like(sorted_X, dtype=torch.bool)
+    boundary[:, 1:] = sorted_X[:, 1:] != sorted_X[:, :-1]
+    group_id = boundary.to(torch.long).cumsum(dim=1) - 1                # (nobs, nvar)
+
+    # Average rank within group: sum(rank in group) / count(group)
+    n_groups_max = nvar
+    sum_rank = torch.zeros(nobs, n_groups_max, device=device, dtype=X.dtype)
+    count = torch.zeros(nobs, n_groups_max, device=device, dtype=X.dtype)
+    sum_rank.scatter_add_(1, group_id, pos)
+    count.scatter_add_(1, group_id, torch.ones_like(pos))
+    avg_rank_per_group = sum_rank / count.clamp(min=1)
+
+    # Gather per-element average rank, then scatter to original positions
+    sorted_avg = torch.gather(avg_rank_per_group, 1, group_id)          # (nobs, nvar) — sorted order
+    out = torch.empty_like(X)
+    out.scatter_(1, order, sorted_avg)
+    return out
+
+
+def _norm_ppf_torch(p):
+    """Φ⁻¹(p) = √2 · erfinv(2p − 1)."""
+    import torch
+    return torch.special.erfinv(2.0 * p - 1.0) * (2.0 ** 0.5)
+
+
+def _func_viper_torch(
+    mat,
+    adj,
+    pleiotropy: bool = True,
+    reg_sign: float = 0.05,
+    n_targets: int = 10,
+    penalty: int | float = 20,
+    verbose: bool = False,
+):
+    r"""GPU port of :func:`_func_viper`.
+
+    Initial ``_aREA`` (the dominant matmul + rank + norm-ppf stage)
+    runs on torch via :func:`_aREA_torch`. When ``pleiotropy=True``,
+    the per-cell shadow-regulon refinement falls back to the numba CPU
+    path — that loop has cell-dependent sub-network shapes and isn't a
+    good GPU target, but the post-stage runs against the GPU-computed
+    ``nes`` so we still pay the matmul on the GPU.
+
+    Final ``pvals`` use ``erfc`` (``2 * Φ̄(|nes|)``) so the survival
+    function never round-trips through scipy.
+    """
+    import torch
+    import scipy.stats as _sts
+    from omicverse.es._engine import torch_device, to_gpu_dense
+
+    device = torch_device()
+    Mat = to_gpu_dense(mat, device, dtype=torch.float32)
+    Adj = torch.as_tensor(np.asarray(adj), dtype=torch.float32, device=device)
+
+    nes_t = _aREA_torch(Mat, Adj)                                       # (nobs, nsrc) fp32
+    nes = nes_t.cpu().numpy().astype(np.float64)
+
+    if pleiotropy:
+        # Refine on CPU. The per-cell pleiotropy loop produces variable-
+        # size sub-networks; vectorising it would be a separate project.
+        # The CPU path here is fast (~1 s on PBMC3k) because it skips
+        # cells with <2 significant regulators.
+        adj_np = np.asarray(adj)
+        mat_np = mat.toarray() if hasattr(mat, 'toarray') else np.asarray(mat)
+        rsg = _sts.norm.ppf(1.0 - (reg_sign / 2.0))
+        for i in range(nes.shape[0]):
+            ss_i = mat_np[i]
+            nes_i = nes[i]
+            shadow = _shadow_regulon(
+                nes_i, ss_i, adj_np,
+                reg_sign=rsg, n_targets=n_targets, penalty=penalty,
+            )
+            if shadow is None:
+                continue
+            sub_net, wts, idxs = shadow
+            tmp = _aREA(ss_i.reshape(1, -1), sub_net, wts=wts)[0]
+            nes[i, idxs] = tmp
+
+    # p-values via torch erfc — 2 * Φ̄(|nes|) = erfc(|nes| / √2).
+    nes_t_final = torch.as_tensor(nes, device=device)
+    pvals_t = torch.special.erfc(nes_t_final.abs() / (2.0 ** 0.5))
+    pvals = pvals_t.cpu().numpy()
+    return nes, pvals
+
+
 _viper = MethodMeta(
     name="viper",
     desc="Virtual Inference of Protein-activity by Enriched Regulon analysis (VIPER)",
     func=_func_viper,
+    func_torch=_func_viper_torch,
     stype="numerical",
     adj=True,
     weight=True,
@@ -338,4 +508,5 @@ _viper = MethodMeta(
     limits=(-np.inf, +np.inf),
     reference="https://doi.org/10.1038/ng.3593",
 )
+_func_viper_torch._accepts_sparse = True
 viper = Method(_method=_viper)
