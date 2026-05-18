@@ -609,6 +609,12 @@ def embedding(
             cax1 = _inset_axes(
                 ax, width="2%", height="30%", loc='lower right', borderpad=0,
             )
+            # Register the inset so _flow_layout_panels measures its
+            # tightbbox in Pass 1 — ax.get_tightbbox excludes children, so
+            # without this the colorbar's tick labels (which stick out to
+            # the right of the inset bar) would still overlap the next
+            # panel's X_umap label.
+            panel_colorbars[id(ax)] = cax1
             cb = pl.colorbar(cax, cax=cax1, orientation="vertical")
             cb.locator = MaxNLocator(nbins=3, integer=False)
             cb.update_ticks()
