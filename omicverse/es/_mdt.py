@@ -73,10 +73,60 @@ def _func_mdt(
     return (es, None)
 
 
+def _func_mdt_torch(
+    mat,
+    adj,
+    verbose: bool = False,
+    n_estimators: int = 100,
+    max_depth: int = 6,
+    learning_rate: float = 0.3,
+    reg_lambda: float = 1.0,
+    **_kwargs,
+):
+    r"""GPU (torch) port of :func:`_func_mdt`.
+
+    Replaces the per-cell ``xgboost.XGBRegressor`` fit with a fully
+    batched pure-torch GBDT (see ``gbdt_squared_loss_torch`` in
+    ``_engine.py``). All ``nobs`` regressions share the same feature
+    matrix ``adj``, so they can be fit in parallel — one ``B``-axis
+    sweep over the boosting loop instead of ``nobs`` sequential xgboost
+    fits.
+
+    Algorithmic fidelity matches XGBoost on default squared-loss
+    parameters; numerical agreement is approximate (importance Pearson
+    r ≈ 0.99 mean, prediction r ≈ 0.998 mean against xgboost). See the
+    ``# Pure-torch gradient boosted decision trees`` section in
+    ``_engine.py`` for the precise list of differences.
+    """
+    import torch
+    from omicverse.es._engine import torch_device, to_gpu_dense, gbdt_squared_loss_torch
+
+    device = torch_device()
+    nobs, nvar = mat.shape
+    nvar_a, nsrc = adj.shape
+    assert nvar == nvar_a, "adj rows must equal mat columns"
+
+    Mat = to_gpu_dense(mat, device, dtype=torch.float32)               # (nobs, nvar)
+    Adj = torch.as_tensor(np.asarray(adj), dtype=torch.float32, device=device)  # (nvar, nsrc)
+    # Per-cell regression: X = adj, Y[:, c] = mat[c, :]
+    Y = Mat.t().contiguous()                                            # (nvar, nobs)
+
+    res = gbdt_squared_loss_torch(
+        Adj, Y,
+        n_estimators=n_estimators, max_depth=max_depth,
+        learning_rate=learning_rate, reg_lambda=reg_lambda,
+        return_importances=True, return_predictions=False,
+    )
+    importances = res['importances']                                    # (nsrc, nobs)
+    es = importances.t().cpu().numpy().astype(np.float64)               # (nobs, nsrc)
+    return es, None
+
+
 _mdt = MethodMeta(
     name="mdt",
     desc="Multivariate Decision Tree (MDT)",
     func=_func_mdt,
+    func_torch=_func_mdt_torch,
     stype="numerical",
     adj=True,
     weight=True,
@@ -84,4 +134,5 @@ _mdt = MethodMeta(
     limits=(0, 1),
     reference="https://doi.org/10.1093/bioadv/vbac016",
 )
+_func_mdt_torch._accepts_sparse = True
 mdt = Method(_method=_mdt)

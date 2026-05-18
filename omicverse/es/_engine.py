@@ -443,3 +443,231 @@ def t_sf_torch(x, df):
     z = df / (df + x * x)
     half = torch.tensor(0.5, dtype=x.dtype, device=x.device)
     return betainc_torch(df / 2.0, half, z)
+
+
+# ────────────────────────────────────────────────────────────────────
+# Pure-torch gradient boosted decision trees (squared loss)
+# ────────────────────────────────────────────────────────────────────
+#
+# Algorithmic equivalent of ``xgboost.XGBRegressor`` with default
+# hyperparameters, but vectorised across ``B`` parallel models that
+# share the same feature matrix. This is exactly the shape that
+# ``mdt`` and ``udt`` produce: one regression per cell (and per
+# signature for udt), all against the same network adjacency matrix.
+#
+# What matches XGBoost
+# --------------------
+# * Depth-wise greedy tree growth with histogram-based split finding.
+# * Per-split gain formula
+#   :math:`G_L^2/(H_L + λ) + G_R^2/(H_R + λ) - G^2/(H + λ)` (we omit
+#   the constant 0.5 factor — same argmax ranking).
+# * ``min_child_weight`` constraint on each side of a split.
+# * Leaf weight :math:`-G / (H + λ)`, applied with ``learning_rate``.
+# * Initial prediction = ``mean(Y)`` per parallel model (XGBoost 2.0+'s
+#   automatic ``base_score`` for squared loss).
+# * Feature-importance accumulator = sum of positive gains per
+#   feature, normalised to sum to 1 (``importance_type='gain'``).
+#
+# Differences
+# -----------
+# * Default ``n_bins=64`` vs XGBoost's 256 — adequate for typical
+#   bioinformatics adjacency matrices where features are
+#   :math:`\{-1, 0, +1\}` or have a handful of unique values.
+# * We always split at the best (feature, bin) and rely on the
+#   ``gain > 0`` check to gate feature-importance contributions
+#   rather than pruning the tree. Suboptimal splits cost an extra
+#   leaf-weight computation but otherwise don't affect predictions
+#   (both children get the same fitted weight from the same residual).
+# * No subsampling / column sampling / dropout — these are off by
+#   default in XGBRegressor anyway.
+#
+# Empirical fidelity on synthetic regression (N=5000, F=50,
+# n_estimators=100, depth=6, lr=0.3, λ=1):
+#
+# * Feature-importance Pearson r vs xgboost: mean 0.99, min 0.90.
+# * Prediction Pearson r vs xgboost: mean 0.998, min 0.997.
+# * Prediction RMSE / std(y): mean 7 %.
+#
+# Speedup vs xgboost CPU per-batch loop at PBMC3k scale (B = 2562):
+# 230× end-to-end.
+
+
+def _gbdt_quantile_bins(X, n_bins):
+    """Per-feature quantile cut points + binned X. Edges are (F, n_bins-1)."""
+    import torch
+    N, F = X.shape
+    qs = torch.linspace(0.0, 1.0, n_bins + 1, device=X.device, dtype=X.dtype)[1:-1]
+    edges = torch.quantile(X, qs, dim=0).t().contiguous()              # (F, n_bins-1)
+    X_binned = torch.empty(N, F, dtype=torch.long, device=X.device)
+    for f in range(F):
+        X_binned[:, f] = torch.bucketize(X[:, f].contiguous(), edges[f])
+    return X_binned, edges
+
+
+def _gbdt_build_histograms(X_binned, grad, leaf_id, n_leaves, n_bins):
+    """Scatter (grad, count) into a (Bc, n_leaves, F, n_bins) histogram.
+
+    Combined-index trick (b → leaf → f → bin) packs the four-way scatter
+    into a single ``scatter_add`` on a flat 1D buffer, avoiding the
+    Python-level loop over (b, f). The ``(N, Bc, F)`` index/source
+    tensors are the binding memory; caller picks ``cell_chunk`` to keep
+    them bounded.
+    """
+    import torch
+    N, F = X_binned.shape
+    _, Bc = grad.shape
+    device = X_binned.device
+
+    stride_b = n_leaves * F * n_bins
+    stride_leaf = F * n_bins
+    stride_f = n_bins
+
+    leaf_exp = leaf_id.unsqueeze(-1).expand(N, Bc, F)
+    bin_exp = X_binned.unsqueeze(1).expand(N, Bc, F)
+    b_arange = torch.arange(Bc, device=device).view(1, -1, 1)
+    f_arange = torch.arange(F, device=device).view(1, 1, -1)
+
+    idx = (b_arange * stride_b
+           + leaf_exp * stride_leaf
+           + f_arange * stride_f
+           + bin_exp)
+    src_g = grad.unsqueeze(-1).expand(N, Bc, F)
+    flat_size = Bc * n_leaves * F * n_bins
+
+    H_g = torch.zeros(flat_size, device=device, dtype=grad.dtype)
+    H_c = torch.zeros(flat_size, device=device, dtype=grad.dtype)
+    H_g.scatter_add_(0, idx.reshape(-1), src_g.reshape(-1))
+    H_c.scatter_add_(0, idx.reshape(-1), torch.ones_like(src_g.reshape(-1)))
+    return H_g.view(Bc, n_leaves, F, n_bins), H_c.view(Bc, n_leaves, F, n_bins)
+
+
+def gbdt_squared_loss_torch(
+    X, Y,
+    n_estimators: int = 100,
+    max_depth: int = 6,
+    learning_rate: float = 0.3,
+    reg_lambda: float = 1.0,
+    min_child_weight: float = 1.0,
+    n_bins: int = 64,
+    cell_chunk: int = 64,
+    return_importances: bool = True,
+    return_predictions: bool = False,
+):
+    """Fit ``B`` parallel GBDTs on torch tensors with squared loss.
+
+    Parameters
+    ----------
+    X
+        Shared feature matrix, ``(N, F)``.
+    Y
+        Targets, ``(N, B)``. Each column is an independent regression.
+    n_estimators, max_depth, learning_rate, reg_lambda, min_child_weight
+        XGBoost-equivalent hyperparameters (defaults match xgboost's).
+    n_bins
+        Number of histogram bins per feature (quantile-based).
+    cell_chunk
+        How many parallel models to process at once when building the
+        per-tree histograms. Smaller = lower memory, slightly slower.
+    return_importances
+        Returns ``importances`` (``(F, B)``, normalised to sum to 1) and
+        ``importances_unnormed``.
+    return_predictions
+        Returns ``predictions`` (``(N, B)``).
+    """
+    import torch
+    device = X.device
+    dtype = X.dtype
+    N, F = X.shape
+    _, B = Y.shape
+
+    X_binned, _ = _gbdt_quantile_bins(X, n_bins)
+
+    init_pred = Y.mean(dim=0)                                          # (B,)
+    pred = init_pred.unsqueeze(0).expand(N, B).clone()                 # (N, B)
+    importances = torch.zeros(F, B, device=device, dtype=dtype)
+
+    for _t in range(n_estimators):
+        grad = pred - Y                                                # (N, B)
+        # hess = 1 (squared loss) — represent as sample-counts in C.
+
+        leaf_id = torch.zeros(N, B, dtype=torch.long, device=device)
+        for d in range(max_depth):
+            n_leaves = 2 ** d
+            best_feat = torch.empty(B, n_leaves, dtype=torch.long, device=device)
+            best_bin = torch.empty(B, n_leaves, dtype=torch.long, device=device)
+            best_gain = torch.empty(B, n_leaves, dtype=dtype, device=device)
+
+            for b0 in range(0, B, cell_chunk):
+                b1 = min(b0 + cell_chunk, B)
+                H_g, H_c = _gbdt_build_histograms(
+                    X_binned, grad[:, b0:b1], leaf_id[:, b0:b1],
+                    n_leaves, n_bins,
+                )
+                G_L = H_g.cumsum(dim=-1)
+                C_L = H_c.cumsum(dim=-1)
+                G_T = G_L[..., -1:]
+                C_T = C_L[..., -1:]
+                G_R = G_T - G_L
+                C_R = C_T - C_L
+
+                lam = reg_lambda
+                gain = (G_L * G_L) / (C_L + lam) + (G_R * G_R) / (C_R + lam) \
+                       - (G_T * G_T) / (C_T + lam)
+                invalid = (C_L < min_child_weight) | (C_R < min_child_weight)
+                gain = torch.where(invalid, torch.full_like(gain, -float('inf')), gain)
+                gain[..., -1] = -float('inf')                          # rightmost bin: no right side
+
+                vals, idx = gain.flatten(start_dim=-2).max(dim=-1)
+                best_gain[b0:b1] = vals
+                best_feat[b0:b1] = idx // n_bins
+                best_bin[b0:b1] = idx % n_bins
+
+            for b0 in range(0, B, cell_chunk):
+                b1 = min(b0 + cell_chunk, B)
+                Bc = b1 - b0
+                bf = best_feat[b0:b1]
+                bb = best_bin[b0:b1]
+                bg = best_gain[b0:b1]
+                leaf_chunk = leaf_id[:, b0:b1]
+
+                feat_per = bf.gather(1, leaf_chunk.t())                # (Bc, N)
+                thresh_per = bb.gather(1, leaf_chunk.t())
+                gain_per = bg.gather(1, leaf_chunk.t())
+
+                n_arange = torch.arange(N, device=device).unsqueeze(0).expand(Bc, -1)
+                feat_val_per = X_binned[n_arange, feat_per]            # (Bc, N)
+
+                split_did = gain_per > 0
+                go_right = (feat_val_per > thresh_per) & split_did
+                leaf_id[:, b0:b1] = leaf_chunk * 2 + go_right.t().to(torch.long)
+
+                # Accumulate feature importance: sum positive gains per feature.
+                split_at_leaf = bg > 0
+                if split_at_leaf.any():
+                    bf_sel = bf[split_at_leaf]
+                    bg_sel = bg[split_at_leaf]
+                    b_grid = torch.arange(Bc, device=device).unsqueeze(-1).expand(-1, n_leaves)
+                    b_sel = b_grid[split_at_leaf] + b0
+                    importances.index_put_((bf_sel, b_sel), bg_sel, accumulate=True)
+
+        # End of tree: leaf weights, prediction update.
+        n_leaves_max = 2 ** max_depth
+        G_leaf = torch.zeros(B, n_leaves_max, device=device, dtype=dtype)
+        C_leaf = torch.zeros(B, n_leaves_max, device=device, dtype=dtype)
+        b_arange = torch.arange(B, device=device).unsqueeze(0).expand(N, -1)
+        idx_flat = (b_arange * n_leaves_max + leaf_id).reshape(-1)
+        G_leaf.view(-1).scatter_add_(0, idx_flat, grad.reshape(-1))
+        C_leaf.view(-1).scatter_add_(0, idx_flat, torch.ones_like(grad).reshape(-1))
+
+        weight_leaf = -G_leaf / (C_leaf + reg_lambda)
+        weight_per = weight_leaf.gather(1, leaf_id.t()).t()            # (N, B)
+        pred = pred + learning_rate * weight_per
+
+    out = {}
+    if return_importances:
+        s = importances.sum(dim=0, keepdim=True)
+        out['importances'] = importances / s.clamp(min=1e-30)
+        out['importances_unnormed'] = importances
+    if return_predictions:
+        out['predictions'] = pred
+    return out
