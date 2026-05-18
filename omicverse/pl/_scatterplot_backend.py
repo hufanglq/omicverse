@@ -597,32 +597,21 @@ def embedding(
                 multi_panel=bool(grid),
             )
         elif colorbar_loc is not None:
-            # Unified inset colorbar: regardless of frameon, draw a slim
-            # colorbar via add_axes at a controlled width (% of panel
-            # width) so matplotlib's auto-fraction logic doesn't bloat
-            # the bar. ``frameon='small'`` keeps the original 5 % width
-            # for back-compat; default (``frameon=True``) gets the 2.5 %
-            # slim look that matches the typical scanpy embedding style.
+            # scvelo-style inset colorbar — `inset_axes` puts a 2 %-wide /
+            # 30 %-tall bar at the panel's lower-right corner inside the
+            # axes, so it never widens the panel footprint and the bar
+            # itself stays slim regardless of figure size. Inset children
+            # follow the parent ax automatically when set_position is
+            # called, so we don't need _flow_layout_panels to drag them.
             from matplotlib.ticker import MaxNLocator
+            from mpl_toolkits.axes_grid1.inset_locator import inset_axes as _inset_axes
 
-            pos = ax.get_position()
-            cb_height = pos.height * 0.3
-            cb_bottom = pos.y0
-            if frameon == 'small' or frameon is False:
-                cb_width = pos.width * 0.05
-                cb_pad = pos.width * 0.05
-            else:
-                cb_width = pos.width * 0.025
-                cb_pad = pos.width * 0.03
-
-            cax1 = ax.figure.add_axes([pos.x1 + cb_pad, cb_bottom, cb_width, cb_height])
-            panel_colorbars[id(ax)] = cax1
-
+            cax1 = _inset_axes(
+                ax, width="2%", height="30%", loc='lower right', borderpad=0,
+            )
             cb = pl.colorbar(cax, cax=cax1, orientation="vertical")
             cb.locator = MaxNLocator(nbins=3, integer=False)
             cb.update_ticks()
-            # Trim tick label font so the labels don't widen the colorbar block.
-            cb.ax.tick_params(labelsize=8)
 
     # Flow layout: re-position panels left-to-right (with wrap) so that
     # each panel + its external legend takes its actual footprint, never
