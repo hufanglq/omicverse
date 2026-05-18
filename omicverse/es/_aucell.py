@@ -127,24 +127,47 @@ def _func_aucell_torch(
     verbose: bool = False,
 ):
     r"""Torch (GPU) port of :func:`_func_aucell` — bit-for-bit
-    equivalent on fp64.
+    equivalent on fp64 via a fully batched recovery-curve formulation.
 
-    Vectorisation strategy
-    ----------------------
-    1. **Rank** all genes per cell once via ``argsort(stable=True) +
-       scatter``. Matches ``scipy.stats.rankdata(..., method='ordinal')``
-       because both break ties by appearance order in the array.
-    2. For each signature, gather the ranks of that signature's genes
-       across **all cells** at once → shape ``(nobs, k_j)``. Mask
-       ranks above ``n_up`` by clamping them to ``n_up`` so they
-       contribute zero to the AUC integral after sorting + diff.
-    3. The integral matches the CPU formula exactly:
-       ``AUC = sum(diff([sorted_ranks, n_up]) * y) / max_auc`` where
-       ``max_auc`` is the per-signature scalar identical to the numba
-       version.
+    Algorithmic redesign
+    --------------------
+    The original CPU kernel computes, per (cell, signature):
 
-    No p-values are produced (aucell is non-statistical), so ``pv``
-    returns ``None`` to match :func:`_func_aucell`.
+    .. math::
+        AUC = \sum_{t=1}^{k} (x_{t+1} - x_t) \cdot t
+
+    where :math:`x_1 \le x_2 \le \ldots \le x_k \le x_{k+1} = n\_up`
+    are the sorted ranks of the signature's genes that fall within
+    the top-:math:`n\_up`. Equivalently, this is the area under the
+    recovery curve :math:`R(r)` integrated on :math:`[x_1, n\_up]`.
+
+    Rewriting via the discrete recovery sum:
+
+    .. math::
+        AUC = \sum_{r=1}^{n\_up} R(r) \;-\; k_\text{valid}
+
+    where :math:`R(r)` is the number of signature genes with rank
+    :math:`\le r` and :math:`k_\text{valid}` is the signature's gene
+    count within the top-:math:`n\_up`. The correction
+    :math:`-k_\text{valid}` accounts for the half-open integration
+    boundary in the CPU formulation.
+
+    This rewrite **eliminates the per-signature sort + Python loop**.
+    We can compute every (cell, signature) AUC simultaneously by:
+
+    1. Pre-computing rank-order indices once: ``sort_idx[i, r]`` gives
+       which gene sits at rank ``r+1`` in cell ``i`` (top-N only).
+    2. Building a binary membership matrix ``M[gene, sig]``.
+    3. Gathering ``M[sort_idx]`` → ``(nobs, n_up, nsrc)`` tensor whose
+       ``cumsum`` along axis 1 *is* the recovery curve.
+    4. ``sum(cumsum) - sum(membership)`` gives the unnormalised AUC.
+
+    Memory model
+    ------------
+    The ``(nobs, n_up, nsrc)`` membership tensor is processed in cell
+    batches sized to fit roughly 1 GB of fp32 working memory, so the
+    routine scales to ~100k cells × thousands of signatures without
+    running the GPU out of memory.
     """
     import torch
     from omicverse.es._engine import torch_device
@@ -153,53 +176,69 @@ def _func_aucell_torch(
     nobs, nvar = mat.shape
     nsrc = starts.size
     n_up = _validate_n_up(nvar, n_up)
+    n_up_int = int(n_up)
 
-    # Densify if sparse, then move to GPU.
     if sps.issparse(mat):
         mat = mat.toarray()
     M = torch.as_tensor(np.asarray(mat), dtype=torch.float64, device=device)
 
-    # Per-cell rank, stable to match scipy 'ordinal'.
+    # Per-cell argsort, stable → matches scipy 'ordinal'. Then keep only
+    # the indices that land in the top `n_up`; that's all we need for
+    # the recovery curve.
     sort_idx = torch.argsort(-M, dim=1, stable=True)            # (nobs, nvar)
-    ranks = torch.empty_like(sort_idx, dtype=torch.long)
-    rank_vals = torch.arange(
-        1, nvar + 1, dtype=torch.long, device=device,
-    ).unsqueeze(0).expand(nobs, -1)
-    ranks.scatter_(1, sort_idx, rank_vals)
+    top_idx = sort_idx[:, :n_up_int].contiguous()               # (nobs, n_up)
 
-    es = torch.zeros(nobs, nsrc, dtype=torch.float64, device=device)
-    n_up_int = int(n_up)
-
+    # Build the dense (gene → signature) binary membership matrix once.
+    # Use float32 — the cumulative sums fit comfortably in fp32 because
+    # entries are 0/1 and counts cap at the signature's size; the final
+    # division to fp64 reinstates precision.
+    membership = torch.zeros(nvar, nsrc, dtype=torch.float32, device=device)
+    cnct_t = torch.as_tensor(cnct, dtype=torch.long, device=device)
+    sig_id_per_target = torch.empty(cnct.size, dtype=torch.long, device=device)
+    cursor = 0
     for j in range(nsrc):
-        # Numpy indices for the j-th feature set
-        fset_np = cnct[starts[j]:starts[j] + offsets[j]]
-        k = int(fset_np.shape[0])
-        # Per-signature scalar max_auc — identical to CPU code path.
+        sig_id_per_target[cursor:cursor + int(offsets[j])] = j
+        cursor += int(offsets[j])
+    membership[cnct_t, sig_id_per_target] = 1.0
+
+    # Per-signature scalar max_auc (CPU; identical to numba kernel).
+    sig_sizes = offsets.astype(np.int64)
+    max_aucs = np.zeros(nsrc, dtype=np.float64)
+    for j in range(nsrc):
+        k = int(sig_sizes[j])
         x_th = np.arange(1, k + 1)
         x_th = x_th[x_th < n_up_int]
-        max_auc = float(np.sum(np.diff(np.append(x_th, n_up_int)) * x_th))
-        if max_auc == 0:
-            continue
+        max_aucs[j] = float(np.sum(np.diff(np.append(x_th, n_up_int)) * x_th))
+    max_aucs_t = torch.as_tensor(max_aucs, dtype=torch.float64, device=device)
+    safe_max = torch.where(
+        max_aucs_t == 0,
+        torch.ones_like(max_aucs_t),  # avoid 0/0; we zero those columns at end
+        max_aucs_t,
+    )
 
-        fset = torch.as_tensor(fset_np, dtype=torch.long, device=device)
-        x = ranks[:, fset]                                       # (nobs, k)
-        # Saturate at n_up so values above the threshold contribute 0 to
-        # the integral once sorted (`diff` between consecutive n_up's = 0).
-        x = torch.where(
-            x <= n_up_int,
-            x,
-            torch.full_like(x, n_up_int, dtype=x.dtype),
-        )
-        x_sorted, _ = torch.sort(x, dim=1)                       # (nobs, k)
-        last = torch.full(
-            (nobs, 1), n_up_int, dtype=x_sorted.dtype, device=device,
-        )
-        x_full = torch.cat([x_sorted, last], dim=1)              # (nobs, k+1)
-        dx = torch.diff(x_full, dim=1).to(torch.float64)         # (nobs, k)
-        y_seq = torch.arange(
-            1, k + 1, dtype=torch.float64, device=device,
-        ).unsqueeze(0)                                           # (1, k)
-        es[:, j] = (dx * y_seq).sum(dim=1) / max_auc
+    # Cell-batch loop. Budget ~1 GB of fp32 → cells_per_batch.
+    # working tensor = (B, n_up, nsrc) * 4 bytes ≈ 4 * B * n_up * nsrc
+    bytes_budget = 1 << 30  # 1 GB
+    per_batch_bytes = max(1, 4 * n_up_int * nsrc)
+    cells_per_batch = max(1, min(nobs, bytes_budget // per_batch_bytes))
+
+    es = torch.zeros(nobs, nsrc, dtype=torch.float64, device=device)
+    for b0 in range(0, nobs, cells_per_batch):
+        b1 = min(b0 + cells_per_batch, nobs)
+        # M_top[i, r, j] = 1 if gene at rank r+1 in cell i is in signature j
+        m_top = membership[top_idx[b0:b1]]               # (B, n_up, nsrc) fp32
+        # Recovery curve cumsum + integral; k_valid = total membership.
+        cs = m_top.cumsum(dim=1)                         # (B, n_up, nsrc)
+        total = cs.sum(dim=1)                            # (B, nsrc)
+        k_valid = m_top.sum(dim=1)                       # (B, nsrc)
+        auc_unnorm = (total - k_valid).to(torch.float64)
+        es[b0:b1] = auc_unnorm / safe_max
+
+    # Columns where max_auc was 0 (signatures empty after pruning to n_up)
+    # were rescued by `safe_max`; restore them as 0 to match CPU.
+    zero_cols = (max_aucs_t == 0).nonzero(as_tuple=False).squeeze(-1)
+    if zero_cols.numel() > 0:
+        es[:, zero_cols] = 0.0
 
     return es.cpu().numpy(), None
 
