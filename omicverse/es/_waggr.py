@@ -273,7 +273,13 @@ def _func_waggr_torch(
     """
     if not isinstance(fun, str) or fun not in ("wsum", "wmean") or int(times) > 1:
         # Custom ``fun`` callables and permutation-based p-values stay
-        # on the CPU path until a torch equivalent is written.
+        # on the CPU path until a torch equivalent is written. Densify
+        # here because the dispatcher passes sparse straight through
+        # (we advertise ``_accepts_sparse = True`` for the fast path)
+        # and the numba CPU kernel only takes dense arrays.
+        import scipy.sparse as _sps
+        if _sps.issparse(mat):
+            mat = mat.toarray()
         return _func_waggr(mat, adj, fun=fun, times=times, seed=seed, verbose=verbose)
 
     import torch
