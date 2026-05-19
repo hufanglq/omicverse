@@ -17,7 +17,7 @@ Compatibility shortcuts:
 """
 
 from . import bulk, general, single, spatial
-from .general import load, read_csv, save
+from .general import load, read_csv, read_table, save
 from .single import read, read_10x_h5, read_10x_mtx, read_h5ad
 from .spatial import read_nanostring, read_visium_hd, read_visium_hd_bin, read_visium_hd_seg, read_xenium
 
@@ -37,6 +37,7 @@ __all__ = [
     "read_nanostring",
     "read_xenium",
     "read_csv",
+    "read_table",
     "save",
     "load",
 ]
