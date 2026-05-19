@@ -113,6 +113,12 @@ from ._venn import venny4py
 from ._lsi import Array, lsi, tfidf
 from ._neighboors import neighbors,calc_kBET,calc_kSIM
 from ._gene_id_conversion import _infer_species_and_release, convert2gene_symbol, convert2symbol, id2symbol, convert2gene_id, symbol2id
+from ._sample_metadata_alignment import (
+    PreflightResult,
+    preflight_alignment,
+    align_to_common,
+    align_samples,
+)
 from ._metabolights import load_metabolights
 from ._ovagent_lookup import (
     RegistryScanner,
