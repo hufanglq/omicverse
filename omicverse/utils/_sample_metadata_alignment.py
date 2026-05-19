@@ -76,6 +76,8 @@ from typing import Any
 
 import pandas as pd
 
+from .registry import register_function
+
 try:  # optional, only needed for h5ad / AnnData inputs
     import anndata as _ad
 except Exception:  # pragma: no cover
@@ -328,6 +330,46 @@ def _pick_sample_col(
 # ---------------------------------------------------------------------------
 
 
+@register_function(
+    aliases=[
+        "preflight_alignment", "sample_metadata_alignment", "sample_alignment",
+        "alignment_preflight", "preflight", "sample axis check",
+        "样本对齐预检", "样本-元数据对齐", "样本对齐", "对齐预检", "联表预检",
+        "metadata join check", "sample sheet alignment",
+    ],
+    category="utils",
+    description=(
+        "Diagnose sample-axis alignment between a sample × feature matrix "
+        "and its metadata table. Counts duplicate-on-each-side and missing-"
+        "on-each-side in a single ~O(n) pass. Robust against pandas's "
+        "silent auto-rename of duplicate column labels (`id154` → "
+        "`id154.1`), which is the canonical false-negative source. Returns "
+        "a `PreflightResult` whose `is_clean` / `needs_alignment` booleans "
+        "drive the IF-branch into `align_to_common`. Run this BEFORE any "
+        "joint PCA / DEG / clustering / batch-correction / survival."
+    ),
+    examples=[
+        "# Diagnose alignment before downstream analysis",
+        "result = ov.utils.preflight_alignment('counts.csv', 'meta.csv')",
+        "print(result)  # PreflightResult(needs alignment; dup_matrix=4, ...)",
+        "if result.needs_alignment:",
+        "    matrix, meta = ov.utils.align_to_common('counts.csv', 'meta.csv', result)",
+        "",
+        "# AnnData input — sample axis auto-detected from .obs_names",
+        "r = ov.utils.preflight_alignment(adata, 'phenotype.csv')",
+        "",
+        "# Override auto-detect when ambiguous",
+        "r = ov.utils.preflight_alignment(",
+        "    'counts.tsv', 'samples.xlsx', sample_col='subject_id',",
+        "    matrix_sample_axis='columns', sep='\\t')",
+    ],
+    related=[
+        "utils.align_to_common",
+        "utils.align_samples",
+        "utils.read",
+    ],
+    auto_fix="escalate",
+)
 def preflight_alignment(
     matrix,
     meta,
@@ -399,6 +441,42 @@ def preflight_alignment(
     )
 
 
+@register_function(
+    aliases=[
+        "align_to_common", "align_samples_to_common", "sample_alignment_apply",
+        "样本对齐", "样本对齐应用", "联表对齐", "去重对齐", "样本交集",
+        "metadata join", "sample set intersection", "drop unmatched samples",
+    ],
+    category="utils",
+    description=(
+        "Apply the alignment fix flagged by `preflight_alignment`: drop "
+        "duplicate sample IDs on each side, intersect to the common "
+        "sample set, reorder both tables to the same sample list. "
+        "Returns `(aligned_matrix, aligned_meta)` with types matching the "
+        "inputs (DataFrame / AnnData on the matrix side; DataFrame "
+        "indexed by the resolved sample column on the meta side)."
+    ),
+    examples=[
+        "result = ov.utils.preflight_alignment('counts.csv', 'meta.csv')",
+        "if result.needs_alignment:",
+        "    matrix, meta = ov.utils.align_to_common(",
+        "        'counts.csv', 'meta.csv', result)",
+        "",
+        "# Standalone (runs the pre-flight internally)",
+        "matrix, meta = ov.utils.align_to_common('counts.csv', 'meta.csv')",
+        "",
+        "# Keep first duplicate instead of dropping all copies",
+        "# (useful when the dataset README names a canonical replicate)",
+        "matrix, meta = ov.utils.align_to_common(",
+        "    'counts.csv', 'meta.csv', drop_dups=True)",
+    ],
+    related=[
+        "utils.preflight_alignment",
+        "utils.align_samples",
+    ],
+    prerequisites={"optional_functions": ["preflight_alignment"]},
+    auto_fix="auto",
+)
 def align_to_common(
     matrix,
     meta,
@@ -494,6 +572,38 @@ def align_to_common(
     return mat, aligned_meta
 
 
+@register_function(
+    aliases=[
+        "align_samples", "preflight_and_align", "sample_alignment_oneshot",
+        "一键样本对齐", "对齐+预检", "样本对齐(一步)",
+        "align matrix and metadata", "ensure samples aligned",
+    ],
+    category="utils",
+    description=(
+        "One-shot wrapper: returns `(aligned_matrix, aligned_meta, "
+        "PreflightResult)` for any pair of inputs. Always returns "
+        "aligned tables (passthrough when the pre-flight is clean). "
+        "Prefer over `preflight_alignment` + `align_to_common` when the "
+        "caller wants both the cleaned tables and the diff audit in a "
+        "single call."
+    ),
+    examples=[
+        "matrix, meta, result = ov.utils.align_samples(",
+        "    'counts.csv', 'meta.csv')",
+        "print(result)  # the diff audit",
+        "# matrix and meta are now safe for joint PCA / DEG / clustering",
+        "",
+        "# Save the audit to disk for the run report",
+        "import json",
+        "json.dump(result.summary_dict(),",
+        "          open('outputs/sample_alignment.json', 'w'), indent=2)",
+    ],
+    related=[
+        "utils.preflight_alignment",
+        "utils.align_to_common",
+    ],
+    auto_fix="auto",
+)
 def align_samples(
     matrix,
     meta,
