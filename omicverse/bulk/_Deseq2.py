@@ -558,9 +558,16 @@ class pyDEG(object):
             group1: The first group to be compared.
             group2: The second group to be compared.
             method: The method to be used for differential expression analysis.
-                - `DEseq2`: DEseq2
-                - `ttest`: ttest
-                - `wilcox`: wilconx test
+                - `DEseq2`: PyDESeq2 negative-binomial Wald test (raw counts).
+                - `edger`: edgeR quasi-likelihood F-test via the vendored
+                  pure-Python `pyedger` port (R-parity tested; no R needed).
+                - `limma`: limma-voom pipeline via the vendored pure-Python
+                  `pylimma` port (voom mean-variance modelling + eBayes;
+                  R-parity tested; no R needed).
+                - `edgepy`: legacy edgeR-style GLM-LRT via the `inmoose`
+                  package (requires `pip install inmoose`).
+                - `ttest`: independent two-sample t-test.
+                - `wilcox`: Wilcoxon rank-sum test (not implemented).
             alpha: The threshold of p-value.
             multipletests_method:
                 - `bonferroni` : one-step correction
@@ -784,76 +791,100 @@ class pyDEG(object):
             print(f"✅ Differential expression analysis completed.")
             return result
 
-        elif method == 'limma':
-            try:
-                from patsy import dmatrix
-                from inmoose.limma import lmFit, makeContrasts, contrasts_fit, eBayes, topTable
-            except:
-                raise ImportError('Please install inmoose: `pip install inmoose`')
-            print(f"⏰ Start to create DGEList...")
-            anno1=pd.DataFrame(
-                index=group1+group2
-            )
-            anno1['condition']=['treatment' for i in group1]+['control' for i in group2]
+        elif method == 'edger':
+            # edgeR quasi-likelihood pipeline via the vendored pure-Python
+            # port `pyedger` (omicverse.external.pyedger), R-parity tested
+            # against Bioconductor edgeR. No R / inmoose needed.
+            from ..external import pyedger as _edger
+            print("⏰ Start edgeR quasi-likelihood (QL) pipeline (pyedger)...")
+            counts = self.data[group1 + group2]
+            groups = ['treatment'] * len(group1) + ['control'] * len(group2)
+            # control < treatment alphabetically → control is the reference
+            # level, so coef 'treatment' tests treatment vs control.
+            y = _edger.calcNormFactors(_edger.DGEList(counts, group=groups))
+            _edger.estimateDisp(y)
+            fit = _edger.glmQLFit(y, legacy=False)
+            qlf = _edger.glmQLFTest(fit, coef='treatment')
+            tab = qlf.table                       # gene-ordered: logFC/logCPM/F/PValue
 
-            # 3.1 构建设计矩阵
-            design1 = dmatrix("~0 + condition", data=anno1)
-            #    列名会是 ['condition[treatment]', 'condition[control]']
+            pvalue = tab['PValue'].to_numpy()
+            print(f"⏰ Start to calculate qvalue...")
+            qvalue = multipletests(np.nan_to_num(np.array(pvalue), nan=1.0), alpha=alpha,
+                                   method=multipletests_method, is_sorted=False,
+                                   returnsorted=False)[1]
+            g1_mean = self.data[group1].mean(axis=1)
+            g2_mean = self.data[group2].mean(axis=1)
 
-            # 3.2 lmFit 拟合线性模型
-            #    输入: counts_df 行基因为基因，列为样本
-            counts_df = self.data[group1+group2].values
-            fit = lmFit(counts_df, design1)
-            # 3.3 定义对比——treatment vs control
-            contrast_matrix = makeContrasts(
-                "condition[treatment] - condition[control]",
-                levels=design1
-            )
-
-            # 3.4 contrasts_fit 应用对比
-            fit_con = contrasts_fit(fit, contrast_matrix)
-
-            # 3.5 经验贝叶斯调整
-            print(f"⏰ Start to adjust pvalue...")
-            fit_eb = eBayes(fit_con)
-
-            g1_mean=self.data[group1].mean(axis=1)
-            g2_mean=self.data[group2].mean(axis=1)
-            g=(g2_mean+g1_mean)/2
-            g=g.loc[g>0].min()
-            fold=(g1_mean+g)/(g2_mean+g)
-
-            pvalue=fit_eb.p_value.values.reshape(-1)
-            qvalue = multipletests(np.nan_to_num(np.array(pvalue),0), alpha=0.5, 
-                               method=multipletests_method, is_sorted=False, returnsorted=False)
-            
-            result = pd.DataFrame({'pvalue':pvalue,'qvalue':qvalue[1],'FoldChange':fold})
-            result['MaxBaseMean']=np.max([g1_mean,g2_mean],axis=0)
-            result['BaseMean']=(g1_mean+g2_mean)/2
-            result['log2(BaseMean)']=np.log2((g1_mean+g2_mean)/2)
-            result['log2FC'] = np.log2(result['FoldChange'])
-            result['abs(log2FC)'] = abs(result['log2FC'])
-            result['size']  =np.abs(result['log2FC'])/10
-            result['sig']='normal'
-            result=result.loc[~result['pvalue'].isnull()]
+            result = pd.DataFrame({'pvalue': pvalue, 'qvalue': qvalue},
+                                  index=self.data.index)
+            result['log2FC'] = tab['logFC'].to_numpy()        # edgeR logFC is log2
+            result['abs(log2FC)'] = result['log2FC'].abs()
+            result['BaseMean'] = (g1_mean + g2_mean) / 2
+            result['MaxBaseMean'] = np.max([g1_mean, g2_mean], axis=0)
+            result['log2(BaseMean)'] = np.log2(result['BaseMean'] + 1)
+            result['logCPM'] = tab['logCPM'].to_numpy()
+            result['F'] = tab['F'].to_numpy()
+            result['size'] = result['abs(log2FC)'] / 10
+            result = result.loc[~result['pvalue'].isnull()]
             result['-log(pvalue)'] = -np.log10(result['pvalue'])
             result['-log(qvalue)'] = -np.log10(result['qvalue'])
-            #max mean of between each value in group1 and group2
-            #result=result[result['padj']<alpha]
-            result['sig']='normal'
+            result['sig'] = 'normal'
             result.loc[(result['qvalue'] < alpha) & (result['log2FC'] > 0), 'sig'] = 'up'
             result.loc[(result['qvalue'] < alpha) & (result['log2FC'] < 0), 'sig'] = 'down'
-
-            result['F']=fit_eb.F.reshape(-1)
-            result['t']=fit_eb.t.values.reshape(-1)
-            self.result=result
+            self.result = result
             print(f"✅ Differential expression analysis completed.")
             return result
 
-            # 3.6 提取结果
-            
-            
-            
-            
+        elif method == 'limma':
+            # limma-voom pipeline via the vendored pure-Python port `pylimma`
+            # (omicverse.external.pylimma), R-parity tested against
+            # Bioconductor limma. voom() models the count mean-variance trend
+            # — the statistically correct way to run limma on RNA-seq counts.
+            from ..external import pylimma as _limma
+            print("⏰ Start limma-voom pipeline (pylimma)...")
+            counts = self.data[group1 + group2]
+            n1, n2 = len(group1), len(group2)
+            # ~0 + condition design; contrast [-1, 1] = treatment − control.
+            design = pd.DataFrame(
+                {'control':   [0] * n1 + [1] * n2,
+                 'treatment': [1] * n1 + [0] * n2},
+                index=group1 + group2,
+            )
+            v = _limma.voom(counts, design.values)
+            fit = _limma.lmFit(v.E, design.values, weights=v.weights)
+            fit = _limma.contrasts_fit(fit, np.array([-1.0, 1.0]))
+            print(f"⏰ Start to adjust pvalue...")
+            fit = _limma.eBayes(fit)
+
+            log2FC = np.asarray(fit.coefficients)[:, 0]      # gene-ordered
+            pvalue = np.asarray(fit.p_value)[:, 0]
+            tstat = np.asarray(fit.t)[:, 0]
+            print(f"⏰ Start to calculate qvalue...")
+            qvalue = multipletests(np.nan_to_num(np.array(pvalue), nan=1.0), alpha=alpha,
+                                   method=multipletests_method, is_sorted=False,
+                                   returnsorted=False)[1]
+            g1_mean = self.data[group1].mean(axis=1)
+            g2_mean = self.data[group2].mean(axis=1)
+
+            result = pd.DataFrame({'pvalue': pvalue, 'qvalue': qvalue},
+                                  index=self.data.index)
+            result['log2FC'] = log2FC                        # voom logFC is log2
+            result['abs(log2FC)'] = result['log2FC'].abs()
+            result['BaseMean'] = (g1_mean + g2_mean) / 2
+            result['MaxBaseMean'] = np.max([g1_mean, g2_mean], axis=0)
+            result['log2(BaseMean)'] = np.log2(result['BaseMean'] + 1)
+            result['AveExpr'] = np.asarray(fit.Amean)
+            result['t'] = tstat
+            result['size'] = result['abs(log2FC)'] / 10
+            result = result.loc[~result['pvalue'].isnull()]
+            result['-log(pvalue)'] = -np.log10(result['pvalue'])
+            result['-log(qvalue)'] = -np.log10(result['qvalue'])
+            result['sig'] = 'normal'
+            result.loc[(result['qvalue'] < alpha) & (result['log2FC'] > 0), 'sig'] = 'up'
+            result.loc[(result['qvalue'] < alpha) & (result['log2FC'] < 0), 'sig'] = 'down'
+            self.result = result
+            print(f"✅ Differential expression analysis completed.")
+            return result
+
         else:  # This is where the "method" check (not pydeseq2 version check) ends
             raise ValueError('The method is not supported.')
