@@ -86,6 +86,7 @@ _LAZY_MODULES = {
     'mcp',
     'metabol',
     'micro',
+    'protein',
     'report',
 }
 
@@ -367,6 +368,7 @@ __all__ = [
     "space",
     "pl",
     "metabol",
+    "protein",
     "datasets",
     "external",
     "llm",
