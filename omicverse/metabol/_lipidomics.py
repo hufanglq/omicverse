@@ -80,6 +80,8 @@ class LipidIdentity:
     total_db: int            # total double bonds
     backbone: Optional[str] = None   # "d18:1" for Cer, None otherwise
     raw: str = ""            # original string
+    category: Optional[str] = None   # LIPID MAPS category: GP/GL/SP/ST/FA/...
+    fa_chains: tuple = ()    # per-chain (carbons, db) tuples when species-resolved
 
     def is_saturated(self) -> bool:
         """True if no double bonds — typical SFA-rich species."""
@@ -107,26 +109,10 @@ _PATTERN = re.compile(
 )
 
 
-@register_function(
-    aliases=[
-        'parse_lipid',
-        '脂质解析',
-        'LIPID_MAPS',
-    ],
-    category='metabolomics',
-    description="Parse LIPID MAPS shorthand (e.g. 'PC 34:1', 'Cer d18:1/24:0') into a LipidIdentity dataclass with class / total_carbons / total_db.",
-    examples=[
-        "ov.metabol.parse_lipid('PC 34:1')",
-    ],
-    related=[
-        'metabol.annotate_lipids',
-    ],
-)
-def parse_lipid(name: str) -> Optional[LipidIdentity]:
-    """Parse a LIPID MAPS-shorthand lipid name.
+def _parse_lipid_regex(name: str) -> Optional[LipidIdentity]:
+    """Fallback parser — the built-in regex over ``LIPID_CLASSES``.
 
-    Returns ``None`` if the name doesn't match any recognized pattern
-    (so the caller can filter or annotate as "not a lipid").
+    Used when ``pygoslin`` is not installed or cannot parse the name.
     """
     match = _PATTERN.match(str(name).strip())
     if not match:
@@ -140,13 +126,97 @@ def parse_lipid(name: str) -> Optional[LipidIdentity]:
     )
 
 
+def _db_count(double_bonds) -> int:
+    """pygoslin ``double_bonds`` is an int on older builds and a
+    ``DoubleBonds`` object on newer ones — normalise to a plain int."""
+    if isinstance(double_bonds, int):
+        return double_bonds
+    return int(getattr(double_bonds, "num_double_bonds", 0) or 0)
+
+
+def _parse_lipid_goslin(name: str) -> Optional[LipidIdentity]:
+    """Parse via Goslin (``pygoslin``) — the LIPID MAPS reference engine.
+
+    Goslin normalises dialects (MS-DIAL, LipidXplorer, SwissLipids, the
+    Liebisch 2020 shorthand) and resolves class, category, sum
+    composition and per-chain fatty-acyl details — far more robust than
+    the built-in regex.
+    """
+    try:
+        from pygoslin.parser.Parser import LipidParser
+    except Exception:
+        return None
+    try:
+        adduct = LipidParser().parse(str(name).strip())
+        lip = adduct.lipid
+        info = lip.info
+        klass = lip.get_extended_class()
+        if not klass:
+            return None
+        cat = getattr(lip.headgroup, "lipid_category", None)
+        category = getattr(cat, "name", None) if cat is not None else None
+        fa_chains = tuple(
+            (int(fa.num_carbon), _db_count(fa.double_bonds))
+            for fa in getattr(lip, "fa_list", []) or []
+            if getattr(fa, "num_carbon", 0)
+        )
+        return LipidIdentity(
+            lipid_class=str(klass).upper(),
+            total_carbons=int(getattr(info, "num_carbon", 0) or 0),
+            total_db=_db_count(getattr(info, "double_bonds", 0)),
+            backbone=None,
+            raw=name,
+            category=category,
+            fa_chains=fa_chains,
+        )
+    except Exception:
+        return None
+
+
+@register_function(
+    aliases=[
+        'parse_lipid',
+        '脂质解析',
+        'LIPID_MAPS',
+    ],
+    category='metabolomics',
+    description=(
+        "Parse a lipid name (LIPID MAPS shorthand or a vendor dialect — "
+        "MS-DIAL / LipidXplorer / SwissLipids) into a LipidIdentity with "
+        "class / category / total_carbons / total_db / per-chain FA. Uses "
+        "the Goslin engine (``pygoslin``) when available, falling back to "
+        "an in-house regex."
+    ),
+    examples=[
+        "ov.metabol.parse_lipid('PC 34:1')",
+        "ov.metabol.parse_lipid('PC(16:0/18:1)')",
+    ],
+    related=[
+        'metabol.annotate_lipids',
+    ],
+)
+def parse_lipid(name: str) -> Optional[LipidIdentity]:
+    """Parse a lipid name into a :class:`LipidIdentity`.
+
+    Tries the Goslin reference parser (``pygoslin``) first — it handles
+    the LIPID MAPS shorthand *and* the common vendor dialects and gives
+    class, category and per-chain detail. Falls back to the built-in
+    regex when ``pygoslin`` is unavailable or the name is unrecognised.
+    Returns ``None`` if neither parser recognises the name.
+    """
+    result = _parse_lipid_goslin(name)
+    if result is not None:
+        return result
+    return _parse_lipid_regex(name)
+
+
 @register_function(
     aliases=[
         'annotate_lipids',
         '脂质注释',
     ],
     category='metabolomics',
-    description='Apply parse_lipid to every var_name and write lipid_class / total_carbons / total_db / lipid_backbone to adata.var.',
+    description='Apply parse_lipid to every var_name and write lipid_class / lipid_category / total_carbons / total_db / lipid_backbone to adata.var.',
     examples=[
         'ov.metabol.annotate_lipids(adata)',
     ],
@@ -164,16 +234,18 @@ def annotate_lipids(adata: AnnData, *, feature_names: Optional[Iterable[str]] = 
     """
     out = adata.copy()
     names = list(feature_names) if feature_names is not None else list(out.var_names)
-    classes, carbons, dbs, bbones = [], [], [], []
+    classes, carbons, dbs, bbones, cats = [], [], [], [], []
     for n in names:
         lid = parse_lipid(n)
         if lid is None:
             classes.append(None); carbons.append(np.nan)
-            dbs.append(np.nan); bbones.append(None)
+            dbs.append(np.nan); bbones.append(None); cats.append(None)
         else:
             classes.append(lid.lipid_class); carbons.append(lid.total_carbons)
             dbs.append(lid.total_db); bbones.append(lid.backbone)
+            cats.append(lid.category)
     out.var["lipid_class"] = classes
+    out.var["lipid_category"] = cats
     out.var["total_carbons"] = carbons
     out.var["total_db"] = dbs
     out.var["lipid_backbone"] = bbones
@@ -316,3 +388,224 @@ def lion_enrichment(
         return out
     out["padj"] = _bh_fdr(out["pvalue"].to_numpy())
     return out.sort_values("pvalue").reset_index(drop=True)
+
+
+# ===========================================================================
+# pylipidr bridge — the Bioconductor *lipidr* workflow as ov.metabol functions
+# ===========================================================================
+# ``pylipidr`` is a standalone pure-Python port of Bioconductor lipidr
+# (Skyline I/O, ISTD / PQN normalization, limma moderated-t DE, Lipid Set
+# Enrichment Analysis, multivariate analysis). Its ``LipidomicsExperiment``
+# is a thin wrapper over an AnnData — processing-state flags live in
+# ``adata.uns`` and per-lipid annotations in ``adata.var`` — so the
+# AnnData <-> LipidomicsExperiment round-trip is lossless and the bridges
+# below can pass plain AnnData between steps. ``pylipidr`` is an optional
+# dependency: install with ``pip install omicverse[lipidomics]``.
+
+
+def _require_pylipidr():
+    """Import ``pylipidr`` or raise a friendly install hint."""
+    try:
+        import pylipidr
+    except ImportError as exc:  # pragma: no cover - import-guard
+        raise ImportError(
+            "This function bridges to the 'pylipidr' package, which is not "
+            "installed. Install it with:  pip install pylipidr  "
+            "(or pip install omicverse[lipidomics])."
+        ) from exc
+    return pylipidr
+
+
+def _as_annotated_experiment(pylipidr, adata: AnnData, measure: str):
+    """AnnData -> pylipidr LipidomicsExperiment, lipid-annotated.
+
+    ``de_lipids`` / ``lsea`` / ``normalize_istd`` need pylipidr's own
+    annotation columns (``Class`` / ``total_cl`` / ``total_cs`` / ``istd``);
+    annotate only when they are absent so a user-supplied annotation is
+    never clobbered.
+    """
+    exp = pylipidr.as_lipidomics_experiment(adata, measure=measure)
+    if "Class" not in exp.row_data.columns:
+        exp = pylipidr.annotate_lipids(exp)
+    return exp
+
+
+@register_function(
+    aliases=['read_skyline', '读取Skyline', 'Skyline导入'],
+    category='metabolomics',
+    description='Read Skyline targeted-lipidomics CSV export(s) into an AnnData (samples x lipid transitions). Bridges to pylipidr.read_skyline.',
+    examples=["ov.metabol.read_skyline('A1_data.csv')"],
+    related=['metabol.summarize_transitions', 'metabol.annotate_lipids'],
+)
+def read_skyline(files, measure: str = "Area") -> AnnData:
+    """Read Skyline CSV export(s) into an AnnData (R lipidr ``read_skyline``).
+
+    Each input is a long transition table; the importer pivots to a
+    samples x transitions matrix. Multiple transitions of one lipid are
+    kept as separate rows — collapse them with
+    :func:`summarize_transitions`.
+    """
+    pylipidr = _require_pylipidr()
+    return pylipidr.read_skyline(files, measure=measure).adata
+
+
+@register_function(
+    aliases=['add_sample_annotation', '添加样本注释'],
+    category='metabolomics',
+    description='Attach a clinical / sample-metadata table (path or DataFrame) to a lipidomics AnnData, joined on the sample id. Bridges to pylipidr.add_sample_annotation.',
+    examples=["ov.metabol.add_sample_annotation(adata, 'clin.csv')"],
+    related=['metabol.read_skyline'],
+)
+def add_sample_annotation(adata: AnnData, annotation) -> AnnData:
+    """Join a sample-metadata table onto ``adata.obs`` (R lipidr
+    ``add_sample_annotation``). ``annotation`` is a CSV path or a
+    DataFrame indexed / keyed by sample id."""
+    pylipidr = _require_pylipidr()
+    exp = pylipidr.as_lipidomics_experiment(adata)
+    return pylipidr.add_sample_annotation(exp, annotation).adata
+
+
+@register_function(
+    aliases=['summarize_transitions', '汇总离子对', 'transition汇总'],
+    category='metabolomics',
+    description="Collapse multiple Skyline transitions of the same lipid into one row via max / average. Bridges to pylipidr.summarize_transitions.",
+    examples=["ov.metabol.summarize_transitions(adata, method='max')"],
+    related=['metabol.read_skyline'],
+)
+def summarize_transitions(adata: AnnData, method: str = "max") -> AnnData:
+    """Collapse per-lipid Skyline transitions (R lipidr
+    ``summarize_transitions``). ``method`` is ``"max"`` or ``"average"``."""
+    pylipidr = _require_pylipidr()
+    exp = pylipidr.as_lipidomics_experiment(adata)
+    return pylipidr.summarize_transitions(exp, method=method).adata
+
+
+@register_function(
+    aliases=['normalize_pqn', 'PQN归一化', '脂质PQN'],
+    category='metabolomics',
+    description='Probabilistic Quotient Normalization for lipidomics (per-sample median-quotient factor), with optional log2. Bridges to pylipidr.normalize_pqn.',
+    examples=["ov.metabol.normalize_pqn(adata, measure='Area')"],
+    related=['metabol.normalize_istd', 'metabol.de_lipids'],
+)
+def normalize_pqn(
+    adata: AnnData,
+    measure: str = "Area",
+    exclude="blank",
+    log: bool = True,
+) -> AnnData:
+    """PQN-normalize a lipidomics AnnData (R lipidr ``normalize_pqn``).
+
+    ``exclude`` drops blank / QC samples before computing the reference;
+    ``log=True`` log2-transforms the normalized matrix.
+    """
+    pylipidr = _require_pylipidr()
+    exp = pylipidr.as_lipidomics_experiment(adata, measure=measure)
+    return pylipidr.normalize_pqn(
+        exp, measure=measure, exclude=exclude, log=log
+    ).adata
+
+
+@register_function(
+    aliases=['normalize_istd', '内标归一化', 'ISTD归一化'],
+    category='metabolomics',
+    description='Internal-standard normalization — divide each lipid by the ISTD signal of its own class. Bridges to pylipidr.normalize_istd.',
+    examples=["ov.metabol.normalize_istd(adata, measure='Area')"],
+    related=['metabol.normalize_pqn', 'metabol.de_lipids'],
+)
+def normalize_istd(
+    adata: AnnData,
+    measure: str = "Area",
+    exclude="blank",
+    log: bool = True,
+) -> AnnData:
+    """Internal-standard normalize a lipidomics AnnData (R lipidr
+    ``normalize_istd``). Each lipid is divided by the internal
+    standard(s) of its own class; lipids are auto-annotated first."""
+    pylipidr = _require_pylipidr()
+    exp = _as_annotated_experiment(pylipidr, adata, measure)
+    return pylipidr.normalize_istd(
+        exp, measure=measure, exclude=exclude, log=log
+    ).adata
+
+
+@register_function(
+    aliases=['de_lipids', '脂质差异分析', 'de_analysis'],
+    category='metabolomics',
+    description='Lipid differential expression via limma moderated-t, with lipid-class annotations on the result table. Bridges to pylipidr.de_analysis.',
+    examples=["ov.metabol.de_lipids(adata, 'Cancer - Benign', group_col='group')"],
+    related=['metabol.lsea', 'metabol.normalize_pqn'],
+)
+def de_lipids(
+    adata: AnnData,
+    contrasts=None,
+    *,
+    group_col: Optional[str] = None,
+    measure: str = "Area",
+    design=None,
+    coef=None,
+) -> pd.DataFrame:
+    """Moderated-t differential analysis for lipids (R lipidr
+    ``de_analysis``). Input should be normalized + log2-scaled
+    (see :func:`normalize_pqn`). ``contrasts`` are ``"A - B"`` strings
+    over the levels of ``group_col``. Returns a tidy DataFrame with
+    ``logFC / P.Value / adj.P.Val`` plus lipid annotations."""
+    pylipidr = _require_pylipidr()
+    exp = _as_annotated_experiment(pylipidr, adata, measure)
+    return pylipidr.de_analysis(
+        exp, contrasts, measure=measure,
+        group_col=group_col, design=design, coef=coef,
+    )
+
+
+@register_function(
+    aliases=['lsea', '脂质集富集', 'LSEA'],
+    category='metabolomics',
+    description='Lipid Set Enrichment Analysis — preranked GSEA over class / chain-length / unsaturation lipid sets. Bridges to pylipidr.lsea.',
+    examples=["ov.metabol.lsea(de_results, rank_by='logFC')"],
+    related=['metabol.de_lipids', 'metabol.lion_enrichment'],
+)
+def lsea(
+    de_results: pd.DataFrame,
+    rank_by: str = "logFC",
+    min_size: int = 2,
+    nperm: int = 10000,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """Lipid Set Enrichment Analysis (R lipidr ``lsea``).
+
+    Preranked GSEA, per contrast, over lipid sets built from class,
+    total chain length and total unsaturation. ``de_results`` is the
+    output of :func:`de_lipids`; ``rank_by`` is ``"logFC"`` /
+    ``"P.Value"`` / ``"adj.P.Val"``."""
+    pylipidr = _require_pylipidr()
+    return pylipidr.lsea(
+        de_results, rank_by=rank_by, min_size=min_size,
+        nperm=nperm, seed=seed,
+    )
+
+
+@register_function(
+    aliases=['lipid_mva', '脂质多元分析', 'lipid_pca'],
+    category='metabolomics',
+    description='Multivariate analysis for lipidomics — PCA / PCoA / OPLS / OPLS-DA. Bridges to pylipidr.mva; returns an MVAResult with scores / loadings.',
+    examples=["ov.metabol.lipid_mva(adata, method='PCA', group_col='group')"],
+    related=['metabol.de_lipids', 'metabol.opls_da'],
+)
+def lipid_mva(
+    adata: AnnData,
+    method: str = "PCA",
+    *,
+    group_col: Optional[str] = None,
+    measure: str = "Area",
+):
+    """Multivariate analysis of a lipidomics AnnData (R lipidr ``mva``).
+
+    ``method`` is ``"PCA"`` / ``"PCoA"`` / ``"OPLS"`` / ``"OPLS-DA"``
+    (OPLS-DA needs a 2-level ``group_col``). Returns a pylipidr
+    ``MVAResult`` carrying ``.scores`` / ``.loadings`` /
+    ``.explained_variance``."""
+    pylipidr = _require_pylipidr()
+    exp = _as_annotated_experiment(pylipidr, adata, measure)
+    return pylipidr.mva(
+        exp, measure=measure, method=method, group_col=group_col
+    )
