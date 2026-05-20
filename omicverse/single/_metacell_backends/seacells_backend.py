@@ -70,12 +70,16 @@ class SEACellsBackend(MetaCellBackend):
         self.model.fit(min_iter=min_iter, max_iter=max_iter, **kwargs)
         runtime = time.time() - t0
 
-        labels = self.adata.obs["SEACell"].astype(str)
-        uniq = {lab: i for i, lab in enumerate(sorted(labels.unique()))}
-        assignments = labels.map(uniq).to_numpy().astype(np.int64)
-
         # SEACells writes A_ as (n_metacells, n_cells); we want (n_cells, n_mc).
         soft = sparse.csr_matrix(self.model.A_.T)
+
+        # `assignments` MUST share the metacell ordering of `soft` columns
+        # (= archetype index in A_).  Deriving it from the argmax archetype
+        # guarantees this.  The previous approach — string-sorting the
+        # "SEACell-N" labels — placed "SEACell-10" before "SEACell-2", so the
+        # hard index and the soft-column index disagreed and soft aggregation
+        # attached celltype labels to the wrong metacell profiles.
+        assignments = np.asarray(self.model.A_.argmax(axis=0)).ravel().astype(np.int64)
 
         latent = None
         if self.use_rep in self.adata.obsm:
@@ -89,7 +93,7 @@ class SEACellsBackend(MetaCellBackend):
             n_iter=len(getattr(self.model, "RSS_iters", [])),
             converged=True,
             runtime_s=float(runtime),
-            backend_meta={"label_map": uniq},
+            backend_meta={},
         )
         return self._fit_result
 
@@ -123,8 +127,8 @@ class SEACellsBackend(MetaCellBackend):
         state = {
             "use_rep": self.use_rep,
             "n_metacells": self.n_metacells,
-            "assignments": np.asarray(self.adata.obs["SEACell"]
-                                        .astype(str).to_numpy()),
+            # Store A_ (n_metacells, n_cells); assignments are re-derived from
+            # its argmax on load so the soft/hard metacell ordering stays in sync.
             "A_": sparse.csr_matrix(self.model.A_),
         }
         with open(path, "wb") as f:
@@ -136,15 +140,14 @@ class SEACellsBackend(MetaCellBackend):
             state = pickle.load(f)
         self.use_rep = state["use_rep"]
         self.n_metacells = state["n_metacells"]
-        # Stash assignments + soft so the unified schema can be re-written by
-        # MetaCell.load → _write_schema via a synthetic FitResult.
+        # Re-derive assignments from the argmax archetype so they share the
+        # soft matrix's metacell ordering (see the note in fit()).
         from .base import FitResult
-        labels = state["assignments"]
-        uniq = {lab: i for i, lab in enumerate(sorted(np.unique(labels)))}
-        ass = np.asarray([uniq[l] for l in labels], dtype=np.int64)
+        A_ = state["A_"]                                  # (n_metacells, n_cells)
+        ass = np.asarray(A_.argmax(axis=0)).ravel().astype(np.int64)
         self._fit_result = FitResult(
             assignments=ass,
-            soft=state["A_"].T,
+            soft=A_.T.tocsr(),
             n_iter=0, converged=True, runtime_s=0.0,
-            backend_meta={"label_map": uniq, "loaded": True},
+            backend_meta={"loaded": True},
         )
