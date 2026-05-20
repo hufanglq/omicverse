@@ -83,7 +83,13 @@ from ._atac import atac_concat_get_index,atac_concat_inner,atac_concat_outer
 from ._batch import batch_correction
 from ._diffusionmap import diffmap
 from ._aucell import aucell
-from ._metacell import MetaCell,plot_metacells,get_obs_value
+from ._metacell import (
+    MetaCell,
+    plot_metacells,
+    get_obs_value,
+    optimize_granularity,
+    compare_metacell_backends,
+)
 from ._mdic3 import pyMDIC3
 from ._gptcelltype import gptcelltype,gpt4celltype,get_cluster_celltype
 from ._gptcelltype_local import gptcelltype_local
@@ -359,6 +365,8 @@ __all__ = [
     'MetaCell',
     'plot_metacells',
     'get_obs_value',
+    'optimize_granularity',
+    'compare_metacell_backends',
 
     # Single-cell CNV
     'CNV',
