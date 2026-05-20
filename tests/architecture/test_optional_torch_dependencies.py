@@ -230,6 +230,8 @@ def _install_single_dependency_stubs():
             "MetaCell": object(),
             "plot_metacells": object(),
             "get_obs_value": object(),
+            "optimize_granularity": object(),
+            "compare_metacell_backends": object(),
         },
         "omicverse.single._mdic3": {"pyMDIC3": object()},
         "omicverse.single._gptcelltype": {

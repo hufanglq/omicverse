@@ -37,7 +37,11 @@ def test_modified_backend_helpers_are_wired_to_call_sites():
     expected_helper_calls = {
         "omicverse/bulk/_Gene_module.py": {"_get_pywgcna_backend"},
         "omicverse/single/_cefcon.py": {"_get_cefcon_backend"},
-        "omicverse/single/_metacell.py": {"_get_seacells_backend"},
+        # NOTE: omicverse/single/_metacell.py was refactored into a backend
+        # dispatcher (PR #729). SEACells is now lazy-loaded inside
+        # _metacell_backends/seacells_backend.py via a direct
+        # `from ...external.SEACells.core import SEACells` in fit(), so the
+        # old `_get_seacells_backend` helper no longer exists.
         "omicverse/single/_mofa.py": {"_get_mofa_entry_point"},
         "omicverse/single/_tosica.py": {"_get_tosica_backend"},
         "omicverse/single/_traj.py": {"_get_palantir_backend"},
