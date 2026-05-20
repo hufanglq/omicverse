@@ -175,6 +175,14 @@ tests = [
   "scikit-bio>=0.6",
   "ete3",
   "pydeseq2>=0.4.1",
+  # ov.protein test dependencies — the standalone proteomics backends
+  # exercised by tests/test_protein.py.
+  "pyimputelcmd>=0.1.1",
+  "pydeqms>=0.1.1",
+  "pyproda>=0.1.1",
+  "pymsstats>=0.3.0",
+  "pyolinkanalyze>=0.2.1",
+  "scikit-misc>=0.3",
 ]
 
 mcp = [

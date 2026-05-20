@@ -12,6 +12,7 @@ covered by the standalone py-imputeLCMD / py-DEqMS test suites.
 """
 from __future__ import annotations
 
+import importlib.util
 import warnings
 
 import numpy as np
@@ -21,6 +22,18 @@ import pytest
 # Quiet expected DeqMS / scipy warnings during synthetic test runs.
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+# ov.protein dispatches to standalone backend packages (pyimputelcmd,
+# pydeqms, pyproda, pymsstats). They are the ``omicverse[protein]`` /
+# ``omicverse[tests]`` optional dependencies — skip this whole file
+# gracefully if they are not installed rather than erroring.
+_BACKENDS = ["pyimputelcmd", "pydeqms", "pyproda", "pymsstats"]
+_MISSING_BACKENDS = [m for m in _BACKENDS
+                     if importlib.util.find_spec(m) is None]
+pytestmark = pytest.mark.skipif(
+    bool(_MISSING_BACKENDS),
+    reason=f"ov.protein backend packages not installed: {_MISSING_BACKENDS}",
+)
 
 
 def _make_anndata(seed: int = 0, n_proteins: int = 200, n_per_group: int = 6):
