@@ -90,6 +90,7 @@ from ._metacell import (
     optimize_granularity,
     compare_metacell_backends,
 )
+from ._pseudobulk import pseudobulk
 from ._mdic3 import pyMDIC3
 from ._gptcelltype import gptcelltype,gpt4celltype,get_cluster_celltype
 from ._gptcelltype_local import gptcelltype_local
@@ -367,6 +368,7 @@ __all__ = [
     'get_obs_value',
     'optimize_granularity',
     'compare_metacell_backends',
+    'pseudobulk',
 
     # Single-cell CNV
     'CNV',
