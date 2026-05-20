@@ -317,25 +317,38 @@ class MetaCell(object):
         return out
 
     def _predicted_soft(self, layer, summary, celltype_label, minimum_weight):
+        """Soft aggregation, matching SEACells.summarize_by_soft_SEACell.
+
+        For metacell ``m`` with per-cell soft weights ``w_cm``:
+
+        - ``summary='mean'`` → weighted mean  ``Σ_c w_cm · X_c / Σ_c w_cm``
+          (this is exactly what the upstream SEACells soft summary does).
+        - ``summary='sum'``  → weighted sum   ``Σ_c w_cm · X_c``.
+          Because each cell's weights sum to 1 across metacells, the weighted
+          sum conserves total counts (``Σ_m X_mc == Σ_c X_c``) — the right
+          "pseudo-raw count" semantics for SCENIC / pseudobulk DE.
+        """
         import anndata as ad
         soft = self._fit_result.soft.copy().tocsr()
         if minimum_weight > 0:
             soft.data[soft.data < minimum_weight] = 0
             soft.eliminate_zeros()
-        # Re-normalise rows.
+        # Re-normalise rows so each cell's weights sum to 1 across metacells.
         row_sum = np.asarray(soft.sum(axis=1)).ravel()
         row_sum[row_sum == 0] = 1
         soft = sp.diags(1.0 / row_sum) @ soft
 
         X = self._get_counts(layer)
-        # X_mc[mc, gene] = Σ_cell soft[cell, mc] * X[cell, gene]
+        # Weighted sum: X_mc[m, g] = Σ_c soft[c, m] * X[c, g].
         X_mc = soft.T @ X
         if summary == "mean":
-            # column-sum per metacell already sums to ≈ 1 → already mean-like.
-            pass
-        elif summary == "sum":
-            cell_counts = np.asarray(soft.sum(axis=0)).ravel().clip(min=1)
-            X_mc = sp.diags(cell_counts) @ X_mc
+            # Divide by per-metacell weight sum → weighted mean (SEACells parity).
+            eff = np.asarray(soft.sum(axis=0)).ravel()
+            eff[eff == 0] = 1.0
+            X_mc = sp.diags(1.0 / eff) @ X_mc
+        elif summary != "sum":
+            raise ValueError(f"summary must be 'sum' or 'mean', got {summary!r}")
+        # summary == 'sum': X_mc is already the weighted sum — no rescaling.
         if sp.issparse(X_mc):
             X_mc = X_mc.tocsr()
 
