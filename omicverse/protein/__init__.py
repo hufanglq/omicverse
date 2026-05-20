@@ -92,6 +92,9 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "volcano":                (".plotting", "volcano"),
     "missing_pattern_plot":   (".plotting", "missing_pattern_plot"),
     "abundance_rank_plot":    (".plotting", "abundance_rank_plot"),
+    "pca_plot":               (".plotting", "pca_plot"),
+    "heatmap":                (".plotting", "heatmap"),
+    "boxplot":                (".plotting", "boxplot"),
 }
 
 _LAZY_SUBMODULES = {"plotting"}

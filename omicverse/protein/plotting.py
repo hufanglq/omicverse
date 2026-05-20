@@ -1,12 +1,15 @@
-"""Minimal plotting for ``ov.protein``.
+"""Plotting for ``ov.protein``.
 
-Three convenience plots:
+Diagnostic + result plots for the bulk-proteomics workflow:
 
 * :func:`volcano` — log2FC × -log10(adj.P) scatter for a DE result.
 * :func:`missing_pattern_plot` — heatmap of per-protein × per-sample
   missingness (white = observed, dark = missing).
 * :func:`abundance_rank_plot` — per-sample rank-vs-intensity diagnostic
   (mirrors the MaxQuant ``QC_plot``).
+* :func:`pca_plot` — sample PCA scatter, coloured by a metadata column.
+* :func:`heatmap` — z-scored expression heatmap of the top DE proteins.
+* :func:`boxplot` — per-sample intensity boxplots (normalization QC).
 """
 from __future__ import annotations
 
@@ -182,4 +185,175 @@ def abundance_rank_plot(
     ax.set_ylabel("log2 intensity" if log else "intensity")
     if not palette and adata.n_obs <= 20:
         ax.legend(fontsize=6, ncol=2)
+    return ax
+
+
+@register_function(
+    aliases=["protein_pca_plot", "pca_plot", "蛋白PCA图"],
+    category="visualization",
+    description=(
+        "Sample-level PCA scatter for a proteomics AnnData — points are "
+        "samples, coloured by an ``adata.obs`` column. Use it as a QC "
+        "step after normalization / imputation to spot batch effects "
+        "and outlier samples and to confirm the groups separate."
+    ),
+    examples=["ov.protein.pca_plot(adata, color='group')"],
+)
+def pca_plot(
+    adata,
+    *,
+    color: Optional[str] = None,
+    n_comps: int = 2,
+    ax: Optional["matplotlib.axes.Axes"] = None,
+    figsize: tuple[float, float] = (4.8, 4.2),
+    s: float = 60.0,
+    label_samples: bool = False,
+):
+    """PCA of samples (rows of ``adata.X``); colour by ``adata.obs[color]``."""
+    import matplotlib.pyplot as plt
+    from sklearn.decomposition import PCA
+
+    X = adata.X.astype(float)
+    # PCA needs complete data — mean-impute any residual NaNs for the projection.
+    if np.isnan(X).any():
+        col_mean = np.nanmean(X, axis=0, keepdims=True)
+        X = np.where(np.isnan(X), col_mean, X)
+    X = X - X.mean(axis=0, keepdims=True)
+    pca = PCA(n_components=min(n_comps, *X.shape))
+    scores = pca.fit_transform(X)
+    var = pca.explained_variance_ratio_ * 100.0
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=figsize)
+    if color and color in adata.obs.columns:
+        groups = adata.obs[color].astype(str)
+        for g in pd.unique(groups):
+            m = (groups == g).to_numpy()
+            ax.scatter(scores[m, 0], scores[m, 1], s=s, label=str(g),
+                       edgecolor="white", linewidth=0.5, alpha=0.9)
+        ax.legend(title=color, fontsize=8, frameon=False)
+    else:
+        ax.scatter(scores[:, 0], scores[:, 1], s=s,
+                   edgecolor="white", linewidth=0.5, alpha=0.9)
+    if label_samples:
+        for i, name in enumerate(adata.obs_names):
+            ax.annotate(str(name), (scores[i, 0], scores[i, 1]),
+                        fontsize=6, xytext=(3, 3), textcoords="offset points")
+    ax.set_xlabel(f"PC1 ({var[0]:.1f}%)")
+    ax.set_ylabel(f"PC2 ({var[1]:.1f}%)" if var.size > 1 else "PC2")
+    ax.set_title("Sample PCA")
+    ax.axhline(0, color="grey", lw=0.5, ls="--")
+    ax.axvline(0, color="grey", lw=0.5, ls="--")
+    return ax
+
+
+@register_function(
+    aliases=["protein_heatmap", "heatmap", "蛋白热图"],
+    category="visualization",
+    description=(
+        "Z-scored expression heatmap of the top differentially-expressed "
+        "proteins. Rows = proteins (top ``n_top`` by ascending p-value "
+        "from an ``ov.protein.de`` result), columns = samples grouped / "
+        "annotated by ``group``. Each row is z-scored across samples."
+    ),
+    examples=[
+        "ov.protein.heatmap(adata, de_table=res, group='group', n_top=40)",
+    ],
+)
+def heatmap(
+    adata,
+    de_table: pd.DataFrame,
+    *,
+    group: Optional[str] = None,
+    n_top: int = 40,
+    gene_col: str = "gene",
+    p_col: str = "adj.P.Val",
+    ax: Optional["matplotlib.axes.Axes"] = None,
+    figsize: tuple[float, float] = (7.0, 8.0),
+    cmap: str = "RdBu_r",
+):
+    """Z-scored heatmap of the top-``n_top`` DE proteins across samples."""
+    import matplotlib.pyplot as plt
+
+    ranked = de_table.sort_values(p_col) if p_col in de_table.columns else de_table
+    top_genes = [g for g in ranked[gene_col].astype(str).tolist()
+                 if g in set(adata.var_names.astype(str))][:n_top]
+    if not top_genes:
+        raise ValueError("none of the DE-table genes are in adata.var_names")
+
+    sub = adata[:, top_genes]
+    M = sub.X.astype(float).T  # proteins × samples
+    # Per-protein z-score across samples.
+    mu = np.nanmean(M, axis=1, keepdims=True)
+    sd = np.nanstd(M, axis=1, keepdims=True)
+    Z = (M - mu) / np.where(sd == 0, 1.0, sd)
+
+    # Order samples by group for a block-structured heatmap.
+    sample_order = np.arange(adata.n_obs)
+    col_labels = list(adata.obs_names.astype(str))
+    if group and group in adata.obs.columns:
+        g = adata.obs[group].astype(str).to_numpy()
+        sample_order = np.argsort(g, kind="stable")
+        Z = Z[:, sample_order]
+        col_labels = [f"{adata.obs_names[i]}" for i in sample_order]
+        group_sorted = g[sample_order]
+    else:
+        group_sorted = None
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=figsize)
+    vmax = float(np.nanpercentile(np.abs(Z), 98)) or 1.0
+    im = ax.imshow(Z, aspect="auto", cmap=cmap, vmin=-vmax, vmax=vmax,
+                   interpolation="nearest")
+    ax.set_yticks(np.arange(len(top_genes)))
+    ax.set_yticklabels(top_genes, fontsize=6)
+    ax.set_xticks(np.arange(len(col_labels)))
+    ax.set_xticklabels(col_labels, rotation=90, fontsize=6)
+    # Group separators.
+    if group_sorted is not None:
+        bounds = np.where(group_sorted[:-1] != group_sorted[1:])[0] + 0.5
+        for b in bounds:
+            ax.axvline(b, color="black", lw=1.0)
+    ax.set_title(f"Top {len(top_genes)} DE proteins (z-scored)")
+    plt.colorbar(im, ax=ax, label="z-score", fraction=0.03, pad=0.02)
+    return ax
+
+
+@register_function(
+    aliases=["protein_boxplot", "boxplot"],
+    category="visualization",
+    description=(
+        "Per-sample intensity boxplots — a normalization QC plot. Run it "
+        "before and after ``ov.protein.normalize`` to confirm the "
+        "sample medians have been equalised."
+    ),
+    examples=["ov.protein.boxplot(adata, color_by='group')"],
+)
+def boxplot(
+    adata,
+    *,
+    color_by: Optional[str] = None,
+    ax: Optional["matplotlib.axes.Axes"] = None,
+    figsize: tuple[float, float] = (7.0, 3.6),
+):
+    """Per-sample intensity boxplots (normalization QC)."""
+    import matplotlib.pyplot as plt
+
+    X = adata.X.astype(float)
+    data = [row[~np.isnan(row)] for row in X]
+    if ax is None:
+        _, ax = plt.subplots(figsize=figsize)
+    bp = ax.boxplot(data, showfliers=False, patch_artist=True,
+                    medianprops=dict(color="black"))
+    if color_by and color_by in adata.obs.columns:
+        groups = adata.obs[color_by].astype(str)
+        uniq = list(pd.unique(groups))
+        palette = {g: c for g, c in zip(uniq, plt.cm.tab10.colors)}  # type: ignore[attr-defined]
+        for patch, samp in zip(bp["boxes"], adata.obs_names):
+            patch.set_facecolor(palette[str(adata.obs[color_by].loc[samp])])
+            patch.set_alpha(0.7)
+    ax.set_xticks(np.arange(1, adata.n_obs + 1))
+    ax.set_xticklabels(adata.obs_names, rotation=90, fontsize=6)
+    ax.set_ylabel("intensity")
+    ax.set_title("Per-sample intensity distribution")
     return ax

@@ -98,4 +98,12 @@ from ._datasets import (
     pbmc8k,
     seqfish,
 )
+from ._protein import (
+    # Real proteomics datasets for the ov.protein tutorials
+    protein_pxd000022,
+    protein_pxd000438,
+    protein_dda_spikein,
+    protein_dia,
+    protein_olink,
+)
 from ._signatures import load_signatures_from_file, predefined_signatures
