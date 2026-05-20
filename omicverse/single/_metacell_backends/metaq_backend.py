@@ -212,9 +212,45 @@ class MetaQBackend(MetaCellBackend):
         if self.model is None:
             raise RuntimeError("Call .fit() first.")
         import torch
-        # Apply the SAME preprocessing pipeline used at fit time.
+        # Re-use the *exact* gene set the encoder was trained on (re-doing
+        # HVG selection on the query would produce a different feature axis).
+        var_index = self._preprocess_stats.get("var_index")
         ad = adata_query.copy()
-        x, sf, raw, _ = self._prep_one_omic(ad, self.data_types[0])
+        if var_index is not None:
+            common = [g for g in var_index if g in ad.var_names]
+            if not common:
+                raise ValueError(
+                    "adata_query shares no gene names with the trained encoder; "
+                    "check var_names match the original training adata."
+                )
+            ad = ad[:, common].copy()
+            # Pad missing genes with zeros so the feature axis matches exactly.
+            if len(common) < len(var_index):
+                import scipy.sparse as sp
+                missing = [g for g in var_index if g not in set(common)]
+                pad = sp.csr_matrix((ad.n_obs, len(missing)))
+                import anndata as _ad
+                ad = _ad.concat(
+                    [ad, _ad.AnnData(X=pad, var=pd.DataFrame(index=missing),
+                                     obs=ad.obs.copy())],
+                    axis=1, merge="first",
+                )[:, var_index]
+            else:
+                ad = ad[:, var_index]
+        # Light normalisation matching upstream preprocess (normalize_total +
+        # log1p + scale) but with the FIXED gene set rather than HVG re-pick.
+        if sparse.issparse(ad.X):
+            X = np.asarray(ad.X.todense())
+        else:
+            X = np.asarray(ad.X)
+        sf = X.sum(axis=1).reshape(-1, 1) / 1e4
+        sf[sf == 0] = 1.0
+        X_norm = X / sf * 1e4
+        X_log = np.log1p(X_norm).astype(np.float32)
+        mean = X_log.mean(axis=0)
+        std = X_log.std(axis=0) + 1e-8
+        x = np.clip((X_log - mean) / std, -10, 10).astype(np.float32)
+
         device = next(self.model.parameters()).device
         with torch.no_grad():
             self.model.eval()

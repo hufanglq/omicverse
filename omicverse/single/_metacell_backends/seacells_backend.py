@@ -47,6 +47,7 @@ class SEACellsBackend(MetaCellBackend):
         )
         self._extra = kwargs
         self.model = None
+        self._fit_result: Optional[FitResult] = None
 
     def fit(self, n_metacells: Optional[int] = None, min_iter: int = 10, max_iter: int = 50, **kwargs) -> FitResult:
         from ...external.SEACells.core import SEACells
@@ -80,7 +81,7 @@ class SEACellsBackend(MetaCellBackend):
         if self.use_rep in self.adata.obsm:
             latent = np.asarray(self.adata.obsm[self.use_rep])
 
-        return FitResult(
+        self._fit_result = FitResult(
             assignments=assignments,
             soft=soft,
             latent=latent,
@@ -90,6 +91,7 @@ class SEACellsBackend(MetaCellBackend):
             runtime_s=float(runtime),
             backend_meta={"label_map": uniq},
         )
+        return self._fit_result
 
     # capability methods -----------------------------------------------------
 
@@ -102,19 +104,47 @@ class SEACellsBackend(MetaCellBackend):
         return np.asarray(self.adata.obsm[self.use_rep])
 
     # persistence -------------------------------------------------------------
+    #
+    # NOTE: pickling the full SEACells model embeds pandas Categoricals that
+    # unpickle cleanly only under the exact same pandas version.  We persist
+    # the slim state (assignments + soft + use_rep + n_metacells) instead —
+    # enough to write the AnnData schema; the kernel can be reconstructed if
+    # additional optimization is needed.
+
+    @property
+    def assignments(self):
+        return None if self._fit_result is None else self._fit_result.assignments
 
     def save(self, path: str) -> None:
         import pickle
+        from scipy import sparse
+        if self.model is None:
+            raise RuntimeError("Call .fit() before .save().")
+        state = {
+            "use_rep": self.use_rep,
+            "n_metacells": self.n_metacells,
+            "assignments": np.asarray(self.adata.obs["SEACell"]
+                                        .astype(str).to_numpy()),
+            "A_": sparse.csr_matrix(self.model.A_),
+        }
         with open(path, "wb") as f:
-            pickle.dump(
-                {"model": self.model, "use_rep": self.use_rep, "n_metacells": self.n_metacells},
-                f,
-            )
+            pickle.dump(state, f)
 
     def load(self, path: str) -> None:
         import pickle
         with open(path, "rb") as f:
             state = pickle.load(f)
-        self.model = state["model"]
         self.use_rep = state["use_rep"]
         self.n_metacells = state["n_metacells"]
+        # Stash assignments + soft so the unified schema can be re-written by
+        # MetaCell.load → _write_schema via a synthetic FitResult.
+        from .base import FitResult
+        labels = state["assignments"]
+        uniq = {lab: i for i, lab in enumerate(sorted(np.unique(labels)))}
+        ass = np.asarray([uniq[l] for l in labels], dtype=np.int64)
+        self._fit_result = FitResult(
+            assignments=ass,
+            soft=state["A_"].T,
+            n_iter=0, converged=True, runtime_s=0.0,
+            backend_meta={"label_map": uniq, "loaded": True},
+        )
