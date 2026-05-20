@@ -7,6 +7,7 @@ returns it ready for the ``ov.protein`` workflow.
 | Loader | Returns | Source |
 |---|---|---|
 | :func:`protein_pxd000022` | AnnData (samples × proteins) | ProteomeXchange PXD000022 |
+| :func:`protein_pxd000279` | AnnData (samples × proteins) | ProteomeXchange PXD000279 (MaxQuant) |
 | :func:`protein_pxd000438` | AnnData (samples × proteins) | ProteomeXchange PXD000438 |
 | :func:`protein_dda_spikein` | DataFrame (MSstats long) | MSstats ``DDARawData`` |
 | :func:`protein_dia` | DataFrame (MSstats long) | MSstats ``DIARawData`` |
@@ -56,6 +57,28 @@ def protein_pxd000022(dir: str = "./data") -> "AnnData":
     """Load the PXD000022 label-free proteomics dataset (real, 2-group)."""
     import anndata as ad
     return ad.read_h5ad(_fetch("protein_pxd000022.h5ad", dir))
+
+
+@register_function(
+    aliases=["protein_pxd000279", "pxd000279", "蛋白组benchmark数据"],
+    category="datasets",
+    description=(
+        "Real label-free MaxQuant proteomics benchmark ProteomeXchange "
+        "PXD000279 — the spike-in dataset used by the DEqMS vignette. "
+        "6507 proteins × 6 samples, two groups H vs L (HeLa background "
+        "constant, E. coli spiked at a 3:1 ratio, 3 replicates each). "
+        "``var['peptides']`` holds the real per-protein peptide count "
+        "(needed by DEqMS); ``var['species']`` / ``var['is_spikein']`` "
+        "give the ground truth — E. coli proteins are truly "
+        "differential, human proteins are not. Returned as an AnnData "
+        "(samples × proteins, raw LFQ intensities, NaN = missing)."
+    ),
+    examples=["adata = ov.datasets.protein_pxd000279()"],
+)
+def protein_pxd000279(dir: str = "./data") -> "AnnData":
+    """Load the PXD000279 MaxQuant label-free benchmark (real, spike-in truth)."""
+    import anndata as ad
+    return ad.read_h5ad(_fetch("protein_pxd000279.h5ad", dir))
 
 
 @register_function(

@@ -101,6 +101,7 @@ from ._datasets import (
 from ._protein import (
     # Real proteomics datasets for the ov.protein tutorials
     protein_pxd000022,
+    protein_pxd000279,
     protein_pxd000438,
     protein_dda_spikein,
     protein_dia,
