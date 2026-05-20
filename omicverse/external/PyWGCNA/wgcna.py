@@ -289,13 +289,25 @@ class pyWGCNA(GeneExp):
         print("\tDone pre-processing..\n")
 
     def findModules(self, kwargs_function={'cutreeHybrid': {'deepSplit': 2, 'pamRespectsDendro': False}},
-                    colorlist=None):
+                    colorlist=None, max_block_size=None):
         """
         Clustering genes through original WGCNA pipeline: 1.pick soft threshold 2.calculating adjacency matrix 3.calculating TOM similarity matrix 4.cluster genes base of dissTOM 5.merge similar cluster dynamically
 
         :param kwargs_function: dictionary where the keys are the name of the function and values are the dictionary contains parameter you want to change within function
         :type kwargs_function: dict
+        :param max_block_size: if set and the gene count exceeds it, run the
+            memory-bounded blockwise pipeline (R WGCNA ``blockwiseModules``
+            style) instead of one full gene x gene adjacency/TOM. The single
+            pipeline holds ~5-6 dense copies of an N x N matrix, so for
+            N >> 10000 genes pass e.g. ``max_block_size=5000``.
+        :type max_block_size: int or None
         """
+        n_genes = self.datExpr.shape[1]
+        if max_block_size is not None and n_genes > max_block_size:
+            return self.calculate_blockwise_modules(
+                max_block_size=max_block_size, kwargs_function=kwargs_function
+            )
+
         print(f"{BOLD}{OKBLUE}Run pyWGCNA...{ENDC}")
 
         # Call the network topology analysis function
@@ -477,6 +489,190 @@ class pyWGCNA(GeneExp):
             plt.savefig(f"{self.outputPath}figures/eigenesgenes_genetree.{self.figureType}")
 
         print("\tDone running pyWGCNA..\n")
+
+    @staticmethod
+    def _blockwise_gene_clusters(expr_df, max_block_size, random_state=0):
+        """Partition genes into co-expression blocks, each <= max_block_size.
+
+        Genes are clustered by their z-scored expression profile and the gene
+        set is recursively k-means-split until every block fits the cap. This
+        keeps co-expressed genes together (so few modules straddle block
+        boundaries) while guaranteeing a per-block adjacency / TOM never
+        exceeds ``max_block_size**2`` entries — the whole point of the
+        blockwise approach. Returns a list of integer index arrays, sorted
+        largest block first (matching R ``blockwiseModules``).
+        """
+        from sklearn.cluster import KMeans
+
+        X = np.asarray(expr_df.to_numpy(), dtype=float).T          # genes x samples
+        mu = X.mean(axis=1, keepdims=True)
+        sd = X.std(axis=1, keepdims=True)
+        sd[sd == 0] = 1.0
+        Z = (X - mu) / sd                                          # z-score per gene
+        n_genes = Z.shape[0]
+
+        blocks = []
+        stack = [np.arange(n_genes)]
+        while stack:
+            idx = stack.pop()
+            if len(idx) <= max_block_size:
+                blocks.append(idx)
+                continue
+            k = int(np.ceil(len(idx) / max_block_size))
+            km = KMeans(n_clusters=k, random_state=random_state, n_init=10)
+            sub = km.fit_predict(Z[idx])
+            children = [idx[sub == c] for c in range(k) if (sub == c).any()]
+            # Degenerate k-means (no size reduction) -> hard consecutive chunks.
+            if max(len(c) for c in children) == len(idx):
+                children = [idx[i:i + max_block_size]
+                            for i in range(0, len(idx), max_block_size)]
+            stack.extend(children)
+
+        blocks.sort(key=len, reverse=True)
+        return blocks
+
+    def calculate_blockwise_modules(
+        self,
+        max_block_size=5000,
+        kwargs_function=None,
+        random_state=0,
+    ):
+        """Memory-bounded module detection — the R ``blockwiseModules`` analogue.
+
+        The standard pipeline (:meth:`findModules`) builds a dense gene x gene
+        adjacency *and* TOM; at peak ~5-6 copies of an ``N x N`` matrix exist,
+        so it OOMs for large gene counts (N ~ 20000 needs tens of GB).
+
+        This method instead:
+
+        1. picks the soft-threshold power on the full matrix, streaming the
+           gene-gene correlation in chunks of ``max_block_size`` so this step
+           too stays memory-bounded;
+        2. pre-clusters genes into co-expression blocks each <= ``max_block_size``;
+        3. builds the adjacency / TOM / gene tree and runs the dynamic tree cut
+           **one block at a time**, freeing each block's matrices before the
+           next — so peak memory is bounded by ``max_block_size**2``, not ``N**2``;
+        4. merges modules whose eigengenes are close *across all blocks*
+           (``mergeCloseModules`` works on the eigengene matrix, samples x
+           modules, which is small).
+
+        Populates the same attributes as :meth:`findModules`
+        (``datExpr.var['dynamicColors' / 'moduleColors' / 'moduleLabels']``,
+        ``MEs``, ``datME``, ``power``, ``sft``), plus ``self.blocks`` (the
+        per-block gene-index arrays) and ``self.blockGeneTrees`` (per-block
+        linkage matrices). ``self.geneTree`` is set to ``None`` — there is no
+        single global dendrogram in blockwise mode.
+
+        :param max_block_size: maximum genes per block (R default 5000).
+        :type max_block_size: int
+        :param kwargs_function: same per-function kwargs dict as findModules.
+        :type kwargs_function: dict
+        :param random_state: seed for the gene pre-clustering k-means.
+        :type random_state: int
+        """
+        from ...bulk._dynamicTree import cutreeHybrid
+
+        if kwargs_function is None:
+            kwargs_function = {'cutreeHybrid': {'deepSplit': 2,
+                                                'pamRespectsDendro': False}}
+        expr = self.datExpr.to_df()                       # samples x genes
+        genes = list(expr.columns)
+        n_genes = len(genes)
+        print(f"{BOLD}{OKBLUE}Run pyWGCNA (blockwise, max_block_size="
+              f"{max_block_size})...{ENDC}")
+
+        # --- 1. soft threshold ----------------------------------------------
+        # pickSoftThreshold streams genes in chunks of ``blockSize``; cap it at
+        # max_block_size so its peak footprint stays O(nGenes x max_block_size).
+        kwargs = dict(kwargs_function.get('pickSoftThreshold', {}))
+        kwargs.setdefault('blockSize', max_block_size)
+        self.power, self.sft = pyWGCNA.pickSoftThreshold(
+            expr, RsquaredCut=self.RsquaredCut, MeanCut=self.MeanCut,
+            powerVector=self.powers, networkType=self.networkType, **kwargs)
+
+        # --- 2. pre-cluster genes into size-capped blocks -------------------
+        blocks = pyWGCNA._blockwise_gene_clusters(expr, max_block_size,
+                                                  random_state=random_state)
+        print(f"{OKCYAN}Partitioned {n_genes} genes into {len(blocks)} "
+              f"block(s) of sizes {[len(b) for b in blocks]}.{ENDC}")
+
+        # --- 3. per-block adjacency -> TOM -> tree -> dynamic cut -----------
+        adj_kwargs = kwargs_function.get('adjacency', {})
+        tom_kwargs = kwargs_function.get('TOMsimilarity', {})
+        cut_kwargs = kwargs_function.get('cutreeHybrid',
+                                         {'deepSplit': 2, 'pamRespectsDendro': False})
+
+        block_labels = np.zeros(n_genes, dtype=int)       # 0 == grey / unassigned
+        self.blockGeneTrees = []
+        label_offset = 0
+        for bi, block_idx in enumerate(blocks):
+            block_genes = [genes[i] for i in block_idx]
+            sub = expr[block_genes]
+            print(f"{OKCYAN}  block {bi + 1}/{len(blocks)}: "
+                  f"{len(block_genes)} genes — adjacency/TOM/treecut...{ENDC}")
+            adj = pyWGCNA.adjacency(sub, power=self.power,
+                                    adjacencyType=self.networkType, **adj_kwargs)
+            tom = pyWGCNA.TOMsimilarity(np.asarray(adj), TOMType=self.TOMType,
+                                        **tom_kwargs)
+            diss = squareform(
+                (1 - np.asarray(tom)).round(decimals=8), checks=False)
+            tree = linkage(diss, method="average")
+            self.blockGeneTrees.append(tree)
+            cut = cutreeHybrid(tree, distM=diss,
+                               minClusterSize=self.minModuleSize, **cut_kwargs)
+            # cutreeHybrid returns a bare zeros-array (not the result dict)
+            # when a block has no merges below the cut, i.e. no modules —
+            # in that case every gene in the block is grey / unassigned.
+            if isinstance(cut, dict):
+                lab = np.asarray(cut['labels'], dtype=int)
+            else:
+                lab = np.zeros(len(block_idx), dtype=int)
+            # Offset non-grey labels so they are globally unique across blocks.
+            block_labels[block_idx] = np.where(lab > 0, lab + label_offset, 0)
+            if (lab > 0).any():
+                label_offset = int(block_labels.max())
+            del adj, tom, diss, tree                      # free per-block memory
+
+        # --- 4. combined dynamic colors ------------------------------------
+        self.dynamicMods = pd.DataFrame({"Name": block_labels,
+                                         "Value": block_labels})
+        kwargs = kwargs_function.get('labels2colors', {})
+        self.datExpr.var['dynamicColors'] = pyWGCNA.labels2colors(
+            labels=self.dynamicMods, **kwargs)
+
+        # --- 5. merge close modules across all blocks ----------------------
+        # mergeCloseModules operates on the eigengene matrix (samples x
+        # modules) — small, so this step is memory-safe regardless of N.
+        n_mod = len(set(self.datExpr.var['dynamicColors']) - {"grey"})
+        if n_mod >= 2:
+            kwargs = kwargs_function.get('mergeCloseModules', {})
+            merge = pyWGCNA.mergeCloseModules(
+                expr, self.datExpr.var['dynamicColors'],
+                cutHeight=self.MEDissThres, **kwargs)
+            self.datExpr.var['moduleColors'] = merge['colors']
+        else:
+            self.datExpr.var['moduleColors'] = list(
+                self.datExpr.var['dynamicColors'])
+
+        colorOrder = np.unique(self.datExpr.var['moduleColors']).tolist()
+        self.datExpr.var['moduleLabels'] = [
+            colorOrder.index(x) for x in self.datExpr.var['moduleColors']]
+
+        # --- 6. module eigengenes ------------------------------------------
+        kwargs = kwargs_function.get('moduleEigengenes', {})
+        self.datME = pyWGCNA.moduleEigengenes(
+            expr, self.datExpr.var['moduleColors'], **kwargs)['eigengenes']
+        if 'MEgrey' in self.datME.columns:
+            self.datME.drop(['MEgrey'], axis=1, inplace=True)
+        kwargs = kwargs_function.get('orderMEs', {})
+        self.MEs = pyWGCNA.orderMEs(self.datME, **kwargs)
+
+        # No single global dendrogram in blockwise mode.
+        self.geneTree = None
+        self.blocks = blocks
+        print(f"{OKCYAN}Blockwise pyWGCNA done — "
+              f"{len(colorOrder)} modules across {len(blocks)} blocks.{ENDC}")
+        return self
 
     def runWGCNA(self):
         """
@@ -1295,8 +1491,19 @@ class pyWGCNA(GeneExp):
                 corOptions['y'] = [data.iloc[:, useGenes]]
                 if weights is not None:
                     corOptions['weights.y'] = [weights.iloc[:, useGenes]]
-                corx = np.corrcoef(corOptions.x[0], corOptions.y[0], rowvar=False)
-                corx = corx[0:corOptions.x[0].shape[1], useGenes]
+                # Direct cross-correlation cor(all genes, this block): the
+                # standardised dot product equals Pearson r exactly, but its
+                # peak footprint is (nGenes x blockSize) instead of the
+                # (nGenes + blockSize)^2 matrix np.corrcoef would build over
+                # the concatenation — which is what makes large gene counts OOM.
+                _Xf = np.asarray(corOptions.x[0], dtype=float)   # samples x nGenes
+                _Yb = np.asarray(corOptions.y[0], dtype=float)   # samples x block
+                _Xc = _Xf - _Xf.mean(axis=0, keepdims=True)
+                _Yc = _Yb - _Yb.mean(axis=0, keepdims=True)
+                _Xn = _Xc / np.sqrt((_Xc ** 2).sum(axis=0, keepdims=True))
+                _Yn = _Yc / np.sqrt((_Yc ** 2).sum(axis=0, keepdims=True))
+                corx = _Xn.T @ _Yn                               # nGenes x block
+                del _Xf, _Yb, _Xc, _Yc, _Xn, _Yn
                 if intType == 0:
                     corx = abs(corx)
                 elif intType == 1:

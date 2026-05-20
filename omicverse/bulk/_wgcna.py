@@ -45,9 +45,11 @@ from .._registry import register_function
     examples=[
         "import omicverse as ov, pandas as pd",
         "data = pd.read_csv('expressionList.csv', index_col=0)  # rows=samples, cols=genes",
-        "wgcna = ov.bulk.pyWGCNA(name='MyAnalysis', species='mus musculus', geneExp=data.T, save=True)",
+        "wgcna = ov.bulk.pyWGCNA(name='MyAnalysis', species='mus musculus', geneExp=data, save=True)",
         "wgcna.preprocess()       # filter low-expressed genes / outlier samples",
         "wgcna.findModules()      # soft-threshold + dynamic tree cut",
+        "# for large gene counts, run the memory-bounded blockwise pipeline:",
+        "wgcna.findModules(max_block_size=5000)  # R blockwiseModules analogue",
         "wgcna.analyseWGCNA()     # module-trait correlations against sample metadata",
     ],
     related=["ov.bulk.readWGCNA", "ov.bulk.pyDEG", "ov.bulk.geneset_enrichment"],
@@ -78,9 +80,11 @@ class pyWGCNA:
     species : str
         Organism (e.g. ``"mus musculus"``, ``"homo sapiens"``).
     geneExp : pandas.DataFrame
-        Expression matrix shaped (genes × samples). Sample identifiers are
-        the column names, gene identifiers are the index. Note this is the
-        TRANSPOSE of the typical samples × genes layout used by AnnData.
+        Expression matrix shaped (samples × genes): sample identifiers are
+        the row index, gene identifiers are the column names — the same
+        orientation AnnData uses. (The upstream PyWGCNA docstring claims
+        the opposite, but its constructor in ``geneExp.py`` treats rows as
+        samples and columns as genes, so pass samples × genes.)
     TPMcutoff : float, default 1
         Per-gene TPM threshold; genes whose maximum across samples falls
         below this are dropped during ``preprocess``.
@@ -95,8 +99,8 @@ class pyWGCNA:
 
     Notes
     -----
-    Wide expression CSVs are usually shaped samples × genes; remember to
-    pass ``data.T`` so the constructor receives genes × samples.
+    Expression CSVs are usually already shaped samples × genes (rows =
+    samples, columns = genes); pass them directly — do **not** transpose.
 
     Methods (call in this order — each step populates the attributes
     listed under it). Use the high-level :meth:`runWGCNA` to chain
@@ -118,6 +122,12 @@ class pyWGCNA:
       ``self.datExpr.var['moduleLabels']``, ``self.MEs``, ``self.datME``.
     - ``findModules()`` — convenience that runs the soft-threshold +
       adjacency + TOM + tree + module merge as one call (preferred).
+      Pass ``findModules(max_block_size=5000)`` for large gene counts:
+      this switches to the memory-bounded blockwise pipeline (the R
+      WGCNA ``blockwiseModules`` analogue) — genes are pre-clustered
+      into size-capped blocks and the dense gene×gene adjacency / TOM
+      is built one block at a time, so peak memory is ``max_block_size²``
+      instead of ``N²``. Without it, ``N >> 10000`` genes can OOM.
     - ``runWGCNA()`` — runs ``preprocess()`` then ``findModules()``.
     - ``analyseWGCNA(geneList=None)`` — module–trait correlation; sets
       ``self.moduleTraitCor`` and ``self.moduleTraitPvalue``.
@@ -170,16 +180,16 @@ class pyWGCNA:
     Examples
     --------
     >>> import pandas as pd, omicverse as ov
-    >>> data = pd.read_csv('expressionList.csv', index_col=0)
+    >>> data = pd.read_csv('expressionList.csv', index_col=0)  # samples × genes
     >>> wgcna = ov.bulk.pyWGCNA(
     ...     name='5xFAD',
     ...     species='mus musculus',
-    ...     geneExp=data.T,            # transpose to genes × samples
+    ...     geneExp=data,             # rows = samples, columns = genes
     ...     TPMcutoff=1,
     ...     networkType='signed hybrid',
     ... )
     >>> wgcna.preprocess()
-    >>> wgcna.findModules()
+    >>> wgcna.findModules()              # or findModules(max_block_size=5000)
     """
 
     def __new__(
