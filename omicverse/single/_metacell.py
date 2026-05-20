@@ -65,8 +65,26 @@ def _legacy_seacells_kwargs(kwargs: dict) -> dict:
     category="single",
     description=(
         "Construct metacells from single-cell data. 7 backends: seacells, "
-        "metaq, mc2, supercell, kmeans, random, geosketch."
+        "metaq, mc2, supercell, kmeans, random, geosketch. Writes a unified "
+        "schema (obs['metacell_id'], uns['metacell']) consumed by all "
+        "downstream tools."
     ),
+    requires={
+        "obsm": [
+            "low-dim embedding via use_rep, e.g. X_pca "
+            "(graph backends: seacells / supercell / kmeans / geosketch)",
+        ],
+        "layers": [
+            "raw counts via layer, e.g. counts "
+            "(deep backends: metaq / mc2)",
+        ],
+    },
+    produces={
+        "obs": ["metacell_id", "metacell_conf"],
+        "obsm": ["X_metacell", "metacell_soft"],
+        "uns": ["metacell"],
+    },
+    auto_fix="none",
     examples=[
         "# SEACells (legacy default)",
         "mc = ov.single.MetaCell(adata, use_rep='X_pca', n_metacells=200).fit()",
@@ -616,7 +634,17 @@ class MetaCell(object):
 @register_function(
     aliases=["选择最优粒度", "optimize_metacell_granularity", "γ优化", "granularity_optimize"],
     category="single",
-    description="Sweep n_metacells values and pick the best via mcRigor's Score.",
+    description=(
+        "Sweep n_metacells values and pick the best granularity via mcRigor's "
+        "Score (dubious-rate / zero-rate trade-off). Returns (best_n, sweep)."
+    ),
+    requires={
+        "obsm": ["low-dim embedding via use_rep, e.g. X_pca"],
+        "layers": ["log-normalised expression via layer_lognorm (optional; "
+                   "defaults to adata.X)"],
+    },
+    produces={},
+    auto_fix="none",
     examples=[
         "best_n, sweep = ov.single.optimize_granularity(adata, method='metaq',",
         "    n_metacells_grid=[50, 100, 200, 500, 1000], weight=0.5)",
@@ -670,8 +698,16 @@ def optimize_granularity(
     category="single",
     description=(
         "Honest baseline comparison: run multiple metacell backends on the "
-        "same adata and report runtime + rigor + purity side-by-side."
+        "same adata and report runtime + rigor + purity side-by-side. "
+        "Returns a per-backend benchmark DataFrame (adata is not modified)."
     ),
+    requires={
+        "obsm": ["low-dim embedding via use_rep, e.g. X_pca"],
+        "layers": ["raw counts via layer (e.g. counts)",
+                   "log-normalised expression via layer_lognorm"],
+    },
+    produces={},
+    auto_fix="none",
     examples=[
         "df = ov.single.compare_metacell_backends(",
         "    adata, backends=['seacells', 'metaq', 'kmeans', 'random', 'geosketch'],",
