@@ -175,10 +175,35 @@ tests = [
   "scikit-bio>=0.6",
   "ete3",
   "pydeseq2>=0.4.1",
+  # ov.protein test dependencies — the standalone proteomics backends
+  # exercised by tests/test_protein.py.
+  "pyimputelcmd>=0.1.1",
+  "pydeqms>=0.1.1",
+  "pyproda>=0.1.1",
+  "pymsstats>=0.3.0",
+  "pyolinkanalyze>=0.2.1",
+  "scikit-misc>=0.3",
 ]
 
 mcp = [
   "mcp>=1.0; python_version >= '3.10'",
+]
+
+# Proteomics backends for ``ov.protein`` — pure-Python ports of the
+# canonical Bioconductor / CRAN proteomics R packages. Install via:
+#   pip install omicverse[protein]
+# Enables the full bulk LC-MS/MS + Olink workflow: imputation
+# (imputeLCMD), peptide-count-aware DE (DEqMS), MNAR probabilistic DE
+# (proDA), DDA/DIA pipeline (MSstats), and Olink NPX analysis
+# (OlinkAnalyze).
+protein = [
+  "pyimputelcmd>=0.1.1",   # Bioconductor imputeLCMD — left-censored imputation
+  "pydeqms>=0.1.1",        # Bioconductor DEqMS — peptide-count moderated t
+  "pyproda>=0.1.1",        # Bioconductor proDA — MNAR probabilistic DE
+  "pymsstats>=0.3.0",      # Bioconductor MSstats — DDA/DIA pipeline
+  "pyolinkanalyze>=0.2.1", # CRAN OlinkAnalyze — Olink NPX analysis
+  "scikit-misc>=0.3",      # R-faithful loess (DEqMS variance prior)
+  "statsmodels>=0.14",     # LMM / ANOVA / ordinal regression backends
 ]
 
 
