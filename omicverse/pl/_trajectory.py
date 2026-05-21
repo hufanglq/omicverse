@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -134,6 +135,15 @@ def _basis_key(adata, basis):
     raise KeyError(f"`{basis}` was not found in `adata.obsm`.")
 
 
+def _is_fitted_trajectory_wrapper(obj):
+    return (
+        hasattr(obj, "adata")
+        and hasattr(obj, "model")
+        and hasattr(obj, "basis")
+        and hasattr(obj, "cluster_key")
+    )
+
+
 def _normalize_method(adata, method="auto", model=None):
     if method is None or method == "auto":
         if "monocle" in adata.uns:
@@ -252,6 +262,14 @@ def _build_categorical_legend(
     return legend
 
 
+def _legend_is_enabled(anchor):
+    return not (
+        anchor is False
+        or anchor is None
+        or (isinstance(anchor, str) and anchor.lower() in {"none", "off", "false"})
+    )
+
+
 def _add_axis_padding(ax, coords_x, coords_y, frac=0.04):
     if len(coords_x) == 0 or len(coords_y) == 0:
         return
@@ -261,6 +279,30 @@ def _add_axis_padding(ax, coords_x, coords_y, frac=0.04):
     dy = dy if dy > 0 else 1.0
     ax.set_xlim(np.nanmin(coords_x) - dx * frac, np.nanmax(coords_x) + dx * frac)
     ax.set_ylim(np.nanmin(coords_y) - dy * frac, np.nanmax(coords_y) + dy * frac)
+
+
+def _expand_limits_to_points(ax, points, frac=0.04):
+    points = np.asarray(points, dtype=float)
+    if points.size == 0:
+        return
+    points = points.reshape(-1, 2)
+    points = points[np.isfinite(points).all(axis=1)]
+    if len(points) == 0:
+        return
+
+    xlim = ax.get_xlim()
+    ylim = ax.get_ylim()
+    xmin = min(xlim[0], xlim[1], np.nanmin(points[:, 0]))
+    xmax = max(xlim[0], xlim[1], np.nanmax(points[:, 0]))
+    ymin = min(ylim[0], ylim[1], np.nanmin(points[:, 1]))
+    ymax = max(ylim[0], ylim[1], np.nanmax(points[:, 1]))
+    dx = xmax - xmin if xmax > xmin else 1.0
+    dy = ymax - ymin if ymax > ymin else 1.0
+    ax.set_xlim(xmin - dx * frac, xmax + dx * frac)
+    if ax.yaxis_inverted():
+        ax.set_ylim(ymax + dy * frac, ymin - dy * frac)
+    else:
+        ax.set_ylim(ymin - dy * frac, ymax + dy * frac)
 
 
 def _add_branch_point(
@@ -881,6 +923,2088 @@ def trajectory_overlay(
     )
 
 
+def _resolve_stavia_inputs(
+    stavia_or_adata,
+    *,
+    model=None,
+    basis=None,
+    cluster_key=None,
+    key="stavia",
+    require_cluster=True,
+):
+    stavia = None
+    raw_model = model
+    if _is_fitted_trajectory_wrapper(stavia_or_adata):
+        stavia = stavia_or_adata
+        adata = stavia.adata
+    else:
+        adata = stavia_or_adata
+        if _is_fitted_trajectory_wrapper(model):
+            stavia = model
+            raw_model = stavia.model
+            adata = stavia.adata
+
+    summary = getattr(adata, "uns", {}).get(key, {})
+    if stavia is not None:
+        raw_model = stavia.model if raw_model is None else raw_model
+        basis = stavia.basis if basis is None else basis
+        cluster_key = stavia.cluster_key if cluster_key is None else cluster_key
+        if hasattr(stavia, "_effective_rw2_mode"):
+            rw2_mode = bool(stavia._effective_rw2_mode())
+        else:
+            rw2_mode = bool(summary.get("params", {}).get("RW2_mode", False))
+    else:
+        rw2_mode = bool(summary.get("params", {}).get("RW2_mode", False))
+
+    if raw_model is None:
+        raise ValueError(
+            "`ov.pl.*(..., method='stavia')` requires a fitted `ov.single.StaVIA` "
+            "object or `model=stavia.model`; AnnData stores StaVIA summaries "
+            "but not the backend model needed for native StaVIA visualizations."
+        )
+
+    basis = basis if basis is not None else summary.get("basis", "X_umap")
+    cluster_key = (
+        cluster_key if cluster_key is not None else summary.get("cluster_key")
+    )
+    if cluster_key is None and require_cluster:
+        raise ValueError(
+            "`cluster_key` is required when it cannot be inferred from the "
+            "StaVIA wrapper or `adata.uns[key]['cluster_key']`."
+        )
+    if cluster_key is not None and cluster_key not in adata.obs:
+        raise KeyError(f"`cluster_key={cluster_key!r}` was not found in `adata.obs`.")
+
+    basis = _basis_key(adata, basis)
+    return adata, raw_model, basis, cluster_key, rw2_mode
+
+
+def _draw_stavia_categorical_points(
+    ax,
+    embedding_coords,
+    values,
+    *,
+    adata=None,
+    color_key=None,
+    color_dict=None,
+    cmap="rainbow",
+    scatter_size=500,
+    scatter_alpha=0.5,
+    marker_edgewidth=0.1,
+    show_text_labels=True,
+    text_fontsize=8,
+    show_legend=False,
+    legend_loc="right margin",
+    legend_fontsize=None,
+):
+    values = pd.Series(values).astype(str)
+    categories = list(dict.fromkeys(values.tolist()))
+    if color_dict is None and adata is not None and color_key is not None:
+        color_map = {
+            str(key): value
+            for key, value in _get_obs_color_map(adata, color_key, adata.obs[color_key].values).items()
+        }
+    elif color_dict is not None:
+        color_map = {str(key): value for key, value in color_dict.items()}
+    else:
+        cmap_obj = plt.get_cmap(cmap)
+        stops = np.linspace(0, 1, max(len(categories), 1))
+        color_map = {cat: cmap_obj(stops[idx]) for idx, cat in enumerate(categories)}
+
+    for category in categories:
+        where = np.where(values.to_numpy() == category)[0]
+        if len(where) == 0:
+            continue
+        ax.scatter(
+            embedding_coords[where, 0],
+            embedding_coords[where, 1],
+            label=category,
+            c=[color_map.get(category, "#808080")],
+            alpha=scatter_alpha,
+            zorder=0,
+            s=scatter_size,
+            linewidths=marker_edgewidth,
+        )
+        if show_text_labels:
+            x_mean = np.nanmean(embedding_coords[where, 0])
+            y_mean = np.nanmean(embedding_coords[where, 1])
+            ax.text(
+                x_mean,
+                y_mean,
+                str(category),
+                fontsize=text_fontsize,
+                zorder=4,
+                path_effects=[pe.withStroke(linewidth=1, foreground="w")],
+                weight="bold",
+            )
+    if show_legend and _legend_is_enabled(legend_loc):
+        _build_categorical_legend(
+            ax,
+            color_map,
+            title=color_key,
+            anchor=legend_loc,
+            fontsize=legend_fontsize,
+        )
+
+
+def _plot_stavia_stream(
+    stavia_or_adata,
+    *,
+    model=None,
+    basis=None,
+    cluster_key=None,
+    key="stavia",
+    x=0,
+    y=1,
+    density_grid=0.5,
+    arrow_size=0.7,
+    arrow_color="k",
+    color_dict=None,
+    arrow_style="-|>",
+    max_length=4,
+    linewidth=1,
+    min_mass=1,
+    cutoff_perc=5,
+    scatter_size=500,
+    scatter_alpha=0.5,
+    marker_edgewidth=0.1,
+    density_stream=2,
+    smooth_transition=1,
+    smooth_grid=0.5,
+    color_scheme="annotation",
+    add_outline_clusters=False,
+    cluster_outline_edgewidth=0.001,
+    gp_color="white",
+    bg_color="black",
+    dpi=None,
+    title="Streamplot",
+    b_bias=20,
+    n_neighbors_velocity_grid=None,
+    labels=None,
+    use_sequentially_augmented=False,
+    cmap="rainbow",
+    show_text_labels=True,
+    text_fontsize=8,
+    show_legend=False,
+    figsize=None,
+    frameon=None,
+    ax=None,
+    show=None,
+    save=None,
+):
+    """Plot StaVIA/VIA streamlines with OV-level figure control."""
+    from ._animation_lines import compute_velocity_on_grid
+
+    adata, raw_model, basis, cluster_key, _ = _resolve_stavia_inputs(
+        stavia_or_adata,
+        model=model,
+        basis=basis,
+        cluster_key=cluster_key,
+        key=key,
+    )
+    embedding_coords = np.asarray(adata.obsm[basis])[:, [x, y]]
+
+    velocity = raw_model._velocity_embedding(
+        embedding_coords,
+        smooth_transition,
+        b=b_bias,
+        use_sequentially_augmented=use_sequentially_augmented,
+    )
+    velocity = np.asarray(velocity, dtype=float) * 20
+
+    grid_neighbors = n_neighbors_velocity_grid
+    if grid_neighbors is None:
+        grid_neighbors = max(2, min(int(adata.n_obs / 50), 20))
+    grid_neighbors = max(1, min(int(grid_neighbors), adata.n_obs))
+    X_grid, V_grid = compute_velocity_on_grid(
+        X_emb=embedding_coords,
+        V_emb=velocity,
+        density=density_grid,
+        smooth=smooth_grid,
+        min_mass=min_mass,
+        autoscale=False,
+        adjust_for_stream=True,
+        cutoff_perc=cutoff_perc,
+        n_neighbors=grid_neighbors,
+    )
+
+    lengths = np.sqrt((V_grid ** 2).sum(0))
+    stream_linewidth = 1 if linewidth is None else linewidth
+    finite_lengths = lengths[np.isfinite(lengths)]
+    if finite_lengths.size > 0 and np.nanmax(finite_lengths) > 0:
+        stream_linewidth = stream_linewidth * 2 * lengths / np.nanmax(finite_lengths)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    else:
+        fig = ax.figure
+    ax.grid(False)
+    ax.streamplot(
+        X_grid[0],
+        X_grid[1],
+        V_grid[0],
+        V_grid[1],
+        color=arrow_color,
+        arrowsize=arrow_size,
+        arrowstyle=arrow_style,
+        zorder=3,
+        linewidth=stream_linewidth,
+        density=density_stream,
+        maxlength=max_length,
+    )
+
+    if add_outline_clusters:
+        gp_size = (2 * (scatter_size * cluster_outline_edgewidth * 0.1) + 0.1 * scatter_size) ** 2
+        bg_size = (2 * (scatter_size * cluster_outline_edgewidth) + np.sqrt(gp_size)) ** 2
+        ax.scatter(embedding_coords[:, 0], embedding_coords[:, 1], s=bg_size, marker=".", c=bg_color, zorder=-2)
+        ax.scatter(embedding_coords[:, 0], embedding_coords[:, 1], s=gp_size, marker=".", c=gp_color, zorder=-1)
+
+    if labels is None:
+        if color_scheme == "time":
+            ax.scatter(
+                embedding_coords[:, 0],
+                embedding_coords[:, 1],
+                c=raw_model.single_cell_pt_markov,
+                alpha=scatter_alpha,
+                zorder=0,
+                s=scatter_size,
+                linewidths=marker_edgewidth,
+                cmap="viridis_r",
+            )
+        elif color_scheme == "annotation":
+            _draw_stavia_categorical_points(
+                ax,
+                embedding_coords,
+                adata.obs[cluster_key],
+                adata=adata,
+                color_key=cluster_key,
+                color_dict=color_dict,
+                cmap=cmap,
+                scatter_size=scatter_size,
+                scatter_alpha=scatter_alpha,
+                marker_edgewidth=marker_edgewidth,
+                show_text_labels=show_text_labels,
+                text_fontsize=text_fontsize,
+                show_legend=show_legend,
+            )
+        elif color_scheme == "cluster":
+            _draw_stavia_categorical_points(
+                ax,
+                embedding_coords,
+                getattr(raw_model, "labels"),
+                color_dict=color_dict,
+                cmap=cmap,
+                scatter_size=scatter_size,
+                scatter_alpha=scatter_alpha,
+                marker_edgewidth=marker_edgewidth,
+                show_text_labels=show_text_labels,
+                text_fontsize=text_fontsize,
+                show_legend=show_legend,
+            )
+        else:
+            raise ValueError("`color_scheme` must be 'annotation', 'cluster', or 'time' when `labels` is not provided.")
+    else:
+        labels = np.asarray(labels)
+        if labels.dtype.kind in {"U", "S", "O", "b"}:
+            _draw_stavia_categorical_points(
+                ax,
+                embedding_coords,
+                labels,
+                color_dict=color_dict,
+                cmap=cmap,
+                scatter_size=scatter_size,
+                scatter_alpha=scatter_alpha,
+                marker_edgewidth=marker_edgewidth,
+                show_text_labels=show_text_labels,
+                text_fontsize=text_fontsize,
+                show_legend=show_legend,
+            )
+        else:
+            ax.scatter(
+                embedding_coords[:, 0],
+                embedding_coords[:, 1],
+                c=labels,
+                alpha=scatter_alpha,
+                zorder=0,
+                s=scatter_size,
+                linewidths=marker_edgewidth,
+                cmap=cmap,
+            )
+
+    if frameon in {False, "none", "off", None}:
+        ax.axis("off")
+    elif frameon == "small":
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+    if title is not None:
+        ax.set_title(title)
+    if save:
+        fig.savefig(save, dpi=dpi, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig, ax
+
+
+def _weighted_pseudotime_direction(coords, pseudotime, i, neigh, weights, *, b_bias):
+    if len(neigh) == 0:
+        return np.zeros(2, dtype=float)
+    deltas = coords[neigh] - coords[i]
+    norms = np.linalg.norm(deltas, axis=1)
+    valid = norms > 1e-12
+    if not np.any(valid):
+        return np.zeros(2, dtype=float)
+    deltas = deltas[valid] / norms[valid, None]
+    weights = np.asarray(weights, dtype=float)[valid]
+    time_delta = pseudotime[neigh][valid] - pseudotime[i]
+    bias = 1.0 / (1.0 + np.exp(-float(b_bias) * time_delta))
+    directed_weight = weights * bias
+    total = float(np.sum(directed_weight))
+    if total <= 0:
+        return np.zeros(2, dtype=float)
+    return directed_weight.dot(deltas) / total
+
+
+def _pseudotime_velocity_on_embedding(
+    adata,
+    *,
+    basis,
+    pseudotime_key,
+    neighbors_key=None,
+    n_neighbors=15,
+    b_bias=20.0,
+    x=0,
+    y=1,
+):
+    if pseudotime_key is None:
+        raise ValueError("`pseudotime_key` is required for `method='pseudotime'`.")
+    if pseudotime_key not in adata.obs:
+        raise KeyError(f"`pseudotime_key={pseudotime_key!r}` was not found in `adata.obs`.")
+
+    basis = _basis_key(adata, basis)
+    coords = np.asarray(adata.obsm[basis])[:, [x, y]]
+    pseudotime = pd.to_numeric(adata.obs[pseudotime_key], errors="coerce").to_numpy(dtype=float)
+    if not np.all(np.isfinite(pseudotime)):
+        raise ValueError(f"`adata.obs[{pseudotime_key!r}]` must contain finite numeric values.")
+
+    pt_min = float(np.nanmin(pseudotime))
+    pt_range = float(np.nanmax(pseudotime) - pt_min)
+    pseudotime = (pseudotime - pt_min) / pt_range if pt_range > 0 else np.zeros_like(pseudotime)
+
+    graph = None
+    if neighbors_key is not None:
+        graph_key = f"{neighbors_key}_connectivities"
+        if graph_key in adata.obsp:
+            graph = adata.obsp[graph_key]
+        elif neighbors_key in adata.obsp:
+            graph = adata.obsp[neighbors_key]
+        else:
+            raise KeyError(f"`neighbors_key={neighbors_key!r}` was not found in `adata.obsp`.")
+    elif "connectivities" in adata.obsp:
+        graph = adata.obsp["connectivities"]
+
+    velocity = np.zeros_like(coords, dtype=float)
+    if graph is None:
+        from sklearn.neighbors import NearestNeighbors
+
+        k = max(2, min(int(n_neighbors) + 1, adata.n_obs))
+        nn = NearestNeighbors(n_neighbors=k)
+        nn.fit(coords)
+        distances, indices = nn.kneighbors(coords)
+        for i in range(adata.n_obs):
+            neigh = indices[i, 1:]
+            weights = 1.0 / np.maximum(distances[i, 1:], 1e-12)
+            velocity[i] = _weighted_pseudotime_direction(
+                coords, pseudotime, i, neigh, weights, b_bias=b_bias
+            )
+    else:
+        graph = graph.tocsr() if sparse.issparse(graph) else sparse.csr_matrix(graph)
+        for i in range(adata.n_obs):
+            start, end = graph.indptr[i], graph.indptr[i + 1]
+            neigh = graph.indices[start:end]
+            weights = graph.data[start:end]
+            mask = neigh != i
+            velocity[i] = _weighted_pseudotime_direction(
+                coords, pseudotime, i, neigh[mask], weights[mask], b_bias=b_bias
+            )
+    return coords, velocity
+
+
+@register_function(
+    aliases=[
+        "plot_stream",
+        "trajectory stream plot",
+        "trajectory streamplot",
+        "轨迹流图",
+        "通用轨迹流图",
+    ],
+    category="pl",
+    description=(
+        "Plot trajectory streamlines from StaVIA/VIA models, generic "
+        "pseudotime results, or embedding-level velocity vectors."
+    ),
+    examples=[
+        "ov.pl.plot_stream(stavia, method='stavia', density_grid=0.8)",
+        "ov.pl.plot_stream(adata, method='pseudotime', pseudotime_key='palantir_pseudotime')",
+        "ov.pl.plot_stream(adata, method='velocity', velocity_key='velocity_S')",
+    ],
+    related=[
+        "single.StaVIA",
+        "pl.trajectory",
+        "pl.branch_streamplot",
+        "pl.add_streamplot",
+        "pl.embedding",
+    ],
+)
+def plot_stream(
+    data,
+    *,
+    method="auto",
+    model=None,
+    basis=None,
+    cluster_key=None,
+    key="stavia",
+    pseudotime_key=None,
+    velocity_key="velocity_S",
+    color=None,
+    x=0,
+    y=1,
+    neighbors_key=None,
+    n_neighbors=15,
+    b_bias=20.0,
+    density_grid=0.8,
+    smooth_grid=0.5,
+    min_mass=1,
+    cutoff_perc=5,
+    arrow_color="k",
+    arrow_size=0.7,
+    arrow_style="-|>",
+    density_stream=2,
+    linewidth=1,
+    max_length=4,
+    scatter_size=30,
+    scatter_alpha=0.5,
+    frameon=None,
+    figsize=(5, 5),
+    ax=None,
+    show=None,
+    save=None,
+    dpi=150,
+    **kwargs,
+):
+    """Plot streamlines through a method-aware OV interface.
+
+    ``method='stavia'`` uses the fitted StaVIA/VIA backend transition matrix.
+    ``method='pseudotime'`` builds a local pseudotime-directed vector field
+    from any numeric ``adata.obs[pseudotime_key]`` result. ``method='velocity'``
+    overlays an existing embedding-level velocity field from ``adata.obsm``.
+    """
+    method = "auto" if method is None else str(method).lower()
+    if method == "auto":
+        summary = getattr(data, "uns", {}).get(key, {})
+        if _is_fitted_trajectory_wrapper(data) or _is_fitted_trajectory_wrapper(model) or model is not None:
+            method = "stavia"
+        elif pseudotime_key is not None:
+            method = "pseudotime"
+        elif hasattr(data, "obsm") and velocity_key in data.obsm:
+            method = "velocity"
+        elif summary.get("method") == "StaVIA":
+            method = "stavia"
+        else:
+            raise ValueError(
+                "Could not infer streamplot method. Pass `method='stavia'`, "
+                "`method='pseudotime'`, or `method='velocity'`."
+            )
+
+    if method in {"stavia", "via"}:
+        stavia_kwargs = dict(kwargs)
+        stavia_kwargs.setdefault("density_grid", density_grid)
+        stavia_kwargs.setdefault("smooth_grid", smooth_grid)
+        stavia_kwargs.setdefault("min_mass", min_mass)
+        stavia_kwargs.setdefault("cutoff_perc", cutoff_perc)
+        stavia_kwargs.setdefault("arrow_color", arrow_color)
+        stavia_kwargs.setdefault("arrow_size", arrow_size)
+        stavia_kwargs.setdefault("arrow_style", arrow_style)
+        stavia_kwargs.setdefault("density_stream", density_stream)
+        stavia_kwargs.setdefault("linewidth", linewidth)
+        stavia_kwargs.setdefault("max_length", max_length)
+        stavia_kwargs.setdefault("scatter_size", scatter_size)
+        stavia_kwargs.setdefault("scatter_alpha", scatter_alpha)
+        stavia_kwargs.setdefault("dpi", dpi)
+        stavia_kwargs.setdefault("figsize", figsize)
+        stavia_kwargs.setdefault("frameon", frameon)
+        stavia_kwargs.setdefault("ax", ax)
+        stavia_kwargs.setdefault("show", show)
+        stavia_kwargs.setdefault("save", save)
+        return _plot_stavia_stream(
+            data,
+            model=model,
+            basis=basis,
+            cluster_key=cluster_key,
+            key=key,
+            x=x,
+            y=y,
+            **stavia_kwargs,
+        )
+
+    if method == "pseudotime":
+        from ._animation_lines import compute_velocity_on_grid
+
+        basis = "X_umap" if basis is None else basis
+        coords, velocity = _pseudotime_velocity_on_embedding(
+            data,
+            basis=basis,
+            pseudotime_key=pseudotime_key,
+            neighbors_key=neighbors_key,
+            n_neighbors=n_neighbors,
+            b_bias=b_bias,
+            x=x,
+            y=y,
+        )
+        X_grid, V_grid = compute_velocity_on_grid(
+            X_emb=coords,
+            V_emb=velocity,
+            density=density_grid,
+            smooth=smooth_grid,
+            n_neighbors=max(2, min(int(n_neighbors), data.n_obs)),
+            min_mass=min_mass,
+            autoscale=False,
+            adjust_for_stream=True,
+            cutoff_perc=cutoff_perc,
+        )
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+            if color is not None:
+                embedding(
+                    data,
+                    basis=basis,
+                    color=color,
+                    ax=ax,
+                    size=scatter_size,
+                    alpha=scatter_alpha,
+                    frameon="small" if frameon is None else frameon,
+                    show=False,
+                    **kwargs,
+                )
+            else:
+                ax.scatter(
+                    coords[:, 0],
+                    coords[:, 1],
+                    s=scatter_size,
+                    alpha=scatter_alpha,
+                    linewidths=0,
+                    zorder=0,
+                )
+        else:
+            fig = ax.figure
+
+        lengths = np.sqrt((V_grid ** 2).sum(0))
+        plot_linewidth = 1 if linewidth is None else linewidth
+        finite_lengths = lengths[np.isfinite(lengths)]
+        if finite_lengths.size > 0 and np.nanmax(finite_lengths) > 0:
+            plot_linewidth = plot_linewidth * 2 * lengths / np.nanmax(finite_lengths)
+        ax.streamplot(
+            X_grid[0],
+            X_grid[1],
+            V_grid[0],
+            V_grid[1],
+            color=arrow_color,
+            arrowsize=arrow_size,
+            arrowstyle=arrow_style,
+            linewidth=plot_linewidth,
+            density=density_stream,
+            maxlength=max_length,
+            zorder=3,
+        )
+        if save:
+            fig.savefig(save, dpi=dpi, bbox_inches="tight")
+        if show:
+            plt.show()
+        return fig, ax
+
+    if method in {"velocity", "rna_velocity", "scvelo"}:
+        from ._animation_lines import add_streamplot
+
+        basis = "X_umap" if basis is None else _basis_key(data, basis)
+        if velocity_key not in data.obsm:
+            raise KeyError(f"`velocity_key={velocity_key!r}` was not found in `adata.obsm`.")
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+            if color is not None:
+                embedding(
+                    data,
+                    basis=basis,
+                    color=color,
+                    ax=ax,
+                    size=scatter_size,
+                    alpha=scatter_alpha,
+                    frameon="small" if frameon is None else frameon,
+                    show=False,
+                    **kwargs,
+                )
+            else:
+                coords = np.asarray(data.obsm[basis])[:, [x, y]]
+                ax.scatter(
+                    coords[:, 0],
+                    coords[:, 1],
+                    s=scatter_size,
+                    alpha=scatter_alpha,
+                    linewidths=0,
+                    zorder=0,
+                )
+        else:
+            fig = ax.figure
+        add_streamplot(
+            data,
+            basis=basis,
+            velocity_key=velocity_key,
+            density=density_grid,
+            smooth=smooth_grid,
+            min_mass=min_mass,
+            ax=ax,
+            arrow_color=arrow_color,
+            stream_kwargs={
+                "linewidth": linewidth,
+                "density": density_stream,
+                "zorder": 3,
+                "arrowsize": arrow_size,
+                "arrowstyle": arrow_style,
+                "maxlength": max_length,
+            },
+        )
+        if save:
+            fig.savefig(save, dpi=dpi, bbox_inches="tight")
+        if show:
+            plt.show()
+        return fig, ax
+
+    raise NotImplementedError(
+        "`ov.pl.plot_stream` currently supports method='stavia', "
+        "method='pseudotime', and method='velocity'."
+    )
+
+
+def _as_cluster_key(value):
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
+def _cluster_sort_key(value):
+    value = _as_cluster_key(value)
+    try:
+        return (0, float(value))
+    except (TypeError, ValueError):
+        return (1, str(value))
+
+
+def _ordered_cluster_values(values):
+    values = [_as_cluster_key(value) for value in values]
+    return sorted(list(dict.fromkeys(values)), key=_cluster_sort_key)
+
+
+def _stavia_labels(raw_model, adata, cluster_key=None):
+    labels = getattr(raw_model, "labels", None)
+    if labels is not None:
+        labels = np.asarray(labels)
+        if labels.shape[0] == adata.n_obs:
+            return np.asarray([_as_cluster_key(value) for value in labels], dtype=object)
+    if cluster_key is not None and cluster_key in adata.obs:
+        return np.asarray(
+            [_as_cluster_key(value) for value in adata.obs[cluster_key].to_numpy()],
+            dtype=object,
+        )
+    raise ValueError(
+        "StaVIA plotting requires per-cell cluster labels from the fitted "
+        "backend model or a valid `cluster_key`."
+    )
+
+
+def _stavia_graph_edges(raw_model, *, use_maxout_edgelist=False):
+    preferred = "edgelist_maxout" if use_maxout_edgelist else "edgelist"
+    for attr in (preferred, "edgelist", "edgelist_unique", "edgelist_maxout"):
+        edgelist = getattr(raw_model, attr, None)
+        if edgelist is None or isinstance(edgelist, str):
+            continue
+        edges = []
+        for edge in list(edgelist):
+            if len(edge) < 2:
+                continue
+            start = _as_cluster_key(edge[0])
+            end = _as_cluster_key(edge[1])
+            if start != end:
+                edges.append((start, end))
+        if edges:
+            return list(dict.fromkeys(edges))
+    return []
+
+
+def _stavia_terminal_clusters(raw_model, clusters=None):
+    terminals = getattr(raw_model, "terminal_clusters", None)
+    if terminals is None:
+        return []
+    cluster_set = set(clusters) if clusters is not None else None
+    values = [_as_cluster_key(value) for value in list(terminals)]
+    if cluster_set is not None:
+        values = [value for value in values if value in cluster_set]
+    return _ordered_cluster_values(values)
+
+
+def _stavia_root_clusters(raw_model, clusters=None):
+    roots = getattr(raw_model, "root", None)
+    if roots is None:
+        return []
+    if isinstance(roots, (str, bytes, int, float, np.integer, np.floating)):
+        roots = [roots]
+    cluster_set = set(clusters) if clusters is not None else None
+    values = [_as_cluster_key(value) for value in list(roots)]
+    if cluster_set is not None:
+        values = [value for value in values if value in cluster_set]
+    return _ordered_cluster_values(values)
+
+
+def _stavia_cluster_order(labels, edges=None, terminals=None, roots=None):
+    values = list(labels)
+    for edge in edges or []:
+        values.extend(edge[:2])
+    values.extend(terminals or [])
+    values.extend(roots or [])
+    return _ordered_cluster_values(values)
+
+
+def _stavia_cluster_populations(labels, clusters):
+    return {
+        cluster: int(np.sum(np.asarray(labels, dtype=object) == cluster))
+        for cluster in clusters
+    }
+
+
+def _stavia_value_map(values, labels, clusters, *, default=0.0):
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    if arr.size == 0:
+        return {cluster: float(default) for cluster in clusters}
+    label_array = np.asarray(labels, dtype=object)
+    if arr.size == label_array.size:
+        result = {}
+        for cluster in clusters:
+            mask = label_array == cluster
+            result[cluster] = float(np.nanmean(arr[mask])) if np.any(mask) else float(default)
+        return result
+
+    integer_clusters = [
+        int(cluster)
+        for cluster in clusters
+        if isinstance(cluster, (int, np.integer)) and int(cluster) >= 0
+    ]
+    if len(integer_clusters) == len(clusters) and integer_clusters and max(integer_clusters) < arr.size:
+        return {cluster: float(arr[int(cluster)]) for cluster in clusters}
+    if arr.size == len(clusters):
+        return {cluster: float(arr[idx]) for idx, cluster in enumerate(clusters)}
+    return {cluster: float(default) for cluster in clusters}
+
+
+def _stavia_cluster_values(raw_model, labels, clusters, *, type_data="pt", gene_exp=None, pt_visual_threshold=99):
+    if gene_exp is not None and len(gene_exp) > 0:
+        values = _stavia_value_map(gene_exp, labels, clusters)
+        return values, "Gene expression"
+
+    attr = "markov_hitting_times" if hasattr(raw_model, "markov_hitting_times") else "single_cell_pt_markov"
+    values = _stavia_value_map(getattr(raw_model, attr, []), labels, clusters)
+    if type_data == "gene":
+        return values, "Gene expression"
+
+    arr = np.asarray([values[cluster] for cluster in clusters], dtype=float)
+    finite = arr[np.isfinite(arr)]
+    if finite.size > 1:
+        threshold = np.percentile(finite, pt_visual_threshold)
+        below = finite[finite < threshold]
+        if below.size > 0:
+            threshold = np.percentile(below, pt_visual_threshold)
+        for cluster in clusters:
+            if np.isfinite(values[cluster]):
+                values[cluster] = min(values[cluster], float(threshold))
+    return values, "Pseudotime"
+
+
+def _stavia_embedding_centers(labels, embedding_coords, clusters):
+    label_array = np.asarray(labels, dtype=object)
+    centers = {}
+    for cluster in clusters:
+        mask = label_array == cluster
+        if np.any(mask):
+            centers[cluster] = np.nanmedian(embedding_coords[mask], axis=0)
+    return centers
+
+
+def _stavia_node_positions(raw_model, labels, embedding_coords, clusters):
+    positions = None
+    for attr in ("graph_node_pos", "layout"):
+        candidate = getattr(raw_model, attr, None)
+        if candidate is None:
+            continue
+        if hasattr(candidate, "coords"):
+            candidate = candidate.coords
+        candidate = np.asarray(candidate, dtype=float)
+        if candidate.ndim == 2 and candidate.shape[1] >= 2:
+            positions = candidate[:, :2]
+            break
+
+    fallback = _stavia_embedding_centers(labels, embedding_coords, clusters)
+    node_pos = {}
+    if positions is not None:
+        for idx, cluster in enumerate(clusters):
+            if isinstance(cluster, (int, np.integer)) and 0 <= int(cluster) < len(positions):
+                node_pos[cluster] = positions[int(cluster)]
+            elif idx < len(positions):
+                node_pos[cluster] = positions[idx]
+    for cluster in clusters:
+        if cluster not in node_pos and cluster in fallback:
+            node_pos[cluster] = fallback[cluster]
+    return node_pos
+
+
+def _stavia_reference_labels(adata, raw_model, labels, *, cluster_key=None, reference_labels=None):
+    if reference_labels is None:
+        if cluster_key is not None and cluster_key in adata.obs:
+            reference_labels = adata.obs[cluster_key]
+        else:
+            reference_labels = getattr(raw_model, "true_label", labels)
+    if isinstance(reference_labels, pd.Series):
+        values = reference_labels.to_numpy()
+    else:
+        values = np.asarray(reference_labels)
+    if values.shape[0] != adata.n_obs:
+        values = np.asarray(labels)
+    return values
+
+
+def _stavia_category_color_map(adata, color_key, values, *, cmap="rainbow"):
+    categories = [
+        _as_cluster_key(category)
+        for category in dict.fromkeys(values.tolist() if hasattr(values, "tolist") else list(values))
+    ]
+    if color_key is not None and color_key in adata.obs:
+        obs_color_map = {
+            _as_cluster_key(key): value
+            for key, value in _get_obs_color_map(adata, color_key, adata.obs[color_key].values).items()
+        }
+        if all(category in obs_color_map for category in categories):
+            return {category: obs_color_map[category] for category in categories}
+    cmap_obj = plt.get_cmap(cmap)
+    stops = np.linspace(0, 1, max(len(categories), 1))
+    return {
+        _as_cluster_key(category): mcolors.to_hex(cmap_obj(stops[idx]), keep_alpha=True)
+        for idx, category in enumerate(categories)
+    }
+
+
+def _stavia_graph_limits(ax, node_pos):
+    coords = np.asarray(list(node_pos.values()), dtype=float)
+    if coords.size == 0:
+        return
+    _add_axis_padding(ax, coords[:, 0], coords[:, 1], frac=0.14)
+
+
+def _format_stavia_axis(ax, *, frameon=None):
+    ax.grid(False)
+    if frameon in {False, "none", "off", None}:
+        ax.axis("off")
+    elif frameon == "small":
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+    return ax
+
+
+def _draw_stavia_graph_edges(
+    ax,
+    node_pos,
+    edges,
+    *,
+    value_map=None,
+    edge_color="darkblue",
+    linewidth_edge=2,
+    alpha_edge=0.4,
+    headwidth_arrow=0.1,
+    show_direction=True,
+    zorder=1,
+):
+    mutation_scale = max(6, float(headwidth_arrow) * 80)
+    for start, end in edges:
+        if start not in node_pos or end not in node_pos:
+            continue
+        source, target = start, end
+        if value_map is not None and value_map.get(source, 0) > value_map.get(target, 0):
+            source, target = target, source
+        p0 = np.asarray(node_pos[source], dtype=float)
+        p1 = np.asarray(node_pos[target], dtype=float)
+        if show_direction:
+            patch = FancyArrowPatch(
+                p0,
+                p1,
+                arrowstyle="-|>",
+                mutation_scale=mutation_scale,
+                shrinkA=6,
+                shrinkB=6,
+                linewidth=linewidth_edge,
+                color=edge_color,
+                alpha=alpha_edge,
+                zorder=zorder,
+                connectionstyle="arc3,rad=0.05",
+            )
+            ax.add_patch(patch)
+        else:
+            ax.plot(
+                [p0[0], p1[0]],
+                [p0[1], p1[1]],
+                color=edge_color,
+                linewidth=linewidth_edge,
+                alpha=alpha_edge,
+                zorder=zorder,
+            )
+
+
+def _stavia_composition(labels, reference_labels, clusters):
+    label_array = np.asarray(labels, dtype=object)
+    reference_labels = np.asarray(reference_labels, dtype=object)
+    categories = _ordered_cluster_values(reference_labels)
+    composition = {}
+    for cluster in clusters:
+        mask = label_array == cluster
+        values = reference_labels[mask]
+        composition[cluster] = [int(np.sum(values == category)) for category in categories]
+    return categories, composition
+
+
+def _draw_stavia_pie_nodes(
+    fig,
+    ax,
+    node_pos,
+    clusters,
+    categories,
+    composition,
+    color_map,
+    populations,
+    *,
+    pie_size_scale=0.8,
+    ax_text=True,
+    fontsize=8,
+    highlight_terminal_clusters=True,
+    terminal_clusters=None,
+):
+    max_pop = max(max(populations.values(), default=1), 1)
+    terminal_clusters = set(terminal_clusters or [])
+    for cluster in clusters:
+        if cluster not in node_pos:
+            continue
+        xpix, ypix = ax.transData.transform(node_pos[cluster])
+        xax, yax = ax.transAxes.inverted().transform((xpix, ypix))
+        radius = (0.055 + 0.06 * np.sqrt(populations.get(cluster, 1) / max_pop)) * pie_size_scale
+        rect = [xax - radius / 2, yax - radius / 2, radius, radius]
+        pie_ax = ax.inset_axes(rect, transform=ax.transAxes)
+        fractions = np.asarray(composition.get(cluster, []), dtype=float)
+        if fractions.sum() <= 0:
+            fractions = np.ones(len(categories), dtype=float)
+        colors = [color_map[category] for category in categories]
+        wedgeprops = {"linewidth": 0.0}
+        if highlight_terminal_clusters and cluster in terminal_clusters:
+            wedgeprops = {"linewidth": 1.2, "edgecolor": "red"}
+        pie_ax.pie(fractions, colors=colors, wedgeprops=wedgeprops)
+        pie_ax.set_xticks([])
+        pie_ax.set_yticks([])
+        pie_ax.set_aspect("equal")
+        if ax_text:
+            label = f"C{cluster}\n{populations.get(cluster, 0)}"
+            pie_ax.text(0.5, 0.5, label, ha="center", va="center", fontsize=fontsize)
+    handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="",
+            markerfacecolor=color_map[category],
+            markeredgecolor="none",
+            label=str(category),
+        )
+        for category in categories
+    ]
+    return handles
+
+
+def _draw_stavia_value_nodes(
+    fig,
+    ax,
+    node_pos,
+    clusters,
+    populations,
+    value_map,
+    *,
+    cmap="viridis_r",
+    size_node_notpiechart=1,
+    highlight_terminal_clusters=True,
+    terminal_clusters=None,
+):
+    coords = np.asarray([node_pos[cluster] for cluster in clusters if cluster in node_pos], dtype=float)
+    shown_clusters = [cluster for cluster in clusters if cluster in node_pos]
+    values = np.asarray([value_map.get(cluster, np.nan) for cluster in shown_clusters], dtype=float)
+    pops = np.asarray([populations.get(cluster, 1) for cluster in shown_clusters], dtype=float)
+    max_pop = max(float(np.nanmax(pops)) if len(pops) else 1.0, 1.0)
+    sizes = (180 + 720 * np.sqrt(pops / max_pop)) * float(size_node_notpiechart)
+    terminal_clusters = set(terminal_clusters or [])
+    edgecolors = [
+        "red" if highlight_terminal_clusters and cluster in terminal_clusters else "gray"
+        for cluster in shown_clusters
+    ]
+    linewidths = [
+        1.5 if highlight_terminal_clusters and cluster in terminal_clusters else 0.0
+        for cluster in shown_clusters
+    ]
+    scatter = ax.scatter(
+        coords[:, 0],
+        coords[:, 1],
+        s=sizes,
+        c=values,
+        cmap=cmap,
+        edgecolors=edgecolors,
+        linewidths=linewidths,
+        zorder=3,
+    )
+    return scatter
+
+
+def _shortest_path_edges(edges, roots, terminals):
+    if not roots or not terminals:
+        return []
+    adjacency = {}
+    for start, end in edges:
+        adjacency.setdefault(start, set()).add(end)
+        adjacency.setdefault(end, set()).add(start)
+    selected = []
+    for root in roots:
+        queue = [(root, [root])]
+        seen = {root}
+        while queue:
+            current, path = queue.pop(0)
+            if current in terminals and current != root:
+                selected.extend(zip(path[:-1], path[1:]))
+                continue
+            for neighbor in sorted(adjacency.get(current, []), key=_cluster_sort_key):
+                if neighbor in seen:
+                    continue
+                seen.add(neighbor)
+                queue.append((neighbor, path + [neighbor]))
+    return list(dict.fromkeys(selected))
+
+
+def _draw_stavia_embedding_edges(
+    ax,
+    centers,
+    edges,
+    *,
+    value_map=None,
+    color="#323538",
+    linewidth=1.5,
+    arrow_size=12,
+    alpha=0.9,
+    zorder=4,
+):
+    for start, end in edges:
+        if start not in centers or end not in centers:
+            continue
+        source, target = start, end
+        if value_map is not None and value_map.get(source, 0) > value_map.get(target, 0):
+            source, target = target, source
+        p0 = np.asarray(centers[source], dtype=float)
+        p1 = np.asarray(centers[target], dtype=float)
+        patch = FancyArrowPatch(
+            p0,
+            p1,
+            arrowstyle="-|>",
+            mutation_scale=arrow_size,
+            linewidth=linewidth,
+            color=color,
+            alpha=alpha,
+            zorder=zorder,
+            shrinkA=8,
+            shrinkB=8,
+            connectionstyle="arc3,rad=0.08",
+        )
+        ax.add_patch(patch)
+
+
+def _stavia_plot_context(
+    data,
+    *,
+    model=None,
+    basis=None,
+    cluster_key=None,
+    key="stavia",
+    x=0,
+    y=1,
+    use_maxout_edgelist=False,
+):
+    adata, raw_model, basis, cluster_key, _ = _resolve_stavia_inputs(
+        data,
+        model=model,
+        basis=basis,
+        cluster_key=cluster_key,
+        key=key,
+    )
+    embedding_coords = np.asarray(adata.obsm[basis])[:, [x, y]]
+    labels = _stavia_labels(raw_model, adata, cluster_key=cluster_key)
+    edges = _stavia_graph_edges(raw_model, use_maxout_edgelist=use_maxout_edgelist)
+    terminals = _stavia_terminal_clusters(raw_model)
+    roots = _stavia_root_clusters(raw_model)
+    clusters = _stavia_cluster_order(labels, edges=edges, terminals=terminals, roots=roots)
+    terminals = _stavia_terminal_clusters(raw_model, clusters=clusters)
+    roots = _stavia_root_clusters(raw_model, clusters=clusters)
+    populations = _stavia_cluster_populations(labels, clusters)
+    value_map, value_label = _stavia_cluster_values(raw_model, labels, clusters)
+    centers = _stavia_embedding_centers(labels, embedding_coords, clusters)
+    return {
+        "adata": adata,
+        "raw_model": raw_model,
+        "basis": basis,
+        "cluster_key": cluster_key,
+        "embedding_coords": embedding_coords,
+        "labels": labels,
+        "edges": edges,
+        "terminals": terminals,
+        "roots": roots,
+        "clusters": clusters,
+        "populations": populations,
+        "value_map": value_map,
+        "value_label": value_label,
+        "centers": centers,
+    }
+
+
+def _is_stavia_result(data, *, model=None, key="stavia"):
+    adata = data.adata if _is_fitted_trajectory_wrapper(data) else data
+    summary = getattr(adata, "uns", {}).get(key, {})
+    return (
+        _is_fitted_trajectory_wrapper(data)
+        or _is_fitted_trajectory_wrapper(model)
+        or summary.get("method") == "StaVIA"
+    )
+
+
+def _resolve_stavia_pseudotime(data, adata, raw_model, *, key, pseudotime):
+    candidates = []
+    if pseudotime is not None:
+        candidates.append(pseudotime)
+    if _is_fitted_trajectory_wrapper(data) and hasattr(data, "pseudotime_key"):
+        candidates.append(data.pseudotime_key)
+    summary = getattr(adata, "uns", {}).get(key, {})
+    if summary.get("pseudotime_key") is not None:
+        candidates.append(summary["pseudotime_key"])
+
+    for candidate in candidates:
+        if candidate in adata.obs:
+            values = pd.to_numeric(
+                adata.obs[candidate],
+                errors="coerce",
+            ).to_numpy(dtype=float)
+            if not np.all(np.isfinite(values)):
+                raise ValueError(
+                    f"`adata.obs[{candidate!r}]` must contain finite numeric values."
+                )
+            return values, candidate
+
+    values = np.asarray(getattr(raw_model, "single_cell_pt_markov", []), dtype=float)
+    if values.shape[0] != adata.n_obs:
+        raise KeyError(
+            f"`{pseudotime}` was not found in `adata.obs`, and the fitted StaVIA "
+            "backend does not expose per-cell pseudotime."
+        )
+    return values, "StaVIA pseudotime"
+
+
+def _plot_stavia_graph(
+    data,
+    *,
+    model=None,
+    cluster_key=None,
+    basis=None,
+    key="stavia",
+    x=0,
+    y=1,
+    type_data="pt",
+    gene_exp=None,
+    cmap_piechart="rainbow",
+    title="",
+    cmap=None,
+    ax_text=True,
+    dpi=150,
+    headwidth_arrow=0.1,
+    alpha_edge=0.4,
+    linewidth_edge=2,
+    edge_color="darkblue",
+    reference_labels=None,
+    show_legend=True,
+    pie_size_scale=0.8,
+    fontsize=8,
+    pt_visual_threshold=99,
+    highlight_terminal_clusters=True,
+    size_node_notpiechart=1,
+    figsize=(10, 5),
+    frameon=None,
+    ax=None,
+    ax1=None,
+    show=None,
+    save=None,
+    **_,
+):
+    context = _stavia_plot_context(
+        data,
+        model=model,
+        basis=basis,
+        cluster_key=cluster_key,
+        key=key,
+        x=x,
+        y=y,
+    )
+    adata = context["adata"]
+    raw_model = context["raw_model"]
+    cluster_key = context["cluster_key"]
+    embedding_coords = context["embedding_coords"]
+    labels = context["labels"]
+    edges = context["edges"]
+    terminals = context["terminals"]
+    clusters = context["clusters"]
+    populations = context["populations"]
+    value_map, value_label = _stavia_cluster_values(
+        raw_model,
+        labels,
+        clusters,
+        type_data=type_data,
+        gene_exp=gene_exp,
+        pt_visual_threshold=pt_visual_threshold,
+    )
+    node_pos = _stavia_node_positions(raw_model, labels, embedding_coords, clusters)
+    reference = _stavia_reference_labels(
+        adata,
+        raw_model,
+        labels,
+        cluster_key=cluster_key,
+        reference_labels=reference_labels,
+    )
+    categories, composition = _stavia_composition(labels, reference, clusters)
+    color_map = _stavia_category_color_map(
+        adata,
+        cluster_key,
+        pd.Series(reference),
+        cmap=cmap_piechart,
+    )
+    cmap = cmap or ("coolwarm" if type_data == "gene" else "viridis_r")
+
+    if ax is None and ax1 is None:
+        fig, (ax, ax1) = plt.subplots(1, 2, sharey=True, figsize=figsize, dpi=dpi)
+    elif ax is not None and ax1 is not None:
+        fig = ax.figure
+    else:
+        raise ValueError("Pass both `ax` and `ax1`, or neither.")
+
+    for graph_ax in (ax, ax1):
+        _draw_stavia_graph_edges(
+            graph_ax,
+            node_pos,
+            edges,
+            value_map=value_map,
+            edge_color=edge_color,
+            linewidth_edge=linewidth_edge,
+            alpha_edge=alpha_edge,
+            headwidth_arrow=headwidth_arrow,
+        )
+        _stavia_graph_limits(graph_ax, node_pos)
+
+    handles = _draw_stavia_pie_nodes(
+        fig,
+        ax,
+        node_pos,
+        clusters,
+        categories,
+        composition,
+        color_map,
+        populations,
+        pie_size_scale=pie_size_scale,
+        ax_text=ax_text,
+        fontsize=fontsize,
+        highlight_terminal_clusters=highlight_terminal_clusters,
+        terminal_clusters=terminals,
+    )
+    scatter = _draw_stavia_value_nodes(
+        fig,
+        ax1,
+        node_pos,
+        clusters,
+        populations,
+        value_map,
+        cmap=cmap,
+        size_node_notpiechart=size_node_notpiechart,
+        highlight_terminal_clusters=highlight_terminal_clusters,
+        terminal_clusters=terminals,
+    )
+
+    if show_legend and handles:
+        ax.legend(handles=handles, loc="best", fontsize=fontsize, frameon=False)
+    fig.colorbar(scatter, ax=ax1, fraction=0.046, pad=0.04, label=value_label.lower())
+    ax.set_title(title or "Cluster composition")
+    ax1.set_title((value_label + (" " + title if title else "")).strip())
+    _format_stavia_axis(ax, frameon=frameon)
+    _format_stavia_axis(ax1, frameon=frameon)
+    fig.tight_layout()
+    if save:
+        fig.savefig(save, dpi=dpi, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig, ax, ax1
+
+
+def _plot_stavia_trajectory(
+    data,
+    *,
+    model=None,
+    basis=None,
+    cluster_key=None,
+    key="stavia",
+    x=0,
+    y=1,
+    title_str="Pseudotime",
+    draw_all_curves=True,
+    arrow_width_scale_factor=15.0,
+    scatter_size=50,
+    scatter_alpha=0.5,
+    linewidth=1.5,
+    marker_edgewidth=1,
+    cmap_pseudotime="viridis_r",
+    dpi=150,
+    highlight_terminal_states=True,
+    use_maxout_edgelist=False,
+    figsize=(10, 5),
+    frameon=None,
+    show_legend=False,
+    legend_loc="right margin",
+    legend_fontsize=None,
+    text_fontsize=8,
+    terminal_label_color="white",
+    terminal_label_outline="#303030",
+    terminal_label_outline_width=2.0,
+    curve_color="#323538",
+    ax=None,
+    ax1=None,
+    show=None,
+    save=None,
+    **_,
+):
+    context = _stavia_plot_context(
+        data,
+        model=model,
+        basis=basis,
+        cluster_key=cluster_key,
+        key=key,
+        x=x,
+        y=y,
+        use_maxout_edgelist=use_maxout_edgelist,
+    )
+    adata = context["adata"]
+    raw_model = context["raw_model"]
+    cluster_key = context["cluster_key"]
+    embedding_coords = context["embedding_coords"]
+    labels = context["labels"]
+    edges = context["edges"]
+    terminals = context["terminals"]
+    roots = context["roots"]
+    value_map = context["value_map"]
+    centers = context["centers"]
+    reference = _stavia_reference_labels(adata, raw_model, labels, cluster_key=cluster_key)
+    pt = np.asarray(getattr(raw_model, "single_cell_pt_markov", []), dtype=float)
+    if pt.size != adata.n_obs:
+        pt = np.asarray([value_map.get(label, np.nan) for label in labels], dtype=float)
+    edges_to_draw = edges if draw_all_curves else _shortest_path_edges(edges, roots, terminals)
+    if not edges_to_draw:
+        edges_to_draw = edges
+
+    if ax is None and ax1 is None:
+        fig, (ax, ax1) = plt.subplots(1, 2, sharey=True, figsize=figsize, dpi=dpi)
+    elif ax is not None and ax1 is not None:
+        fig = ax.figure
+    else:
+        raise ValueError("Pass both `ax` and `ax1`, or neither.")
+
+    _draw_stavia_categorical_points(
+        ax,
+        embedding_coords,
+        reference,
+        adata=adata,
+        color_key=cluster_key if cluster_key in adata.obs else None,
+        scatter_size=scatter_size,
+        scatter_alpha=scatter_alpha,
+        marker_edgewidth=marker_edgewidth * 0.1,
+        show_text_labels=False,
+        show_legend=show_legend,
+        legend_loc=legend_loc,
+        legend_fontsize=legend_fontsize,
+    )
+    ax.set_title(
+        "True labels: ncomps:"
+        + str(getattr(raw_model, "ncomp", ""))
+        + ". knn:"
+        + str(getattr(raw_model, "knn", ""))
+    )
+
+    scatter = ax1.scatter(
+        embedding_coords[:, 0],
+        embedding_coords[:, 1],
+        c=pt,
+        cmap=cmap_pseudotime,
+        alpha=scatter_alpha,
+        s=scatter_size,
+        linewidths=marker_edgewidth * 0.1,
+        zorder=2,
+    )
+    fig.colorbar(scatter, ax=ax1, fraction=0.046, pad=0.04, label="pseudotime")
+    _draw_stavia_embedding_edges(
+        ax1,
+        centers,
+        edges_to_draw,
+        value_map=value_map,
+        color=curve_color,
+        linewidth=linewidth,
+        arrow_size=max(8, float(arrow_width_scale_factor)),
+    )
+    for terminal in terminals:
+        if terminal not in centers:
+            continue
+        center = centers[terminal]
+        ax1.scatter(
+            center[0],
+            center[1],
+            c="black",
+            s=60,
+            edgecolors="yellow" if highlight_terminal_states else "none",
+            linewidths=2 if highlight_terminal_states else 0,
+            zorder=5,
+        )
+        if highlight_terminal_states:
+            path_effects = []
+            if terminal_label_outline_width:
+                path_effects = [
+                    pe.withStroke(
+                        linewidth=terminal_label_outline_width,
+                        foreground=terminal_label_outline,
+                    )
+                ]
+            ax1.annotate(
+                f"TS{terminal}",
+                xy=center,
+                xytext=(3, 3),
+                textcoords="offset points",
+                fontsize=text_fontsize,
+                color=terminal_label_color,
+                fontweight="bold",
+                path_effects=path_effects,
+                zorder=6,
+            )
+    ax1.set_title(title_str)
+    for plot_ax in (ax, ax1):
+        _add_axis_padding(plot_ax, embedding_coords[:, 0], embedding_coords[:, 1], frac=0.04)
+        _format_stavia_axis(plot_ax, frameon=frameon)
+    fig.tight_layout()
+    if save:
+        fig.savefig(save, dpi=dpi, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig, ax, ax1
+
+
+def _plot_stavia_trajectory_single(
+    data,
+    *,
+    model=None,
+    basis=None,
+    cluster_key=None,
+    key="stavia",
+    x=0,
+    y=1,
+    color=None,
+    color_by=None,
+    size=50,
+    figsize=(5, 4),
+    frameon="small",
+    show_tree=True,
+    show_branch_points=True,
+    backbone_color="#323538",
+    cell_link_size=1.15,
+    branch_point_size=150,
+    branch_point_color="#6F6F6F",
+    branch_point_label_color="white",
+    branch_point_label_fontsize=10,
+    legend_loc="right margin",
+    legend_fontsize=None,
+    cmap=None,
+    title=None,
+    ax=None,
+    show=None,
+    save=None,
+    dpi=150,
+    use_maxout_edgelist=False,
+    **embedding_kwargs,
+):
+    context = _stavia_plot_context(
+        data,
+        model=model,
+        basis=basis,
+        cluster_key=cluster_key,
+        key=key,
+        x=x,
+        y=y,
+        use_maxout_edgelist=use_maxout_edgelist,
+    )
+    adata = context["adata"]
+    basis = context["basis"]
+    cluster_key = context["cluster_key"]
+    edges = context["edges"]
+    terminals = context["terminals"]
+    value_map = context["value_map"]
+    centers = context["centers"]
+    embedding_coords = context["embedding_coords"]
+
+    color = color if color is not None else color_by
+    if color is None and cluster_key is not None:
+        color = cluster_key
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=dpi)
+    else:
+        fig = ax.figure
+
+    embedding(
+        adata,
+        basis=basis,
+        color=color,
+        ax=ax,
+        size=size,
+        frameon=frameon,
+        legend_loc=legend_loc,
+        legend_fontsize=legend_fontsize,
+        cmap=cmap,
+        title=title if title is not None else color,
+        show=False,
+        **embedding_kwargs,
+    )
+    if show_tree:
+        _draw_stavia_embedding_edges(
+            ax,
+            centers,
+            edges,
+            value_map=value_map,
+            color=backbone_color,
+            linewidth=cell_link_size,
+            arrow_size=12,
+            zorder=4,
+        )
+    if show_branch_points and terminals:
+        anchors = [centers[terminal] for terminal in terminals if terminal in centers]
+        labels = [f"TS{terminal}" for terminal in terminals if terminal in centers]
+        _draw_branch_points(
+            ax,
+            anchors,
+            labels,
+            size=branch_point_size,
+            facecolor=branch_point_color,
+            text_color=branch_point_label_color,
+            fontsize=branch_point_label_fontsize,
+            alpha=0.92,
+            zorder=5,
+            avoid_coords=embedding_coords,
+        )
+    if save:
+        fig.savefig(save, dpi=dpi, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig, ax
+
+
+def _lineage_probability_matrix(adata, raw_model, *, key="stavia"):
+    probabilities = getattr(raw_model, "single_cell_bp", None)
+    if probabilities is None:
+        summary = getattr(adata, "uns", {}).get(key, {})
+        obsm_key = summary.get("lineage_probability_key")
+        if obsm_key is not None and obsm_key in adata.obsm:
+            probabilities = adata.obsm[obsm_key]
+    if probabilities is None:
+        raise ValueError("StaVIA lineage probabilities were not found.")
+
+    if isinstance(probabilities, pd.DataFrame):
+        columns = list(probabilities.columns)
+        probabilities = probabilities.to_numpy(dtype=float)
+    else:
+        columns = None
+        probabilities = np.asarray(probabilities, dtype=float)
+    if probabilities.ndim != 2:
+        raise ValueError("StaVIA lineage probabilities must be a two-dimensional matrix.")
+    if probabilities.shape[0] != adata.n_obs and probabilities.shape[1] == adata.n_obs:
+        probabilities = probabilities.T
+    if probabilities.shape[0] != adata.n_obs:
+        raise ValueError(
+            "StaVIA lineage probabilities have incompatible shape "
+            f"{probabilities.shape}; expected {adata.n_obs} rows."
+        )
+    probabilities = np.nan_to_num(probabilities, nan=0.0, posinf=0.0, neginf=0.0)
+    row_sums = probabilities.sum(axis=1)
+    valid = row_sums > 0
+    probabilities[valid] = probabilities[valid] / row_sums[valid, None]
+    return probabilities, columns
+
+
+def _lineage_column_indices(raw_model, probabilities, columns, marker_lineages):
+    terminal_clusters = list(getattr(raw_model, "terminal_clusters", []))
+    terminal_clusters = [_as_cluster_key(value) for value in terminal_clusters]
+    if not terminal_clusters:
+        terminal_clusters = list(range(probabilities.shape[1]))
+    if marker_lineages is None or len(marker_lineages) == 0:
+        marker_lineages = terminal_clusters
+    selected = []
+    for marker in marker_lineages:
+        marker_key = _as_cluster_key(marker)
+        column_idx = None
+        if marker_key in terminal_clusters:
+            column_idx = terminal_clusters.index(marker_key)
+        elif columns is not None and marker in columns:
+            column_idx = columns.index(marker)
+        elif columns is not None and str(marker) in [str(column) for column in columns]:
+            column_idx = [str(column) for column in columns].index(str(marker))
+        elif isinstance(marker_key, (int, np.integer)) and 0 <= int(marker_key) < probabilities.shape[1]:
+            column_idx = int(marker_key)
+        if column_idx is not None and column_idx < probabilities.shape[1]:
+            selected.append((marker_key, column_idx))
+    if not selected:
+        selected = [
+            (terminal_clusters[idx] if idx < len(terminal_clusters) else idx, idx)
+            for idx in range(probabilities.shape[1])
+        ]
+    return selected
+
+
+def _plot_stavia_lineage_probability(
+    data,
+    *,
+    method="stavia",
+    model=None,
+    basis=None,
+    key="stavia",
+    x=0,
+    y=1,
+    idx=None,
+    cmap_name="plasma",
+    dpi=150,
+    scatter_size=None,
+    marker_lineages=None,
+    fontsize=8,
+    alpha_factor=0.9,
+    figsize=None,
+    frameon=None,
+    show_colorbar=True,
+    show=None,
+    save=None,
+    **_,
+):
+    adata, raw_model, basis, _, _ = _resolve_stavia_inputs(
+        data,
+        model=model,
+        basis=basis,
+        key=key,
+        require_cluster=False,
+    )
+    embedding_coords = np.asarray(adata.obsm[basis])[:, [x, y]]
+    probabilities, columns = _lineage_probability_matrix(adata, raw_model, key=key)
+    selected = _lineage_column_indices(raw_model, probabilities, columns, marker_lineages)
+    if idx is not None:
+        idx = np.asarray(idx, dtype=int)
+        embedding_coords = embedding_coords[idx]
+        probabilities = probabilities[idx]
+    if scatter_size is None:
+        scatter_size = float(np.clip(120000 / max(embedding_coords.shape[0], 1), 5, 60))
+
+    n_panels = len(selected)
+    if n_panels == 1:
+        ncols, nrows = 1, 1
+    elif n_panels == 2:
+        ncols, nrows = 1, 2
+    else:
+        ncols = min(3, int(np.ceil(np.sqrt(n_panels))))
+        nrows = int(np.ceil(n_panels / ncols))
+    if figsize is None:
+        figsize = (4.5 * ncols, 4.2 * nrows)
+    fig, axs = plt.subplots(nrows, ncols, figsize=figsize, dpi=dpi, squeeze=False)
+
+    labels = getattr(raw_model, "labels", None)
+    true_label = getattr(raw_model, "true_label", None)
+    for panel_idx, (terminal, column_idx) in enumerate(selected):
+        ax = axs.flat[panel_idx]
+        values = probabilities[:, column_idx]
+        scatter = ax.scatter(
+            embedding_coords[:, 0],
+            embedding_coords[:, 1],
+            c=values,
+            cmap=cmap_name,
+            s=scatter_size,
+            alpha=alpha_factor,
+            linewidths=0,
+        )
+        title = str(terminal)
+        if labels is not None and true_label is not None:
+            label_array = np.asarray(labels)
+            true_array = np.asarray(true_label)
+            mask = label_array == terminal
+            if np.any(mask) and true_array.shape[0] == label_array.shape[0]:
+                mode = pd.Series(true_array[mask]).mode()
+                if len(mode) > 0:
+                    title = f"{terminal}-{mode.iloc[0]}"
+        ax.set_title(title, fontsize=fontsize)
+        if show_colorbar:
+            fig.colorbar(scatter, ax=ax, fraction=0.046, pad=0.04)
+        _format_stavia_axis(ax, frameon=frameon)
+
+    for ax in axs.flat[n_panels:]:
+        ax.set_visible(False)
+    fig.tight_layout()
+    if save:
+        fig.savefig(save, dpi=dpi, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig, axs
+
+
+@register_function(
+    aliases=["trajectory_graph", "trajectory graph plot", "stavia graph", "轨迹图结构"],
+    category="pl",
+    description="Plot method-specific trajectory graph summaries through the OV plotting API.",
+    examples=["ov.pl.trajectory_graph(stavia, method='stavia')"],
+    related=["pl.trajectory_projection", "pl.plot_stream", "single.StaVIA"],
+)
+def trajectory_graph(
+    data,
+    *,
+    method="auto",
+    model=None,
+    basis=None,
+    groups=None,
+    cluster_key=None,
+    key="stavia",
+    color=None,
+    x=0,
+    y=1,
+    figsize=(10, 5),
+    dpi=150,
+    frameon=None,
+    ax=None,
+    ax1=None,
+    show_cells=True,
+    cell_size=1.4,
+    cell_alpha=0.55,
+    show_tree=True,
+    show_branch_points=True,
+    backbone_color="#8A8A8A",
+    cell_link_size=1.25,
+    branch_point_size=180,
+    branch_point_color="#6F6F6F",
+    branch_point_label_color="white",
+    branch_point_label_fontsize=10,
+    legend_loc="right margin",
+    legend_fontsize=None,
+    cmap=None,
+    show=None,
+    save=None,
+    **kwargs,
+):
+    """Plot a method-specific trajectory graph summary.
+
+    ``method='stavia'`` renders StaVIA's cluster-composition and pseudotime
+    graph summary. Monocle, PAGA, and Slingshot render their graph or fitted
+    curves on the corresponding embedding.
+    """
+    method = "auto" if method is None else str(method).lower()
+    if method == "auto":
+        summary = getattr(data, "uns", {}).get(key, {})
+        if _is_fitted_trajectory_wrapper(data) or _is_fitted_trajectory_wrapper(model) or summary.get("method") == "StaVIA":
+            method = "stavia"
+        else:
+            method = _normalize_method(data, method="auto", model=model)
+    elif method not in {"stavia", "via"}:
+        method = _normalize_method(data, method=method, model=model)
+
+    if method in {"stavia", "via"}:
+        return _plot_stavia_graph(
+            data,
+            model=model,
+            basis=basis,
+            cluster_key=cluster_key,
+            key=key,
+            x=x,
+            y=y,
+            figsize=figsize,
+            dpi=dpi,
+            ax=ax,
+            ax1=ax1,
+            show=show,
+            save=save,
+            **kwargs,
+        )
+
+    if ax1 is not None:
+        raise ValueError("`ax1` is only used for `method='stavia'`.")
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=dpi)
+    else:
+        fig = ax.figure
+
+    graph_data, resolved_method = _resolve_graph_data(
+        data,
+        method=method,
+        basis=basis,
+        groups=groups,
+        model=model,
+        x=x,
+        y=y,
+    )
+    if resolved_method == "slingshot":
+        basis = "X_umap" if basis is None else _basis_key(data, basis)
+        coords = np.asarray(data.obsm[basis])[:, [x, y]]
+        if show_cells:
+            ax.scatter(
+                coords[:, 0],
+                coords[:, 1],
+                s=cell_size ** 2 * 10,
+                edgecolors="none",
+                alpha=cell_alpha,
+                zorder=1,
+            )
+        _draw_slingshot_curves(
+            ax,
+            model,
+            color=backbone_color,
+            linewidth=cell_link_size,
+            zorder=3,
+        )
+    else:
+        coords = (
+            graph_data.cell_coords
+            if graph_data.cell_coords is not None and len(graph_data.cell_coords) > 0
+            else graph_data.node_coords
+        )
+        if show_cells and graph_data.cell_coords is not None:
+            _draw_tree_cells(
+                ax,
+                data,
+                graph_data.cell_coords,
+                color=color,
+                cell_size=cell_size,
+                cell_alpha=cell_alpha,
+                cmap=cmap,
+                legend_loc=legend_loc,
+                legend_fontsize=legend_fontsize,
+            )
+        use_arrow = resolved_method == "paga" and graph_data.directed_edges
+        if resolved_method == "paga" and backbone_color == "#8A8A8A":
+            backbone_color = "#1A1A1A"
+        _draw_graph(
+            ax,
+            graph_data,
+            show_tree=show_tree,
+            show_branch_points=show_branch_points,
+            backbone_color=backbone_color,
+            cell_link_size=cell_link_size,
+            branch_point_size=branch_point_size,
+            branch_point_color=branch_point_color,
+            branch_point_label_color=branch_point_label_color,
+            branch_point_label_fontsize=branch_point_label_fontsize,
+            tree_alpha=0.86,
+            zorder_base=3,
+            arrow=use_arrow,
+        )
+    _add_axis_padding(ax, coords[:, 0], coords[:, 1], frac=0.04)
+    _format_stavia_axis(ax, frameon=frameon)
+    if save:
+        fig.savefig(save, dpi=dpi, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig, ax
+
+
+@register_function(
+    aliases=["trajectory_projection", "stavia trajectory projection", "trajectory curve projection", "轨迹投影图"],
+    category="pl",
+    description="Plot method-specific trajectory curves through the OV plotting API.",
+    examples=["ov.pl.trajectory_projection(stavia, method='stavia')"],
+    related=["pl.trajectory", "pl.trajectory_graph", "pl.plot_stream", "single.StaVIA"],
+)
+def trajectory_projection(
+    data,
+    *,
+    method="auto",
+    model=None,
+    basis=None,
+    groups=None,
+    cluster_key=None,
+    key="stavia",
+    color=None,
+    color_by=None,
+    x=0,
+    y=1,
+    figsize=(10, 5),
+    dpi=150,
+    size=50,
+    frameon="small",
+    show_tree=True,
+    show_branch_points=True,
+    backbone_color="#8A8A8A",
+    cell_link_size=1.15,
+    branch_point_size=150,
+    branch_point_color="#6F6F6F",
+    branch_point_label_color="white",
+    branch_point_label_fontsize=10,
+    legend_loc="right margin",
+    legend_fontsize=None,
+    cmap=None,
+    title=None,
+    ax=None,
+    ax1=None,
+    show=None,
+    save=None,
+    **kwargs,
+):
+    """Plot method-specific trajectory curves on an embedding.
+
+    StaVIA/VIA keeps the method-native two-panel curve projection. Monocle,
+    PAGA, and Slingshot are delegated to :func:`ov.pl.trajectory`, so the same
+    entry point can be used when the desired output is a projection onto an
+    embedding.
+    """
+    method = "auto" if method is None else str(method).lower()
+    if method == "auto":
+        if _is_stavia_result(data, model=model, key=key):
+            method = "stavia"
+        else:
+            method = _normalize_method(data, method="auto", model=model)
+    elif method not in {"stavia", "via"}:
+        method = _normalize_method(data, method=method, model=model)
+
+    if method in {"stavia", "via"}:
+        return _plot_stavia_trajectory(
+            data,
+            model=model,
+            basis=basis,
+            cluster_key=cluster_key,
+            key=key,
+            x=x,
+            y=y,
+            figsize=figsize,
+            dpi=dpi,
+            ax=ax,
+            ax1=ax1,
+            show=show,
+            save=save,
+            **kwargs,
+        )
+    if ax1 is not None:
+        raise ValueError("`ax1` is only used for `method='stavia'`.")
+    projection_figsize = (
+        (5, 4)
+        if figsize is not None and tuple(figsize) == (10, 5)
+        else figsize
+    )
+    return trajectory(
+        data,
+        basis=basis,
+        color=color,
+        color_by=color_by,
+        method=method,
+        groups=groups,
+        model=model,
+        x=x,
+        y=y,
+        size=size,
+        figsize=projection_figsize,
+        frameon=frameon,
+        show_tree=show_tree,
+        show_branch_points=show_branch_points,
+        backbone_color=backbone_color,
+        cell_link_size=cell_link_size,
+        branch_point_size=branch_point_size,
+        branch_point_color=branch_point_color,
+        branch_point_label_color=branch_point_label_color,
+        branch_point_label_fontsize=branch_point_label_fontsize,
+        legend_loc=legend_loc,
+        legend_fontsize=legend_fontsize,
+        cmap=cmap,
+        title=title,
+        ax=ax,
+        show=show,
+        save=save,
+        dpi=dpi,
+        **kwargs,
+    )
+
+
+@register_function(
+    aliases=[
+        "lineage_probability",
+        "lineage probability plot",
+        "stavia lineage probability",
+        "谱系概率图",
+    ],
+    category="pl",
+    description="Plot method-specific lineage probabilities through the OV plotting API.",
+    examples=["ov.pl.lineage_probability(stavia, method='stavia')"],
+    related=["pl.trajectory_projection", "pl.plot_stream", "single.StaVIA"],
+)
+def lineage_probability(
+    data,
+    *,
+    method="auto",
+    model=None,
+    basis=None,
+    key="stavia",
+    x=0,
+    y=1,
+    figsize=None,
+    dpi=150,
+    show=None,
+    save=None,
+    **kwargs,
+):
+    """Plot method-specific single-cell lineage probabilities."""
+    method = "auto" if method is None else str(method).lower()
+    if method == "auto":
+        summary = getattr(data, "uns", {}).get(key, {})
+        if _is_fitted_trajectory_wrapper(data) or _is_fitted_trajectory_wrapper(model) or summary.get("method") == "StaVIA":
+            method = "stavia"
+        else:
+            raise ValueError("Could not infer lineage-probability method. Pass `method='stavia'`.")
+
+    if method in {"stavia", "via"}:
+        return _plot_stavia_lineage_probability(
+            data,
+            method=method,
+            model=model,
+            basis=basis,
+            key=key,
+            x=x,
+            y=y,
+            figsize=figsize,
+            dpi=dpi,
+            show=show,
+            save=save,
+            **kwargs,
+        )
+    raise NotImplementedError("`ov.pl.lineage_probability` currently supports method='stavia'.")
+
+
 @register_function(
     aliases=[
         "trajectory",
@@ -920,6 +3044,8 @@ def trajectory(
     method="auto",
     groups=None,
     model=None,
+    cluster_key=None,
+    key="stavia",
     x=0,
     y=1,
     size=50,
@@ -941,6 +3067,7 @@ def trajectory(
     show=None,
     save=None,
     dpi=150,
+    use_maxout_edgelist=False,
     **embedding_kwargs,
 ):
     """Draw cells in an embedding and overlay a trajectory backbone.
@@ -964,8 +3091,9 @@ def trajectory(
     color_by
         Backward-compatible alias for ``color``.
     method
-        Trajectory backend. ``"auto"`` selects Monocle, then PAGA, then a
-        supported model. Explicit values currently supported are
+        Trajectory backend. ``"auto"`` selects StaVIA when a fitted wrapper or
+        StaVIA summary is detected, otherwise Monocle, PAGA, then a supported
+        model. Explicit values currently supported are ``"stavia"``,
         ``"monocle"``, ``"paga"``, and ``"slingshot"``.
     groups
         Observation key defining PAGA groups. When omitted, the key stored in
@@ -1021,15 +3149,59 @@ def trajectory(
     tuple[matplotlib.figure.Figure, matplotlib.axes.Axes]
         Figure and axes containing the embedding and trajectory overlay.
     """
-    resolved_method = _normalize_method(adata, method=method, model=model)
+    requested_method = "auto" if method is None else str(method).lower()
+    if requested_method == "auto":
+        if _is_stavia_result(adata, model=model, key=key):
+            resolved_method = "stavia"
+        else:
+            resolved_method = _normalize_method(adata, method="auto", model=model)
+    elif requested_method in {"stavia", "via"}:
+        resolved_method = "stavia"
+    else:
+        resolved_method = _normalize_method(adata, method=requested_method, model=model)
+
+    if resolved_method == "stavia":
+        return _plot_stavia_trajectory_single(
+            adata,
+            model=model,
+            basis=basis,
+            cluster_key=cluster_key,
+            key=key,
+            x=x,
+            y=y,
+            color=color,
+            color_by=color_by,
+            size=size,
+            figsize=figsize,
+            frameon=frameon,
+            show_tree=show_tree,
+            show_branch_points=show_branch_points,
+            backbone_color=backbone_color,
+            cell_link_size=cell_link_size,
+            branch_point_size=branch_point_size,
+            branch_point_color=branch_point_color,
+            branch_point_label_color=branch_point_label_color,
+            branch_point_label_fontsize=branch_point_label_fontsize,
+            legend_loc=legend_loc,
+            legend_fontsize=legend_fontsize,
+            cmap=cmap,
+            title=title,
+            ax=ax,
+            show=show,
+            save=save,
+            dpi=dpi,
+            use_maxout_edgelist=use_maxout_edgelist,
+            **embedding_kwargs,
+        )
+
     basis = _default_basis(resolved_method) if basis is None else basis
     color = color if color is not None else color_by
     if color is None:
         color = "State" if "State" in adata.obs else None
-    if resolved_method == "paga" and tuple(figsize) == (5, 4):
+    if resolved_method == "paga" and figsize is not None and tuple(figsize) == (5, 4):
         figsize = (4, 4)
     if ax is None:
-        fig, ax = plt.subplots(1, 1, figsize=figsize)
+        fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=dpi)
     else:
         fig = ax.figure
 
@@ -1141,13 +3313,14 @@ def _draw_tree_cells(
                 alpha=cell_alpha,
                 zorder=2,
             )
-            _build_categorical_legend(
-                ax,
-                color_map,
-                title=color,
-                anchor=legend_loc,
-                fontsize=legend_fontsize,
-            )
+            if _legend_is_enabled(legend_loc):
+                _build_categorical_legend(
+                    ax,
+                    color_map,
+                    title=color,
+                    anchor=legend_loc,
+                    fontsize=legend_fontsize,
+                )
         else:
             scatter = ax.scatter(
                 coords_scatter[:, 0],
@@ -1357,6 +3530,253 @@ def _paga_tree_layout(
     return graph_data, coords_scatter
 
 
+def _stavia_tree_layout(
+    data,
+    *,
+    model=None,
+    basis=None,
+    cluster_key=None,
+    key="stavia",
+    pseudotime="Pseudotime",
+    x=0,
+    y=1,
+    jitter_width=0.006,
+):
+    context = _stavia_plot_context(
+        data,
+        model=model,
+        basis=basis,
+        cluster_key=cluster_key,
+        key=key,
+        x=x,
+        y=y,
+    )
+    adata = context["adata"]
+    raw_model = context["raw_model"]
+    labels = context["labels"]
+    edges = context["edges"]
+    terminals = context["terminals"]
+    roots = context["roots"]
+    clusters = context["clusters"]
+    embedding_coords = context["embedding_coords"]
+    centers = context["centers"]
+    value_map = context["value_map"]
+
+    pseudotime_values, pseudotime_label = _resolve_stavia_pseudotime(
+        data,
+        adata,
+        raw_model,
+        key=key,
+        pseudotime=pseudotime,
+    )
+
+    label_array = np.asarray(labels, dtype=object)
+    cluster_time = {}
+    for cluster in clusters:
+        mask = label_array == cluster
+        if np.any(mask):
+            cluster_time[cluster] = float(np.nanmedian(pseudotime_values[mask]))
+        else:
+            cluster_time[cluster] = float(value_map.get(cluster, np.nan))
+
+    cluster_to_idx = {cluster: idx for idx, cluster in enumerate(clusters)}
+    n_nodes = len(clusters)
+    adjacency = {cluster: [] for cluster in clusters}
+    edge_clusters = []
+    for start, end in edges:
+        if start not in cluster_to_idx or end not in cluster_to_idx:
+            continue
+        adjacency[start].append(end)
+        adjacency[end].append(start)
+        edge_clusters.append((start, end))
+
+    finite_default = np.inf
+    root_order = [root for root in roots if root in cluster_to_idx]
+    remaining = [
+        cluster for cluster in clusters
+        if cluster not in root_order
+    ]
+    remaining = sorted(
+        remaining,
+        key=lambda cluster: (
+            cluster_time.get(cluster, finite_default)
+            if np.isfinite(cluster_time.get(cluster, np.nan))
+            else finite_default,
+            _cluster_sort_key(cluster),
+        ),
+    )
+    root_order.extend(remaining)
+
+    parent = {cluster: None for cluster in clusters}
+    children = {cluster: [] for cluster in clusters}
+    visited = set()
+    for start in root_order:
+        if start in visited:
+            continue
+        queue = [start]
+        visited.add(start)
+        while queue:
+            node = queue.pop(0)
+            neighbors = [neighbor for neighbor in adjacency[node] if neighbor not in visited]
+            neighbors = sorted(
+                neighbors,
+                key=lambda cluster: (
+                    cluster_time.get(cluster, finite_default)
+                    if np.isfinite(cluster_time.get(cluster, np.nan))
+                    else finite_default,
+                    _cluster_sort_key(cluster),
+                ),
+            )
+            for neighbor in neighbors:
+                parent[neighbor] = node
+                children[node].append(neighbor)
+                visited.add(neighbor)
+                queue.append(neighbor)
+
+    x_positions = {}
+    next_leaf = 0
+
+    def assign_x(cluster):
+        nonlocal next_leaf
+        if cluster in x_positions:
+            return x_positions[cluster]
+        if not children[cluster]:
+            x_positions[cluster] = float(next_leaf)
+            next_leaf += 1
+        else:
+            child_x = [assign_x(child) for child in children[cluster]]
+            x_positions[cluster] = float(np.nanmean(child_x))
+        return x_positions[cluster]
+
+    for start in root_order:
+        if start not in x_positions:
+            assign_x(start)
+            next_leaf += 1
+
+    node_coords = np.zeros((n_nodes, 2), dtype=float)
+    for cluster, idx in cluster_to_idx.items():
+        node_coords[idx, 0] = x_positions.get(cluster, float(idx))
+        node_coords[idx, 1] = cluster_time.get(cluster, np.nan)
+
+    if n_nodes > 1 and np.all(np.isfinite(node_coords[:, 0])):
+        node_coords[:, 0] -= np.nanmean(node_coords[:, 0])
+        node_coords[:, 0] *= 1.65
+        basis_x = np.asarray(
+            [
+                centers.get(cluster, np.array([np.nan, np.nan], dtype=float))[0]
+                for cluster in clusters
+            ],
+            dtype=float,
+        )
+        valid = np.isfinite(basis_x) & np.isfinite(node_coords[:, 0])
+        if np.sum(valid) > 1:
+            basis_span = np.nanmax(basis_x[valid]) - np.nanmin(basis_x[valid])
+            tree_span = np.nanmax(node_coords[valid, 0]) - np.nanmin(node_coords[valid, 0])
+            if basis_span > 1e-8 and tree_span > 1e-8:
+                basis_scaled = (basis_x - np.nanmean(basis_x[valid])) / basis_span * tree_span
+                corr = np.corrcoef(node_coords[valid, 0], basis_scaled[valid])[0, 1]
+                if np.isfinite(corr) and corr < 0:
+                    basis_scaled *= -1
+                node_coords[valid, 0] = 0.64 * node_coords[valid, 0] + 0.36 * basis_scaled[valid]
+
+    cell_x = np.zeros(adata.n_obs, dtype=float)
+    dx = np.nanmax(node_coords[:, 0]) - np.nanmin(node_coords[:, 0]) if n_nodes else 1.0
+    dx = dx if dx > 0 else 1.0
+    lane_width = max(0.34, min(0.85, dx * 0.22))
+    for obs_idx, cluster in enumerate(label_array):
+        node_idx = cluster_to_idx.get(cluster)
+        if node_idx is None:
+            cell_x[obs_idx] = np.nan
+            continue
+        parent_cluster = parent.get(cluster)
+        if parent_cluster is not None:
+            parent_idx = cluster_to_idx[parent_cluster]
+            start_time = node_coords[parent_idx, 1]
+            end_time = node_coords[node_idx, 1]
+            span = end_time - start_time
+            if np.isfinite(span) and abs(span) > 1e-8:
+                frac = np.clip((pseudotime_values[obs_idx] - start_time) / span, 0.0, 1.0)
+                cell_x[obs_idx] = node_coords[parent_idx, 0] + frac * (
+                    node_coords[node_idx, 0] - node_coords[parent_idx, 0]
+                )
+            else:
+                cell_x[obs_idx] = node_coords[node_idx, 0]
+        else:
+            cell_x[obs_idx] = node_coords[node_idx, 0]
+
+    for cluster in clusters:
+        mask = label_array == cluster
+        if not np.any(mask):
+            continue
+        parent_cluster = parent.get(cluster)
+        if parent_cluster is not None and cluster in centers and parent_cluster in centers:
+            direction = np.asarray(centers[cluster]) - np.asarray(centers[parent_cluster])
+        elif children[cluster] and cluster in centers and children[cluster][0] in centers:
+            direction = np.asarray(centers[children[cluster][0]]) - np.asarray(centers[cluster])
+        else:
+            direction = np.array([1.0, 0.0])
+        if np.linalg.norm(direction) > 1e-8:
+            direction = direction / np.linalg.norm(direction)
+            axis = np.array([-direction[1], direction[0]])
+        else:
+            axis = np.array([1.0, 0.0])
+        center = np.nanmedian(embedding_coords[mask], axis=0)
+        score = (embedding_coords[mask] - center) @ axis
+        finite_score = score[np.isfinite(score)]
+        scale = (
+            np.nanpercentile(np.abs(finite_score), 90)
+            if len(finite_score)
+            else 0.0
+        )
+        if not np.isfinite(scale) or scale <= 1e-8:
+            scale = np.nanstd(finite_score) if len(finite_score) else 0.0
+        if not np.isfinite(scale) or scale <= 1e-8:
+            continue
+        cell_x[mask] += np.clip(score / scale, -1.0, 1.0) * lane_width
+
+    coords_scatter = np.column_stack([cell_x, pseudotime_values])
+    rng = np.random.default_rng(0)
+    coords_scatter[:, 0] += rng.normal(
+        0.0,
+        max(dx * jitter_width, 0.026),
+        size=coords_scatter.shape[0],
+    )
+
+    edge_indices = [
+        (cluster_to_idx[start], cluster_to_idx[end])
+        for start, end in edge_clusters
+    ]
+    directed_edges = []
+    for i, j in edge_indices:
+        time_i = node_coords[i, 1]
+        time_j = node_coords[j, 1]
+        if np.isfinite(time_i) and np.isfinite(time_j) and time_i <= time_j:
+            directed_edges.append((i, j, 1.0))
+        elif np.isfinite(time_i) and np.isfinite(time_j):
+            directed_edges.append((j, i, 1.0))
+
+    terminal_indices = [
+        cluster_to_idx[terminal]
+        for terminal in terminals
+        if terminal in cluster_to_idx
+    ]
+    terminal_labels = [
+        f"TS{terminal}"
+        for terminal in terminals
+        if terminal in cluster_to_idx
+    ]
+    graph_data = _GraphData(
+        node_coords=node_coords,
+        edges=edge_indices,
+        branch_indices=terminal_indices,
+        branch_labels=terminal_labels,
+        cell_coords=coords_scatter,
+        edge_weights=[1.0] * len(edge_indices),
+        directed_edges=directed_edges,
+    )
+    return graph_data, coords_scatter, pseudotime_label, context
+
+
 @register_function(
     aliases=[
         "trajectory_tree",
@@ -1393,9 +3813,14 @@ def trajectory_tree(
     color=None,
     color_by=None,
     method="auto",
+    model=None,
     basis="X_umap",
     groups=None,
+    cluster_key=None,
+    key="stavia",
     pseudotime="Pseudotime",
+    x=0,
+    y=1,
     show_branch_points=True,
     cell_size=2.0,
     cell_link_size=0.7,
@@ -1429,7 +3854,7 @@ def trajectory_tree(
         Backward-compatible alias for ``color``.
     method
         Trajectory backend. ``trajectory_tree`` currently supports
-        ``"monocle"`` and ``"paga"``.
+        ``"monocle"``, ``"paga"``, and ``"stavia"``.
     basis
         Low-dimensional representation used to initialize PAGA branch
         separation. Monocle tree layout does not use this parameter.
@@ -1470,16 +3895,30 @@ def trajectory_tree(
     tuple[matplotlib.figure.Figure, matplotlib.axes.Axes]
         Figure and axes containing the pseudotime tree view.
     """
-    method = _normalize_method(adata, method=method)
-    if pseudotime not in adata.obs:
+    requested_method = "auto" if method is None else str(method).lower()
+    if requested_method == "auto":
+        if _is_stavia_result(adata, model=model, key=key):
+            method = "stavia"
+        else:
+            method = _normalize_method(adata, method="auto", model=model)
+    elif requested_method in {"stavia", "via"}:
+        method = "stavia"
+    else:
+        method = _normalize_method(adata, method=requested_method, model=model)
+
+    plot_adata = adata.adata if _is_fitted_trajectory_wrapper(adata) else adata
+    color = color if color is not None else color_by
+    if color is None and method == "stavia":
+        summary = getattr(plot_adata, "uns", {}).get(key, {})
+        color = cluster_key or summary.get("cluster_key")
+    if color is None:
+        color = "State" if "State" in plot_adata.obs else None
+
+    if method != "stavia" and pseudotime not in plot_adata.obs:
         raise KeyError(f"`{pseudotime}` was not found in `adata.obs`.")
 
-    color = color if color is not None else color_by
-    if color is None:
-        color = "State" if "State" in adata.obs else None
-
     if ax is None:
-        fig, ax = plt.subplots(1, 1, figsize=figsize)
+        fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=dpi)
     else:
         fig = ax.figure
 
@@ -1494,21 +3933,21 @@ def trajectory_tree(
     branch_anchors = None
     branch_labels = None
     branch_avoid_coords = None
-    paga_graph_data = None
+    tree_graph_data = None
     if method == "monocle":
-        monocle = adata.uns["monocle"]
+        monocle = plot_adata.uns["monocle"]
         if "pr_graph_cell_proj_tree" not in monocle:
             raise ValueError("Run order_cells() first to build the cell projection MST.")
 
         cell_mst = monocle["pr_graph_cell_proj_tree"]
         vertex_names = cell_mst.vs["name"]
-        pseudotime_values = adata.obs.loc[vertex_names, pseudotime].to_numpy(dtype=float)
+        pseudotime_values = plot_adata.obs.loc[vertex_names, pseudotime].to_numpy(dtype=float)
         root_idx = int(np.nanargmin(pseudotime_values))
         coords = np.asarray(cell_mst.layout_reingold_tilford(root=[root_idx]).coords)
         coords[:, 1] = pseudotime_values
 
         name_to_idx = {name: idx for idx, name in enumerate(vertex_names)}
-        order = [name_to_idx[name] for name in adata.obs_names]
+        order = [name_to_idx[name] for name in plot_adata.obs_names]
         coords_sorted = coords[order]
         dx = np.nanmax(coords[:, 0]) - np.nanmin(coords[:, 0])
         dx = dx if dx > 0 else 1.0
@@ -1535,18 +3974,37 @@ def trajectory_tree(
             )
             branch_avoid_coords = coords_scatter
     elif method == "paga":
-        paga_graph_data, coords_scatter = _paga_tree_layout(
-            adata,
+        tree_graph_data, coords_scatter = _paga_tree_layout(
+            plot_adata,
             basis=basis,
             groups=groups,
             pseudotime=pseudotime,
-            x=0,
-            y=1,
+            x=x,
+            y=y,
             jitter_width=jitter_width,
         )
-        if show_branch_points and paga_graph_data.branch_indices:
-            branch_anchors = paga_graph_data.node_coords[paga_graph_data.branch_indices]
-            branch_labels = paga_graph_data.branch_labels
+        if show_branch_points and tree_graph_data.branch_indices:
+            branch_anchors = tree_graph_data.node_coords[tree_graph_data.branch_indices]
+            branch_labels = tree_graph_data.branch_labels
+            branch_avoid_coords = coords_scatter
+    elif method == "stavia":
+        tree_graph_data, coords_scatter, pseudotime, context = _stavia_tree_layout(
+            adata,
+            model=model,
+            basis=basis,
+            cluster_key=cluster_key,
+            key=key,
+            pseudotime=pseudotime,
+            x=x,
+            y=y,
+            jitter_width=jitter_width,
+        )
+        plot_adata = context["adata"]
+        if color is None:
+            color = context["cluster_key"]
+        if show_branch_points and tree_graph_data.branch_indices:
+            branch_anchors = tree_graph_data.node_coords[tree_graph_data.branch_indices]
+            branch_labels = tree_graph_data.branch_labels
             branch_avoid_coords = coords_scatter
     else:
         raise NotImplementedError(
@@ -1555,7 +4013,7 @@ def trajectory_tree(
 
     _draw_tree_cells(
         ax,
-        adata,
+        plot_adata,
         coords_scatter,
         color=color,
         cell_size=tree_cell_size,
@@ -1564,12 +4022,12 @@ def trajectory_tree(
         legend_loc=legend_loc,
         legend_fontsize=legend_fontsize,
     )
-    if paga_graph_data is not None and not ax.yaxis_inverted():
+    if tree_graph_data is not None and not ax.yaxis_inverted():
         ax.invert_yaxis()
-    if paga_graph_data is not None:
+    if tree_graph_data is not None:
         _draw_graph(
             ax,
-            paga_graph_data,
+            tree_graph_data,
             show_tree=True,
             show_branch_points=False,
             backbone_color="#1A1A1A",
@@ -1583,7 +4041,7 @@ def trajectory_tree(
             arrow=True,
         )
     if branch_anchors is not None:
-        _draw_branch_points(
+        branch_label_positions = _draw_branch_points(
             ax,
             branch_anchors,
             branch_labels,
@@ -1594,11 +4052,16 @@ def trajectory_tree(
             zorder=5,
             avoid_coords=branch_avoid_coords,
         )
+        _expand_limits_to_points(
+            ax,
+            np.vstack([np.asarray(branch_anchors), branch_label_positions]),
+            frac=0.06,
+        )
 
     if not ax.yaxis_inverted():
         ax.invert_yaxis()
     ax.set_xlabel("")
-    ax.set_ylabel(pseudotime)
+    ax.set_ylabel(pseudotime, labelpad=10)
     ax.set_xticks([])
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)

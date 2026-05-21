@@ -12,6 +12,7 @@ This module provides comprehensive tools for single-cell RNA-seq analysis includ
 
 Key classes:
     pyMOFA: Multi-Omics Factor Analysis
+    StaVIA: Spatial/temporal trajectory inference with the VIA backend
     pyVIA: Velocity and pseudotime analysis 
     pySIMBA: Single-cell integration and batch alignment
     pyTOSICA: Trajectory inference and cell fate analysis
@@ -26,6 +27,7 @@ Annotation tools:
     CellVote: Consensus cell type annotation
 
 Trajectory analysis:
+    StaVIA: Spatial/temporal trajectory inference
     TrajInfer: Trajectory inference framework
     scLTNN: Lineage tracing with neural networks
     cytotrace2: Developmental potential scoring
@@ -36,8 +38,8 @@ Examples:
     >>> ov.single.pySCSA(adata, tissue='lung', species='human')
     >>> 
     >>> # Trajectory analysis
-    >>> via = ov.single.pyVIA(adata)
-    >>> via.run_via()
+    >>> stavia = ov.single.StaVIA(adata, spatial_key='spatial')
+    >>> stavia.fit()
     >>> 
     >>> # Multi-omics integration
     >>> mofa = ov.single.pyMOFA(data_dict)
@@ -110,6 +112,7 @@ from ._monocle import Monocle
 # Usage: cnv = ov.single.CNV(adata, method='copykat'); cnv.run()
 from ._cnv import CNV
 
+from ._stavia import StaVIA
 from ._lazy_step_by_step import (
     lazy_step_qc, lazy_step_preprocess, lazy_step_scale, lazy_step_pca,
     lazy_step_cell_cycle, lazy_step_harmony, lazy_step_scvi, 
@@ -302,6 +305,7 @@ __all__ = [
     'plot_weights',
     
     # Trajectory and pseudotime analysis
+    'StaVIA',
     #'pyVIA',
     #'scRNA_hematopoiesis',
     'TrajInfer',

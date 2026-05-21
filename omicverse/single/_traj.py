@@ -38,7 +38,7 @@ def _get_palantir_backend():
 @register_function(
     aliases=["轨迹推断", "TrajInfer", "trajectory_inference", "轨迹分析", "发育轨迹"],
     category="single",
-    description="Comprehensive trajectory inference for single-cell data using multiple algorithms including Palantir, diffusion maps, and Slingshot",
+    description="Comprehensive trajectory inference for single-cell data using multiple algorithms including Palantir, diffusion maps, Slingshot, and StaVIA",
     prerequisites={
         'functions': ['pca', 'neighbors'],
         'optional_functions': ['leiden', 'umap']
@@ -66,6 +66,8 @@ def _get_palantir_backend():
         "traj.inference(method='slingshot', num_epochs=1)",
         "# Palantir trajectory inference",
         "traj.inference(method='palantir', num_waypoints=500)",
+        "# StaVIA spatial trajectory inference",
+        "traj.inference(method='stavia', spatial_key='spatial', spatial_knn=15)",
         "# Visualize Palantir results",
         "traj.palantir_plot_pseudotime(embedding_basis='X_umap', cmap='RdBu_r')",
         "# Calculate branch probabilities",
@@ -152,8 +154,8 @@ class TrajInfer(object):
         ----------
         method : str
             Trajectory inference backend. Supported values include
-            ``'palantir'``, ``'diffusion_map'``, ``'slingshot'`` and
-            ``'sctour'``.
+            ``'palantir'``, ``'diffusion_map'``, ``'slingshot'``,
+            ``'sctour'`` and ``'stavia'``.
         **kwargs
             Additional backend-specific keyword arguments.
             
@@ -255,8 +257,21 @@ class TrajInfer(object):
             )
             add_reference(self.adata,'sctour','trajectory inference with sctour')
             self.tnode=tnode
+        elif method=='stavia':
+            from ._stavia import StaVIA
+
+            stavia_kwargs = dict(kwargs)
+            stavia_kwargs.setdefault("use_rep", self.use_rep)
+            stavia_kwargs.setdefault("n_comps", self.n_comps)
+            stavia_kwargs.setdefault("basis", self.basis)
+            stavia_kwargs.setdefault("cluster_key", self.groupby)
+
+            model = StaVIA(self.adata, **stavia_kwargs)
+            model.fit()
+            self.stavia = model
+            return model
         else:
-            print('Please input the correct method name, such as `palantir` or `diffusion_map`')
+            print('Please input the correct method name, such as `palantir`, `diffusion_map`, or `stavia`')
             return
         
     def palantir_plot_pseudotime(self, return_fig: bool = False, **kwargs):
