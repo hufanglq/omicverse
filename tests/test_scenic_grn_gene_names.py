@@ -72,6 +72,29 @@ def fake_arboreto_module(monkeypatch):
         "omicverse.external.single.arboreto.algo",
         fake,
     )
+
+    fake_distributed = types.ModuleType("distributed")
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+        def compute(self, *args, **kwargs):
+            return None
+
+    class FakeLocalCluster:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    fake_distributed.Client = FakeClient
+    fake_distributed.LocalCluster = FakeLocalCluster
+    monkeypatch.setitem(sys.modules, "distributed", fake_distributed)
     return captured
 
 
