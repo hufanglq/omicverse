@@ -234,6 +234,338 @@ def test_trajectory_overlay_supports_paga_graph():
     assert all(mcolors.same_color(line.get_color(), "#1A1A1A") for line in ax.lines)
     plt.close(fig)
 
+    fig, ax = ov.pl.trajectory_graph(
+        adata,
+        method="paga",
+        groups="clusters",
+        color="clusters",
+        figsize=(4, 4),
+    )
+    assert tuple(fig.get_size_inches()) == pytest.approx((4, 4))
+    assert ax.lines
+    assert ax.collections
+    plt.close(fig)
+
+    fig, ax = ov.pl.trajectory_projection(
+        adata,
+        method="paga",
+        groups="clusters",
+        color="clusters",
+    )
+    assert fig.get_size_inches()[0] == pytest.approx(4)
+    assert ax.lines
+    assert ax.collections
+    plt.close(fig)
+
+
+def _make_stavia_stream_adata():
+    adata = ad.AnnData(
+        X=np.ones((4, 2)),
+        obs=pd.DataFrame(
+            {
+                "clusters": pd.Categorical(
+                    ["A", "A", "B", "B"],
+                    categories=["A", "B"],
+                )
+            },
+            index=[f"c{i}" for i in range(4)],
+        ),
+    )
+    adata.obsm["X_umap"] = np.array(
+        [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+        dtype=float,
+    )
+    adata.uns["clusters_colors"] = ["#111111", "#EEEEEE"]
+    adata.uns["traj_stavia"] = {
+        "method": "StaVIA",
+        "basis": "X_umap",
+        "cluster_key": "clusters",
+        "params": {"RW2_mode": True},
+    }
+    return adata
+
+
+class _FakeStaVIABackend:
+    def __init__(self, adata):
+        self.nsamples = adata.n_obs
+        self.single_cell_pt_markov = np.linspace(0.0, 1.0, adata.n_obs)
+        self.true_label = adata.obs["clusters"]
+        self.labels = np.array([0, 0, 1, 1])
+        self.single_cell_bp = np.array([[0.9], [0.8], [0.2], [0.1]], dtype=float)
+        self.terminal_clusters = [1]
+        self.root = [0]
+        self.graph_node_pos = np.array([[0.0, 0.0], [1.0, 1.0]], dtype=float)
+        self.edgelist = [(0, 1)]
+        self.edgelist_maxout = [(0, 1)]
+        self.markov_hitting_times = np.array([0.0, 1.0], dtype=float)
+        self.knn = 5
+        self.ncomp = 2
+        self.time_series = False
+        self.do_spatial_knn = False
+        self.calls = []
+
+    def _velocity_embedding(
+        self,
+        embedding,
+        smooth_transition,
+        b,
+        use_sequentially_augmented=False,
+    ):
+        self.calls.append(
+            {
+                "embedding": embedding.copy(),
+                "smooth_transition": smooth_transition,
+                "b": b,
+                "use_sequentially_augmented": use_sequentially_augmented,
+            }
+        )
+        return np.array(
+            [[1.0, 0.0], [1.0, 0.1], [0.1, 1.0], [0.0, 1.0]],
+            dtype=float,
+        )
+
+
+def test_plot_stream_accepts_fitted_stavia_wrapper():
+    adata = _make_stavia_stream_adata()
+    raw_model = _FakeStaVIABackend(adata)
+
+    class FakeStaVIA:
+        def __init__(self):
+            self.adata = adata
+            self.model = raw_model
+            self.basis = "X_umap"
+            self.cluster_key = "clusters"
+
+        def _effective_rw2_mode(self):
+            return True
+
+    fig, ax = ov.pl.plot_stream(
+        FakeStaVIA(),
+        method="stavia",
+        density_grid=0.3,
+        n_neighbors_velocity_grid=2,
+        title=None,
+    )
+
+    assert fig is ax.figure
+    np.testing.assert_allclose(raw_model.calls[0]["embedding"], adata.obsm["X_umap"])
+    assert raw_model.calls[0]["smooth_transition"] == 1
+    assert raw_model.calls[0]["b"] == pytest.approx(20)
+    assert ax.collections
+    assert max(text.get_fontsize() for text in ax.texts) >= 8
+    assert ax.axison is False
+    plt.close(fig)
+
+
+def test_plot_stream_supports_stavia_anndata_with_backend_model():
+    adata = _make_stavia_stream_adata()
+    raw_model = _FakeStaVIABackend(adata)
+
+    fig, ax = ov.pl.plot_stream(
+        adata,
+        method="stavia",
+        model=raw_model,
+        key="traj_stavia",
+        density_grid=0.3,
+        n_neighbors_velocity_grid=2,
+        title=None,
+    )
+
+    assert raw_model.calls
+    assert fig is ax.figure
+    assert ax.collections
+    plt.close(fig)
+
+
+def test_plot_stream_respects_matplotlib_style_for_stavia():
+    adata = _make_stavia_stream_adata()
+    raw_model = _FakeStaVIABackend(adata)
+
+    with plt.rc_context({"axes.titlesize": 17}):
+        fig, ax = ov.pl.plot_stream(
+            adata,
+            method="stavia",
+            model=raw_model,
+            key="traj_stavia",
+            density_grid=0.3,
+            n_neighbors_velocity_grid=2,
+            title="Styled stream",
+        )
+
+    assert ax.title.get_text() == "Styled stream"
+    assert ax.title.get_fontsize() == pytest.approx(17)
+    plt.close(fig)
+
+
+def test_plot_stream_requires_stavia_backend_model_for_anndata():
+    adata = _make_stavia_stream_adata()
+
+    with pytest.raises(ValueError, match="backend model"):
+        ov.pl.plot_stream(adata, method="stavia", key="traj_stavia")
+
+
+def test_plot_stream_supports_generic_pseudotime_results():
+    adata = _make_stavia_stream_adata()
+    adata.obs["palantir_pseudotime"] = [0.0, 0.25, 0.75, 1.0]
+    adata.obsp["connectivities"] = sparse.csr_matrix(
+        np.array(
+            [
+                [0.0, 1.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [0.0, 1.0, 1.0, 0.0],
+            ],
+            dtype=float,
+        )
+    )
+
+    fig, ax = ov.pl.plot_stream(
+        adata,
+        method="pseudotime",
+        pseudotime_key="palantir_pseudotime",
+        density_grid=0.3,
+        color="clusters",
+    )
+
+    assert fig is ax.figure
+    assert ax.collections
+    plt.close(fig)
+
+
+def test_stavia_native_plots_render_in_ov_pl():
+    adata = _make_stavia_stream_adata()
+    raw_model = _FakeStaVIABackend(adata)
+
+    fig, ax, ax1 = ov.pl.trajectory_graph(
+        adata,
+        method="stavia",
+        model=raw_model,
+        key="traj_stavia",
+        figsize=(6, 3),
+        title="Native graph",
+    )
+    assert tuple(fig.get_size_inches()) == pytest.approx((6, 3))
+    assert ax.get_title() == "Native graph"
+    assert ax1.collections
+    plt.close(fig)
+
+    fig, ax, ax1 = ov.pl.trajectory_projection(
+        adata,
+        method="stavia",
+        model=raw_model,
+        key="traj_stavia",
+        figsize=(6, 3),
+    )
+    assert tuple(fig.get_size_inches()) == pytest.approx((6, 3))
+    assert ax.collections
+    assert ax.get_legend() is None
+    assert ax1.collections
+    assert ax1.patches
+    terminal_texts = [
+        text for text in ax1.texts if text.get_text().startswith("TS")
+    ]
+    assert terminal_texts
+    assert mcolors.same_color(terminal_texts[0].get_color(), "white")
+    assert terminal_texts[0].get_path_effects()
+    plt.close(fig)
+
+    fig, axs = ov.pl.lineage_probability(
+        adata,
+        method="stavia",
+        model=raw_model,
+        key="traj_stavia",
+        figsize=(4, 4),
+    )
+    assert tuple(fig.get_size_inches()) == pytest.approx((4, 4))
+    assert axs.flat[0].collections
+    plt.close(fig)
+
+    assert not hasattr(ov.pl, "plot_graph")
+    assert not hasattr(ov.pl, "plot_trajectory")
+    assert not hasattr(ov.pl, "plot_lineage_probability")
+
+
+def test_trajectory_supports_stavia_projection_overlay():
+    adata = _make_stavia_stream_adata()
+    raw_model = _FakeStaVIABackend(adata)
+
+    fig, ax = ov.pl.trajectory(
+        adata,
+        method="stavia",
+        model=raw_model,
+        key="traj_stavia",
+        cluster_key="clusters",
+    )
+
+    assert ax.collections
+    arrow_patches = [
+        patch for patch in ax.patches if isinstance(patch, FancyArrowPatch)
+    ]
+    assert arrow_patches
+    assert any(text.get_text() == "TS1" for text in ax.texts)
+    plt.close(fig)
+
+
+def test_trajectory_tree_supports_stavia_backend_model():
+    adata = _make_stavia_stream_adata()
+    raw_model = _FakeStaVIABackend(adata)
+    adata.obs["traj_stavia_pseudotime"] = raw_model.single_cell_pt_markov
+    adata.uns["traj_stavia"]["pseudotime_key"] = "traj_stavia_pseudotime"
+
+    fig, ax = ov.pl.trajectory_tree(
+        adata,
+        method="stavia",
+        model=raw_model,
+        key="traj_stavia",
+        cluster_key="clusters",
+        legend_loc=False,
+    )
+
+    assert ax.get_ylabel() == "traj_stavia_pseudotime"
+    assert ax.get_legend() is None
+    assert ax.yaxis_inverted()
+    arrow_patches = [
+        patch for patch in ax.patches if isinstance(patch, FancyArrowPatch)
+    ]
+    assert arrow_patches
+    assert any(text.get_text() == "TS1" for text in ax.texts)
+    cell_collection = [
+        collection for collection in ax.collections
+        if len(collection.get_offsets()) == adata.n_obs
+    ][0]
+    assert np.allclose(
+        cell_collection.get_offsets()[:, 1],
+        adata.obs["traj_stavia_pseudotime"].to_numpy(dtype=float),
+    )
+    plt.close(fig)
+
+
+def test_lineage_probability_uses_adaptive_layout_for_two_lineages():
+    adata = _make_stavia_stream_adata()
+    raw_model = _FakeStaVIABackend(adata)
+    raw_model.single_cell_bp = np.array(
+        [
+            [0.90, 0.10],
+            [0.85, 0.15],
+            [0.20, 0.80],
+            [0.10, 0.90],
+        ],
+        dtype=float,
+    )
+    raw_model.terminal_clusters = [0, 1]
+
+    fig, axs = ov.pl.lineage_probability(
+        adata,
+        method="stavia",
+        model=raw_model,
+        key="traj_stavia",
+    )
+
+    assert axs.shape == (2, 1)
+    width, height = fig.get_size_inches()
+    assert height > width
+    plt.close(fig)
+
 
 def test_trajectory_tree_supports_paga_graph():
     adata = ad.AnnData(

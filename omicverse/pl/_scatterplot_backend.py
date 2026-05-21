@@ -466,6 +466,10 @@ def embedding(
         else:
             normalize = None
 
+        scatter_kwargs = dict(kwargs)
+        if categorical or not _is_numeric_array(color_vector):
+            scatter_kwargs.pop("cmap", None)
+
         # make the scatter plot
         if projection == '3d':
             cax = ax.scatter(
@@ -476,7 +480,7 @@ def embedding(
                 rasterized=_get_vector_friendly(),
                 norm=normalize,
                 marker=marker[count],
-                **kwargs,
+                **scatter_kwargs,
             )
         else:
             scatter = (
@@ -507,10 +511,10 @@ def embedding(
 
                 # remove edge from kwargs if present
                 # because edge needs to be set to None
-                kwargs['edgecolor'] = 'none'
+                scatter_kwargs['edgecolor'] = 'none'
 
                 # remove alpha for outline
-                alpha = kwargs.pop('alpha') if 'alpha' in kwargs else None
+                alpha = scatter_kwargs.pop('alpha') if 'alpha' in scatter_kwargs else None
 
                 ax.scatter(
                     coords[:, 0],
@@ -520,7 +524,7 @@ def embedding(
                     rasterized=_get_vector_friendly(),
                     norm=normalize,
                     marker=marker[count],
-                    **kwargs,
+                    **scatter_kwargs,
                 )
                 ax.scatter(
                     coords[:, 0],
@@ -530,10 +534,10 @@ def embedding(
                     rasterized=_get_vector_friendly(),
                     norm=normalize,
                     marker=marker[count],
-                    **kwargs,
+                    **scatter_kwargs,
                 )
                 # if user did not set alpha, set alpha to 0.7
-                kwargs['alpha'] = 0.7 if alpha is None else alpha
+                scatter_kwargs['alpha'] = 0.7 if alpha is None else alpha
 
             cax = scatter(
                 coords[:, 0],
@@ -542,7 +546,7 @@ def embedding(
                 rasterized=_get_vector_friendly(),
                 norm=normalize,
                 marker=marker[count],
-                **kwargs,
+                **scatter_kwargs,
             )
 
         # remove y and x ticks

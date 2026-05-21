@@ -3,6 +3,222 @@ import anndata as ad
 import pandas as pd
 
 from .._registry import register_function
+from .._optional import build_optional_dependency_error
+
+
+@register_function(
+    aliases=[
+        'grn',
+        'GRN',
+        'infer_grn',
+        'GRNBoost2 prior',
+        'GENIE3 prior',
+        'TF-target network',
+        '基因调控网络推断',
+    ],
+    category="single",
+    description="Infer a TF-target gene regulatory network as a TF/target/importance edge list.",
+    prerequisites={'optional_functions': ['single.SCENIC']},
+    requires={'layers': ['expression layer or X'], 'var': ['gene names']},
+    examples=[
+        "prior = ov.single.grn(adata, regulators=tfs, layer='spliced')",
+        "prior = ov.single.grn(adata, method='genie3', regulators=tfs)",
+        "prior = ov.single.grn(adata, method='regdiffusion', layer='counts')",
+    ],
+    related=['single.SCENIC', 'single.Velo'],
+)
+def grn(
+    adata,
+    method='grnboost2',
+    regulators=None,
+    layer=None,
+    top=None,
+    log=True,
+    seed=42,
+    n_workers=2,
+    threads=2,
+    client=None,
+    key_added=None,
+    **kwargs,
+):
+    """Infer a TF-target GRN edge list from an AnnData expression matrix.
+
+    Parameters
+    ----------
+    adata
+        Input AnnData.
+    method : {'grnboost2', 'genie3', 'regdiffusion'}
+        GRN inference backend.
+    regulators : sequence of str, 'all' or None
+        Candidate regulators. If ``None`` and ``adata.var['is_tf']`` exists,
+        those genes are used; otherwise all genes are used.
+    layer : str or None
+        Expression layer to use. If ``None``, use ``adata.X``.
+    top : int or None
+        Keep at most this many targets per regulator.
+    log : bool
+        Whether to apply ``log1p`` before inference.
+    seed : int or None
+        Random seed forwarded to the backend.
+    n_workers, threads : int
+        Thread-based Dask cluster size when ``client`` is not provided.
+    client
+        Optional Dask client or scheduler address.
+    key_added : str or None
+        If provided, store the returned edge list in ``adata.uns[key_added]``
+        and store lightweight run parameters in
+        ``adata.uns[f'{key_added}_params']``.
+    **kwargs
+        Extra backend-specific arguments. For ``method='grnboost2'`` and
+        ``method='genie3'``, these are forwarded to the corresponding
+        arboreto backend. For ``method='regdiffusion'``, these are forwarded
+        to ``regdiffusion.RegDiffusionTrainer``; commonly used options include
+        ``T``, ``start_noise``, ``end_noise``, ``time_dim``,
+        ``celltype_dim``, ``hidden_dim``, ``init_coef``, ``lr_nn``,
+        ``lr_adj``, ``weight_decay_nn``, ``weight_decay_adj``,
+        ``sparse_loss_coef``, ``adj_dropout``, ``batch_size``, ``n_steps``,
+        ``train_split``, ``train_split_seed``, ``device``, ``compile``,
+        ``evaluator``, ``eval_on_n_steps`` and ``logger``. RegDiffusion
+        output extraction also accepts ``top_gene_percentile`` (default 50)
+        and ``workers`` (default ``n_workers``).
+
+    Notes
+    -----
+    ``ov.single.grn`` applies ``log1p`` by default. Pass ``log=False`` if the
+    selected matrix is already log-transformed. RegDiffusion builds a dense
+    gene-by-gene adjacency matrix, so HVG or gene-subset filtering is
+    recommended for large gene spaces.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Edge list with ``TF``, ``target`` and ``importance`` columns.
+    """
+    import scipy.sparse as sp
+
+    method = method.lower()
+    if method not in {'grnboost2', 'genie3', 'regdiffusion'}:
+        raise ValueError("method must be one of {'grnboost2', 'genie3', 'regdiffusion'}")
+
+    use_all_regulators = regulators == 'all' if isinstance(regulators, str) else False
+    if regulators is None:
+        if 'is_tf' in adata.var:
+            regulators = adata.var_names[adata.var['is_tf'].astype(bool)].tolist()
+        else:
+            regulators = 'all'
+            use_all_regulators = True
+    elif not use_all_regulators:
+        regulators = [gene for gene in regulators if gene in adata.var_names]
+        if not regulators:
+            raise ValueError("No regulator genes are present in adata.var_names.")
+
+    x_matrix = adata.layers[layer] if layer is not None else adata.X
+    x_matrix = x_matrix.toarray() if sp.issparse(x_matrix) else np.asarray(x_matrix)
+    x_matrix = x_matrix.astype(np.float32, copy=False)
+    if log:
+        x_matrix = np.log1p(x_matrix)
+
+    if method == 'regdiffusion':
+        try:
+            import regdiffusion as rd
+        except ImportError as exc:
+            raise build_optional_dependency_error(
+                "omicverse.single.grn(method='regdiffusion')",
+                ("regdiffusion",),
+                install_hint="Install RegDiffusion before using `method='regdiffusion'`.",
+            ) from exc
+
+        top_gene_percentile = kwargs.pop('top_gene_percentile', 50)
+        workers = kwargs.pop('workers', n_workers)
+        try:
+            trainer = rd.RegDiffusionTrainer(x_matrix, **kwargs)
+            trainer.train()
+        except Exception as exc:
+            err_str = str(exc).lower()
+            if "out of memory" in err_str or "cuda" in err_str:
+                raise RuntimeError(
+                    f"RegDiffusion ran out of memory on a "
+                    f"{adata.n_obs}-cell x {adata.n_vars}-gene matrix. "
+                    f"This backend builds a dense gene x gene adjacency and "
+                    f"can OOM above ~5000 genes. Subset HVGs first, then call "
+                    f"`ov.single.grn(..., method='regdiffusion')` again. "
+                    f"Original error: {type(exc).__name__}: {exc}"
+                ) from exc
+            raise
+
+        grn_obj = trainer.get_grn(adata.var_names, top_gene_percentile=top_gene_percentile)
+        edges = grn_obj.extract_edgelist(k=-1, workers=workers)
+        edges.columns = ['TF', 'target', 'importance']
+    else:
+        try:
+            from distributed import Client, LocalCluster
+            from ..external.single.arboreto.algo import grnboost2, genie3
+        except ImportError as exc:
+            raise build_optional_dependency_error(
+                "omicverse.single.grn",
+                ("arboreto", "distributed"),
+                install_hint="Install with `pip install arboreto distributed`.",
+            ) from exc
+
+        close_client = False
+        close_cluster = False
+        cluster = None
+        if client is None:
+            cluster = LocalCluster(
+                n_workers=n_workers,
+                threads_per_worker=threads,
+                processes=False,
+                dashboard_address=None,
+            )
+            client = Client(cluster)
+            close_client = True
+            close_cluster = True
+        elif not hasattr(client, 'compute'):
+            client = Client(client)
+            close_client = True
+
+        algo = grnboost2 if method == 'grnboost2' else genie3
+        try:
+            edges = algo(
+                expression_data=x_matrix,
+                gene_names=adata.var_names.tolist(),
+                tf_names=regulators,
+                client_or_address=client,
+                seed=seed,
+                verbose=False,
+                **kwargs,
+            )
+        finally:
+            if close_client:
+                client.close()
+            if close_cluster and cluster is not None:
+                cluster.close()
+
+    edges = edges.loc[edges['TF'] != edges['target'], ['TF', 'target', 'importance']].copy()
+    if not use_all_regulators:
+        edges = edges.loc[edges['TF'].isin(regulators)]
+    edges['importance'] = edges['importance'].astype(float)
+    edges = edges.replace([np.inf, -np.inf], np.nan).dropna(subset=['importance'])
+    edges = edges.sort_values('importance', ascending=False)
+    if top is not None:
+        edges = edges.groupby('TF', group_keys=False).head(top)
+    edges = edges.drop_duplicates(['TF', 'target']).reset_index(drop=True)
+    for col in ['TF', 'target']:
+        edges[col] = edges[col].astype(str).to_numpy(dtype=object)
+    if key_added is not None:
+        adata.uns[key_added] = edges.copy()
+        adata.uns[f'{key_added}_params'] = {
+            'method': method,
+            'layer': layer,
+            'top': top,
+            'log': log,
+            'seed': seed,
+            'n_workers': n_workers,
+            'threads': threads,
+            'n_edges': int(edges.shape[0]),
+            'n_regulators': None if use_all_regulators else len(regulators),
+        }
+    return edges
 
 
 @register_function(
@@ -22,6 +238,8 @@ from .._registry import register_function
     produces={'uns': ['SCENIC/GRN metadata'], 'varm': ['regulon or GRN-related scores (workflow dependent)']},
     auto_fix='escalate',
     examples=[
+        'scenic = ov.single.SCENIC(adata, species="human")',
+        'scenic = ov.single.SCENIC(adata, species="mouse", db_names="500bp")',
         'scenic = ov.single.SCENIC(adata, db_glob="cisTarget/*.feather", motif_path="motifs.tbl")',
         'scenic.cal_grn(method="regdiffusion", layer="counts")',
         'scenic.cal_grn(method="grnboost2", layer="counts")',
@@ -33,13 +251,194 @@ class SCENIC:
     def __init__(
             self,
             adata,
-            db_glob,
-            motif_path,
-            n_jobs=8):
+            db_glob=None,
+            motif_path=None,
+            n_jobs=8,
+            species=None,
+            data_dir='./data/scenic',
+            download=True,
+            db_names=None):
+        """
+        Initialize a SCENIC workflow.
+
+        Parameters
+        ----------
+        adata : anndata.AnnData
+            Input expression object.
+        db_glob : str, sequence of str or None
+            Ranking database feather path pattern or explicit feather file
+            list. If ``None``, ``species`` is used to prepare cisTarget
+            resources automatically.
+        motif_path : str or None
+            Motif-to-TF annotation table. If ``None``, ``species`` is used to
+            prepare the matching motif annotation table automatically.
+        n_jobs : int
+            Number of workers used by SCENIC steps.
+        species : {'human', 'mouse', 'fly'} or None
+            Species used for automatic cisTarget resource preparation. Aliases
+            such as ``'hg38'``, ``'mm10'`` and ``'dm6'`` are accepted.
+        data_dir : str
+            Directory used to cache downloaded cisTarget resources.
+        download : bool
+            Whether to download missing automatic resources. If ``False``,
+            missing files raise ``FileNotFoundError`` with the expected URLs.
+        db_names : str, sequence of str or None
+            Ranking database names to use for automatic resources. Human and
+            mouse support ``'500bp'`` and ``'10kb'``; fly supports
+            ``'default'``. If ``None``, all available gene-based ranking
+            databases for the species are used.
+        """
         
         from .._settings import Colors, EMOJI, print_gpu_usage_color
         from ..external.ctxcore.rnkdb import FeatherRankingDatabase as RankingDatabase
         self.adata = adata
+        self.species = None
+        self.scenic_resource_dir = None
+
+        if db_glob is None or motif_path is None:
+            if species is None:
+                raise ValueError(
+                    "Pass `db_glob` and `motif_path`, or pass `species` to "
+                    "prepare SCENIC resources automatically."
+                )
+            from pathlib import Path
+            from ..datasets import download_data_requests
+
+            species_aliases = {
+                'human': 'human',
+                'homo_sapiens': 'human',
+                'homo sapiens': 'human',
+                'hs': 'human',
+                'hg38': 'human',
+                'mouse': 'mouse',
+                'mus_musculus': 'mouse',
+                'mus musculus': 'mouse',
+                'mm': 'mouse',
+                'mm10': 'mouse',
+                'fly': 'fly',
+                'drosophila': 'fly',
+                'drosophila_melanogaster': 'fly',
+                'drosophila melanogaster': 'fly',
+                'dm6': 'fly',
+            }
+            resource_specs = {
+                'human': {
+                    'dirname': 'human_hg38',
+                    'motif': (
+                        'https://resources.aertslab.org/cistarget/motif2tf/'
+                        'motifs-v10nr_clust-nr.hgnc-m0.001-o0.0.tbl'
+                    ),
+                    'databases': {
+                        '10kb': (
+                            'https://resources.aertslab.org/cistarget/databases/'
+                            'homo_sapiens/hg38/refseq_r80/mc_v10_clust/gene_based/'
+                            'hg38_10kbp_up_10kbp_down_full_tx_v10_clust.'
+                            'genes_vs_motifs.rankings.feather'
+                        ),
+                        '500bp': (
+                            'https://resources.aertslab.org/cistarget/databases/'
+                            'homo_sapiens/hg38/refseq_r80/mc_v10_clust/gene_based/'
+                            'hg38_500bp_up_100bp_down_full_tx_v10_clust.'
+                            'genes_vs_motifs.rankings.feather'
+                        ),
+                    },
+                },
+                'mouse': {
+                    'dirname': 'mouse_mm10',
+                    'motif': (
+                        'https://resources.aertslab.org/cistarget/motif2tf/'
+                        'motifs-v10nr_clust-nr.mgi-m0.001-o0.0.tbl'
+                    ),
+                    'databases': {
+                        '10kb': (
+                            'https://resources.aertslab.org/cistarget/databases/'
+                            'mus_musculus/mm10/refseq_r80/mc_v10_clust/gene_based/'
+                            'mm10_10kbp_up_10kbp_down_full_tx_v10_clust.'
+                            'genes_vs_motifs.rankings.feather'
+                        ),
+                        '500bp': (
+                            'https://resources.aertslab.org/cistarget/databases/'
+                            'mus_musculus/mm10/refseq_r80/mc_v10_clust/gene_based/'
+                            'mm10_500bp_up_100bp_down_full_tx_v10_clust.'
+                            'genes_vs_motifs.rankings.feather'
+                        ),
+                    },
+                },
+                'fly': {
+                    'dirname': 'fly_dm6',
+                    'motif': (
+                        'https://resources.aertslab.org/cistarget/motif2tf/'
+                        'motifs-v10nr_clust-nr.flybase-m0.001-o0.0.tbl'
+                    ),
+                    'databases': {
+                        'default': (
+                            'https://resources.aertslab.org/cistarget/databases/'
+                            'drosophila_melanogaster/dm6/flybase_r6.02/'
+                            'mc_v10_clust/gene_based/'
+                            'dm6_v10_clust.genes_vs_motifs.rankings.feather'
+                        ),
+                    },
+                },
+            }
+
+            species_key = species_aliases.get(str(species).lower().replace('-', '_'))
+            if species_key is None:
+                valid = ', '.join(sorted(resource_specs))
+                raise ValueError(f"Unsupported species {species!r}. Supported species: {valid}.")
+
+            spec = resource_specs[species_key]
+            resource_dir = Path(data_dir).expanduser() / spec['dirname']
+            resource_dir.mkdir(parents=True, exist_ok=True)
+
+            if db_glob is None:
+                available_databases = spec['databases']
+                if db_names is None:
+                    selected_db_names = list(available_databases)
+                elif isinstance(db_names, str):
+                    selected_db_names = list(available_databases) if db_names == 'all' else [db_names]
+                else:
+                    selected_db_names = list(db_names)
+
+                db_paths = []
+                for name in selected_db_names:
+                    if name not in available_databases:
+                        valid = ', '.join(available_databases)
+                        raise ValueError(
+                            f"Unknown SCENIC database {name!r} for species {species_key!r}. "
+                            f"Available databases: {valid}."
+                        )
+                    url = available_databases[name]
+                    filename = url.rsplit('/', 1)[-1]
+                    local_path = resource_dir / filename
+                    if not local_path.exists():
+                        if not download:
+                            raise FileNotFoundError(
+                                f"Missing SCENIC ranking database {local_path}. "
+                                f"Download URL: {url}"
+                            )
+                        local_path = Path(download_data_requests(url, file_path=filename, dir=str(resource_dir)))
+                    db_paths.append(str(local_path))
+                db_glob = db_paths
+
+            if motif_path is None:
+                motif_url = spec['motif']
+                motif_filename = motif_url.rsplit('/', 1)[-1]
+                local_motif_path = resource_dir / motif_filename
+                if not local_motif_path.exists():
+                    if not download:
+                        raise FileNotFoundError(
+                            f"Missing SCENIC motif annotation file {local_motif_path}. "
+                            f"Download URL: {motif_url}"
+                        )
+                    local_motif_path = Path(download_data_requests(
+                        motif_url,
+                        file_path=motif_filename,
+                        dir=str(resource_dir),
+                    ))
+                motif_path = str(local_motif_path)
+            self.species = species_key
+            self.scenic_resource_dir = str(resource_dir)
+
         self.db_glob = db_glob
         self.motif_path = motif_path
         self.n_jobs = n_jobs
@@ -58,7 +457,10 @@ class SCENIC:
         print(f"   {Colors.BLUE}Mean genes per cell: {Colors.BOLD}{mean_genes_per_cell:.1f}{Colors.ENDC}")
         
         # Database information
-        db_fnames = glob.glob(db_glob)  # e.g. your feather files
+        if isinstance(db_glob, (list, tuple)):
+            db_fnames = [str(fname) for fname in db_glob]
+        else:
+            db_fnames = glob.glob(db_glob)  # e.g. your feather files
         print(f"   {Colors.GREEN}Ranking databases found: {Colors.BOLD}{len(db_fnames)}{Colors.ENDC}")
         
         if len(db_fnames) == 0:
@@ -137,79 +539,35 @@ class SCENIC:
 
     def cal_grn(
         self,method='regdiffusion',layer='counts',tf_names=None,**kwargs):
-        r"""
-        Initialize and Train a RegDiffusion model.
+        r"""Infer a GRN and store the edge list on the SCENIC object.
 
-        For architecture and training details, please refer to our paper.
+        This method keeps the historical SCENIC object API while delegating
+        backend-specific GRN inference to :func:`omicverse.single.grn`.
 
-        > From noise to knowledge: probabilistic diffusion-based neural inference
-
-        You can access the model through `RegDiffusionTrainer.model`. 
-        
         Parameters
         ----------
-            exp_array (np.ndarray): 2D numpy array. If used on single-cell RNAseq, 
-                the rows are cells and the columns are genes. Data should be log 
-                transformed. You may also want to remove all non expressed genes.
-            cell_types (np.ndarray): (Optional) 1D integer array for cell type. If 
-                you have labels in your cell type, you need to convert them to 
-                interge. Default is None. 
-            T (int): Total number of diffusion steps. Default: 5,000
-            start_noise (float): Minimal noise level (beta) to be added. Default: 
-                0.0001
-            end_noise (float): Maximal noise level (beta) to be added. Default: 
-                0.02
-            time_dim (int): Dimension size for the time embedding. Default: 64.
-            celltype_dim (int): Dimension size for the cell type embedding. 
-                Default: 4.
-            hidden_dim (list): Dimension sizes for the feature learning layers. We 
-                use the size of the first layer as the dimension for gene embeddings
-                as well. Default: [16, 16, 16].
-            init_coef (int): A coefficent to control the value to initialize the 
-                adjacency matrix. Here we define regulatory norm as 1 over (number 
-                of genes - 1). The value which we use to initialize the model is 
-                `init_coef` times of the regulatory norm. Default: 5. 
-            lr_nn (float): Learning rate for the rest of the neural networks except
-                the adjacency matrix. Default: 0.001
-            lr_adj (float): Learning rate for the adjacency matrix. By default, it 
-                equals to 0.02 * gene regulatory norm, which equals 1/(n_gene-1). 
-            weight_decay_nn (float): L2 regularization coef on the rest of the 
-                neural networks. Default: 0.1.
-            weight_decay_adj (float): L2 regularization coef on the adj matrix.
-                Default: 0.01.
+        method : {'regdiffusion', 'grnboost2', 'genie3'}
+            GRN inference backend.
+        layer : str
+            Raw-count layer used for inference. The method checks that this
+            layer does not look log-normalized, then calls ``grn(..., log=True)``.
+        tf_names : sequence of str or None
+            Candidate TF names. If ``None``, ``grn`` uses ``adata.var['is_tf']``
+            when available, otherwise all genes are considered regulators.
+        **kwargs
+            Forwarded to :func:`omicverse.single.grn`. This includes arboreto
+            options for ``grnboost2`` / ``genie3`` and RegDiffusion trainer
+            options such as ``n_steps``, ``batch_size`` and ``device``.
 
         Returns
         -------
-        None
-            sparse_loss_coef (float): L1 regularization coef on the adj matrix. 
-                Default: 0.25.
-            adj_dropout (float): Probability of an edge to be zeroed. Default: 0.3.
-            batch_size (int): Batch size for training. Default: 128.
-            n_steps (int): Total number of training iterations. Default: 1000.
-            train_split (float): Train partition. Default: 1.0.
-            train_split_seed (int): Random seed for train/val partition. 
-                Default: 123
-            device (str or torch.device): Device where the model is running. For 
-                example, "cpu", "cuda", "cuda:1", and etc. You are not recommended 
-                to run this model on Apple's MPS chips. Default is "cuda" but if 
-                you only has CPU, it will switch back to CPU.
-            compile (boolean): Whether to compile the model before training. 
-                Compile the model is a good idea on large dataset and ofter improves
-                inference speed when it works. For smaller dataset, eager execution 
-                if often good enough. 
-            evaluator (GRNEvaluator): (Optional) A defined GRNEvaluator if ground 
-                truth data is available. Evaluation will be done every 100 steps by 
-                default but you can change this setting through the eval_on_n_steps 
-                option. Default is None
-            eval_on_n_steps (int): If an evaluator is provided, the trainer will 
-                run evaluation every `eval_on_n_steps` steps. Default: 100.
-            logger (LightLogger): (Optional) A LightLogger to log training process. 
-                The only situation when you need to provide this is when you want 
-                to save logs from different trainers into the same logger. Default 
-                is None. 
+        pandas.DataFrame
+            Edge list with ``TF``, ``target`` and ``importance`` columns.
         """
         from .._settings import Colors, EMOJI, print_gpu_usage_color
+        import scipy.sparse as sp
         
+        method = method.lower()
         
         print(f"\n{Colors.HEADER}{Colors.BOLD}🧬 Gene Regulatory Network (GRN) Inference:{Colors.ENDC}")
         print(f"   {Colors.CYAN}Method: {Colors.BOLD}{method}{Colors.ENDC}")
@@ -219,8 +577,9 @@ class SCENIC:
         if layer in self.adata.layers:
             if self.adata.layers[layer].max()<np.log1p(1e4):
                 raise ValueError(f"Layer '{layer}' has been log normalized, please use a layer with raw counts data")
-            x = self.adata.layers[layer].toarray()
-            x = np.log(x+1.0)
+            x_raw = self.adata.layers[layer]
+            x = x_raw.toarray() if sp.issparse(x_raw) else np.asarray(x_raw)
+            x = np.log1p(x)
             print(f"   {Colors.GREEN}✓ Using existing '{layer}' layer{Colors.ENDC}")
         else:
             print(f"   {Colors.WARNING}⚠️  Layer '{layer}' not found, recovering counts...{Colors.ENDC}")
@@ -236,7 +595,6 @@ class SCENIC:
         
         # Display training parameters
         if method=='regdiffusion':
-            import regdiffusion as rd
             print(f"\n{Colors.HEADER}{Colors.BOLD}⚙️  Training Parameters:{Colors.ENDC}")
             default_params = {
                 'T': 5000, 'start_noise': 0.0001, 'end_noise': 0.02,
@@ -277,67 +635,32 @@ class SCENIC:
             print(f"\n{Colors.GREEN}{EMOJI['start']} Starting RegDiffusion training...{Colors.ENDC}")
             print(f"{Colors.CYAN}{'─' * 60}{Colors.ENDC}")
 
-            try:
-                rd_trainer = rd.RegDiffusionTrainer(x, **kwargs)
-                rd_trainer.train()
-            except Exception as exc:
-                # RegDiffusion builds dense ``n_genes × n_genes`` adjacency
-                # matrices on the GPU (or CPU if no CUDA). With raw 20-30k
-                # gene matrices on a 80GB card the most common surface is
-                # ``torch.OutOfMemoryError`` / ``RuntimeError: CUDA out of
-                # memory``. Re-raise with a copy-pastable HVG fix so the
-                # caller (typically an LLM agent) can recover in one turn.
-                err_str = str(exc).lower()
-                if "out of memory" in err_str or "cuda" in err_str:
-                    raise RuntimeError(
-                        f"RegDiffusion ran out of memory on a "
-                        f"{x.shape[0]}-cell × {x.shape[1]}-gene matrix. "
-                        f"This algorithm builds a dense gene × gene "
-                        f"adjacency on the GPU and reliably OOMs above "
-                        f"~5000 genes. HVG-subset first:\n"
-                        f"    sc.pp.highly_variable_genes(adata, "
-                        f"n_top_genes=3000, flavor='seurat_v3', "
-                        f"layer='counts')\n"
-                        f"    adata = adata[:, "
-                        f"adata.var.highly_variable].copy()\n"
-                        f"then re-instantiate ov.single.SCENIC. "
-                        f"Original error: {type(exc).__name__}: {exc}"
-                    ) from exc
-                raise
-            grn = rd_trainer.get_grn(self.adata.var_names, top_gene_percentile=50)
+        seed = kwargs.pop('seed', 42)
+        top = kwargs.pop('top', None)
+        log = kwargs.pop('log', True)
+        n_workers = kwargs.pop('n_workers', self.n_jobs)
+        threads = kwargs.pop('threads', 1)
+        client = kwargs.pop('client', None)
+        if method == 'regdiffusion':
+            kwargs.setdefault('top_gene_percentile', 50)
+            kwargs.setdefault('workers', self.n_jobs)
 
-            # Here for each gene, we are going to extract all edges
-            edgelist = grn.extract_edgelist(k=-1, workers=self.n_jobs)
-            edgelist.columns = ['TF', 'target', 'importance']
-            self.edgelist = edgelist
-            
-            self.edgelist['importance']=self.edgelist['importance'].astype(np.float32)
-            self.adjacencies = self.edgelist
-        elif method=='grnboost2':
-            from ..external.single.arboreto.algo import grnboost2
-            # arboreto's _prepare_input requires `gene_names` whenever
-            # ``expression_data`` is a numpy / sparse matrix (issue #681).
-            # We hold a dense ndarray at this point, so pass var_names
-            # explicitly — otherwise the inner assertion blows up with
-            # ``TypeError: object of type 'NoneType' has no len()``.
-            edgelist = grnboost2(expression_data=x,
-                    gene_names=self.adata.var_names.tolist(),
-                    tf_names=tf_names)
-            self.edgelist = edgelist
-            self.edgelist['importance']=self.edgelist['importance'].astype(np.float32)
-            self.adjacencies = self.edgelist
-        elif method=='genie3':
-            from ..external.single.arboreto.algo import genie3
-            # Same as grnboost2 above — arboreto can't infer gene names
-            # from a bare ndarray (issue #681).
-            edgelist = genie3(expression_data=x,
-                    gene_names=self.adata.var_names.tolist(),
-                    tf_names=tf_names)
-            self.edgelist = edgelist
-            self.edgelist['importance']=self.edgelist['importance'].astype(np.float32)
-            self.adjacencies = self.edgelist
-        else:
-            raise ValueError(f"Method '{method}' not supported")
+        edgelist = grn(
+            self.adata,
+            method=method,
+            regulators=tf_names,
+            layer=layer,
+            top=top,
+            log=log,
+            seed=seed,
+            n_workers=n_workers,
+            threads=threads,
+            client=client,
+            **kwargs,
+        )
+        self.edgelist = edgelist.copy()
+        self.edgelist['importance']=self.edgelist['importance'].astype(np.float32)
+        self.adjacencies = self.edgelist
 
 
         

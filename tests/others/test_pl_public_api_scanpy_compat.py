@@ -1,5 +1,6 @@
 import sys
 import types
+import warnings
 
 import matplotlib
 
@@ -55,15 +56,21 @@ def test_public_plot_set_smoke():
 
 
 def test_public_embedding_smoke(toy_adata):
-    ax = ov.pl.embedding(
-        toy_adata,
-        basis="X_umap",
-        color="cell_type",
-        frameon=False,
-        show=False,
-    )
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        ax = ov.pl.embedding(
+            toy_adata,
+            basis="X_umap",
+            color="cell_type",
+            frameon=False,
+            show=False,
+        )
     assert ax is not None
     assert hasattr(ax, "scatter")
+    assert not any(
+        "No data for colormapping provided via 'c'" in str(warning.message)
+        for warning in captured
+    )
 
 
 def test_public_pca_smoke(toy_adata):

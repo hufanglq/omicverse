@@ -72,6 +72,29 @@ def fake_arboreto_module(monkeypatch):
         "omicverse.external.single.arboreto.algo",
         fake,
     )
+
+    fake_distributed = types.ModuleType("distributed")
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+        def compute(self, *args, **kwargs):
+            return None
+
+    class FakeLocalCluster:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    fake_distributed.Client = FakeClient
+    fake_distributed.LocalCluster = FakeLocalCluster
+    monkeypatch.setitem(sys.modules, "distributed", fake_distributed)
     return captured
 
 
@@ -118,6 +141,18 @@ def _stub_edgelist(n_pairs: int = 5) -> pd.DataFrame:
     })
 
 
+def _patch_ranking_database(monkeypatch):
+    from omicverse.external.ctxcore import rnkdb
+
+    class FakeRankingDatabase:
+        def __init__(self, fname, name):
+            self.fname = fname
+            self.name = name
+
+    monkeypatch.setattr(rnkdb, "FeatherRankingDatabase", FakeRankingDatabase)
+    return FakeRankingDatabase
+
+
 # --------------------------------------------------------------------------- #
 # grnboost2 path — the one in the bug report
 # --------------------------------------------------------------------------- #
@@ -157,3 +192,67 @@ def test_cal_grn_genie3_passes_gene_names(fake_arboreto_module) -> None:
     assert captured["gene_names"] == list(adata.var_names)
     assert captured["expression_data_shape"][1] == len(captured["gene_names"])
     assert captured["tf_names"] == ["Gene005", "Gene006"]
+
+
+def test_scenic_species_uses_cached_resources(tmp_path, monkeypatch) -> None:
+    from omicverse.single import SCENIC as wrapped
+
+    _patch_ranking_database(monkeypatch)
+    cls = getattr(wrapped, "__wrapped__", wrapped)
+
+    resource_dir = tmp_path / "mouse_mm10"
+    resource_dir.mkdir()
+    db_path = resource_dir / (
+        "mm10_500bp_up_100bp_down_full_tx_v10_clust."
+        "genes_vs_motifs.rankings.feather"
+    )
+    motif_path = resource_dir / "motifs-v10nr_clust-nr.mgi-m0.001-o0.0.tbl"
+    db_path.touch()
+    motif_path.touch()
+
+    obj = cls(
+        _make_scenic_adata(),
+        species="mm10",
+        data_dir=tmp_path,
+        db_names="500bp",
+        download=False,
+        n_jobs=1,
+    )
+
+    assert obj.species == "mouse"
+    assert obj.db_glob == [str(db_path)]
+    assert obj.motif_path == str(motif_path)
+    assert obj.scenic_resource_dir == str(resource_dir)
+    assert len(obj.dbs) == 1
+
+
+def test_scenic_species_downloads_missing_resources(tmp_path, monkeypatch) -> None:
+    import omicverse.datasets as datasets
+    from omicverse.single import SCENIC as wrapped
+
+    _patch_ranking_database(monkeypatch)
+    cls = getattr(wrapped, "__wrapped__", wrapped)
+    downloads = []
+
+    def fake_download(url, file_path=None, dir="./data"):
+        downloads.append((url, file_path, dir))
+        path = tmp_path / "human_hg38" / file_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        return str(path)
+
+    monkeypatch.setattr(datasets, "download_data_requests", fake_download)
+
+    obj = cls(
+        _make_scenic_adata(),
+        species="human",
+        data_dir=tmp_path,
+        db_names="500bp",
+        download=True,
+        n_jobs=1,
+    )
+
+    assert obj.species == "human"
+    assert len(downloads) == 2
+    assert obj.db_glob[0].endswith(".genes_vs_motifs.rankings.feather")
+    assert obj.motif_path.endswith(".tbl")

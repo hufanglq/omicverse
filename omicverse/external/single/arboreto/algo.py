@@ -117,15 +117,30 @@ def diy(expression_data,
         if verbose:
             print('creating dask graph')
 
-        graph = create_graph(expression_matrix,
-                             gene_names,
-                             tf_names,
-                             client=client,
-                             regressor_type=regressor_type,
-                             regressor_kwargs=regressor_kwargs,
-                             early_stop_window_length=early_stop_window_length,
-                             limit=limit,
-                             seed=seed)
+        graph_kwargs = dict(
+            client=client,
+            regressor_type=regressor_type,
+            regressor_kwargs=regressor_kwargs,
+            early_stop_window_length=early_stop_window_length,
+            limit=limit,
+            seed=seed,
+        )
+        try:
+            graph = create_graph(expression_matrix, gene_names, tf_names, **graph_kwargs)
+        except TypeError as exc:
+            if "Must supply at least one delayed object" not in str(exc):
+                raise
+            # Newer Dask versions reject ``from_delayed([])``.  Arboreto's
+            # ``create_graph`` currently constructs the meta dataframe even
+            # when ``include_meta=False``; requesting meta avoids the empty
+            # delayed collection and preserves the link graph result.
+            graph, _ = create_graph(
+                expression_matrix,
+                gene_names,
+                tf_names,
+                include_meta=True,
+                **graph_kwargs,
+            )
 
         if verbose:
             print('{} partitions'.format(graph.npartitions))

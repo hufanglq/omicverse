@@ -12,6 +12,7 @@ This module provides comprehensive tools for single-cell RNA-seq analysis includ
 
 Key classes:
     pyMOFA: Multi-Omics Factor Analysis
+    StaVIA: Spatial/temporal trajectory inference with the VIA backend
     pyVIA: Velocity and pseudotime analysis 
     pySIMBA: Single-cell integration and batch alignment
     pyTOSICA: Trajectory inference and cell fate analysis
@@ -26,6 +27,7 @@ Annotation tools:
     CellVote: Consensus cell type annotation
 
 Trajectory analysis:
+    StaVIA: Spatial/temporal trajectory inference
     TrajInfer: Trajectory inference framework
     scLTNN: Lineage tracing with neural networks
     cytotrace2: Developmental potential scoring
@@ -36,8 +38,8 @@ Examples:
     >>> ov.single.pySCSA(adata, tissue='lung', species='human')
     >>> 
     >>> # Trajectory analysis
-    >>> via = ov.single.pyVIA(adata)
-    >>> via.run_via()
+    >>> stavia = ov.single.StaVIA(adata, spatial_key='spatial')
+    >>> stavia.fit()
     >>> 
     >>> # Multi-omics integration
     >>> mofa = ov.single.pyMOFA(data_dict)
@@ -110,6 +112,7 @@ from ._monocle import Monocle
 # Usage: cnv = ov.single.CNV(adata, method='copykat'); cnv.run()
 from ._cnv import CNV
 
+from ._stavia import StaVIA
 from ._lazy_step_by_step import (
     lazy_step_qc, lazy_step_preprocess, lazy_step_scale, lazy_step_pca,
     lazy_step_cell_cycle, lazy_step_harmony, lazy_step_scvi, 
@@ -118,13 +121,28 @@ from ._lazy_step_by_step import (
 )
 from ._diffusionmap import diffmap
 from ._cellmatch import CellOntologyMapper,download_cl
-from ._scenic import SCENIC,build_correlation_network_umap_layout,add_tf_regulation,plot_grn
+from ._scenic import SCENIC, grn, build_correlation_network_umap_layout, add_tf_regulation, plot_grn
 from ._annotation import Annotation
 from ._annotation_ref import AnnotationRef
-from ._velo import Velo,velocity_embedding
+from ._velo import (
+    Velo,
+    velocity_embedding,
+    velocity,
+    cellrank_fate,
+    state_names,
+    clean_lineages,
+    perturbation_effect,
+    cell_fate_perturbation,
+    velocity_effect,
+)
 from ._milo_dev import Milo
 from ._markers import find_markers, get_markers
 from ._dynamic_features import DynamicFeaturesResult, dynamic_features
+from ._cefcon import (
+    convert_human_to_mouse_network,
+    load_human_prior_interaction_network,
+    mouse_hsc_nestorowa16,
+)
 
 _TORCH_DEPS = ("torch", "torch_geometric")
 
@@ -185,12 +203,7 @@ bind_optional_symbols(
 bind_optional_symbols(
     globals(),
     "._cefcon",
-    [
-        "pyCEFCON",
-        "convert_human_to_mouse_network",
-        "load_human_prior_interaction_network",
-        "mouse_hsc_nestorowa16",
-    ],
+    ["pyCEFCON"],
     package=__name__,
     feature="omicverse.single.pyCEFCON",
     dependencies=_TORCH_DEPS,
@@ -292,6 +305,7 @@ __all__ = [
     'plot_weights',
     
     # Trajectory and pseudotime analysis
+    'StaVIA',
     #'pyVIA',
     #'scRNA_hematopoiesis',
     'TrajInfer',
@@ -310,6 +324,13 @@ __all__ = [
     # Network and communication analysis
     'scnocd',
     'pyCEFCON',
+    'velocity',
+    'cellrank_fate',
+    'state_names',
+    'clean_lineages',
+    'perturbation_effect',
+    'cell_fate_perturbation',
+    'velocity_effect',
     'convert_human_to_mouse_network',
     'load_human_prior_interaction_network',
     'mouse_hsc_nestorowa16',
@@ -385,6 +406,7 @@ __all__ = [
     'Hotspot',
     'generate_scRNA_report',
     'SCENIC',
+    'grn',
     'build_correlation_network_umap_layout',
     'add_tf_regulation',
     'plot_grn',

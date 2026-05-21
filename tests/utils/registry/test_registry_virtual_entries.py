@@ -58,3 +58,16 @@ def test_scenic_registration_exposes_regdiffusion_branch():
         item.get("full_name") == "omicverse.single._scenic.SCENIC.cal_grn[method=regdiffusion]"
         for item in results
     )
+
+
+def test_velo_registration_exposes_regvelo_branch():
+    from omicverse.mcp.manifest import _try_load_leaf_module
+
+    assert _try_load_leaf_module("omicverse.single._velo")
+
+    results = _global_registry.find("regvelo")
+
+    assert any(
+        item.get("full_name") == "omicverse.single._velo.Velo.cal_velocity[method=regvelo]"
+        for item in results
+    )

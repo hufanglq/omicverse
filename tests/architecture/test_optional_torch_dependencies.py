@@ -288,18 +288,35 @@ def _install_single_dependency_stubs():
         },
         "omicverse.single._scenic": {
             "SCENIC": object(),
+            "grn": object(),
             "build_correlation_network_umap_layout": object(),
             "add_tf_regulation": object(),
             "plot_grn": object(),
         },
         "omicverse.single._annotation": {"Annotation": object()},
         "omicverse.single._annotation_ref": {"AnnotationRef": object()},
-        "omicverse.single._velo": {"Velo": object(), "velocity_embedding": object()},
+        "omicverse.single._velo": {
+            "Velo": object(),
+            "velocity_embedding": object(),
+            "velocity": object(),
+            "cellrank_fate": object(),
+            "state_names": object(),
+            "clean_lineages": object(),
+            "perturbation_effect": object(),
+            "cell_fate_perturbation": object(),
+            "velocity_effect": object(),
+        },
         "omicverse.single._milo_dev": {"Milo": object()},
         "omicverse.single._markers": {"find_markers": object(), "get_markers": object()},
         "omicverse.single._dynamic_features": {
             "DynamicFeaturesResult": object(),
             "dynamic_features": object(),
+        },
+        "omicverse.single._cefcon": {
+            "pyCEFCON": object(),
+            "convert_human_to_mouse_network": lambda *args, **kwargs: "convert-network-ok",
+            "load_human_prior_interaction_network": lambda *args, **kwargs: "load-network-ok",
+            "mouse_hsc_nestorowa16": lambda *args, **kwargs: "mouse-hsc-ok",
         },
     }
 
@@ -360,9 +377,15 @@ def test_single_imports_without_torch_and_fails_on_torch_features(monkeypatch):
 
     assert ov.single is not None
     assert ov.single.cosg() == "cosg-ok"
+    assert ov.single.mouse_hsc_nestorowa16() == "mouse-hsc-ok"
+    assert ov.single.load_human_prior_interaction_network() == "load-network-ok"
+    assert ov.single.convert_human_to_mouse_network() == "convert-network-ok"
 
     with pytest.raises(ImportError, match="omicverse.single.pySIMBA requires the optional dependencies `torch`"):
         ov.single.pySIMBA()
 
     with pytest.raises(ImportError, match="omicverse.single.scnocd requires the optional dependencies `torch`, `torch_geometric`"):
         ov.single.scnocd()
+
+    with pytest.raises(ImportError, match="omicverse.single.pyCEFCON requires the optional dependencies `torch`, `torch_geometric`"):
+        ov.single.pyCEFCON()
