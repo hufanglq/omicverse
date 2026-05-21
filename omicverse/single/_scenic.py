@@ -238,6 +238,8 @@ def grn(
     produces={'uns': ['SCENIC/GRN metadata'], 'varm': ['regulon or GRN-related scores (workflow dependent)']},
     auto_fix='escalate',
     examples=[
+        'scenic = ov.single.SCENIC(adata, species="human")',
+        'scenic = ov.single.SCENIC(adata, species="mouse", db_names="500bp")',
         'scenic = ov.single.SCENIC(adata, db_glob="cisTarget/*.feather", motif_path="motifs.tbl")',
         'scenic.cal_grn(method="regdiffusion", layer="counts")',
         'scenic.cal_grn(method="grnboost2", layer="counts")',
@@ -249,13 +251,194 @@ class SCENIC:
     def __init__(
             self,
             adata,
-            db_glob,
-            motif_path,
-            n_jobs=8):
+            db_glob=None,
+            motif_path=None,
+            n_jobs=8,
+            species=None,
+            data_dir='./data/scenic',
+            download=True,
+            db_names=None):
+        """
+        Initialize a SCENIC workflow.
+
+        Parameters
+        ----------
+        adata : anndata.AnnData
+            Input expression object.
+        db_glob : str, sequence of str or None
+            Ranking database feather path pattern or explicit feather file
+            list. If ``None``, ``species`` is used to prepare cisTarget
+            resources automatically.
+        motif_path : str or None
+            Motif-to-TF annotation table. If ``None``, ``species`` is used to
+            prepare the matching motif annotation table automatically.
+        n_jobs : int
+            Number of workers used by SCENIC steps.
+        species : {'human', 'mouse', 'fly'} or None
+            Species used for automatic cisTarget resource preparation. Aliases
+            such as ``'hg38'``, ``'mm10'`` and ``'dm6'`` are accepted.
+        data_dir : str
+            Directory used to cache downloaded cisTarget resources.
+        download : bool
+            Whether to download missing automatic resources. If ``False``,
+            missing files raise ``FileNotFoundError`` with the expected URLs.
+        db_names : str, sequence of str or None
+            Ranking database names to use for automatic resources. Human and
+            mouse support ``'500bp'`` and ``'10kb'``; fly supports
+            ``'default'``. If ``None``, all available gene-based ranking
+            databases for the species are used.
+        """
         
         from .._settings import Colors, EMOJI, print_gpu_usage_color
         from ..external.ctxcore.rnkdb import FeatherRankingDatabase as RankingDatabase
         self.adata = adata
+        self.species = None
+        self.scenic_resource_dir = None
+
+        if db_glob is None or motif_path is None:
+            if species is None:
+                raise ValueError(
+                    "Pass `db_glob` and `motif_path`, or pass `species` to "
+                    "prepare SCENIC resources automatically."
+                )
+            from pathlib import Path
+            from ..datasets import download_data_requests
+
+            species_aliases = {
+                'human': 'human',
+                'homo_sapiens': 'human',
+                'homo sapiens': 'human',
+                'hs': 'human',
+                'hg38': 'human',
+                'mouse': 'mouse',
+                'mus_musculus': 'mouse',
+                'mus musculus': 'mouse',
+                'mm': 'mouse',
+                'mm10': 'mouse',
+                'fly': 'fly',
+                'drosophila': 'fly',
+                'drosophila_melanogaster': 'fly',
+                'drosophila melanogaster': 'fly',
+                'dm6': 'fly',
+            }
+            resource_specs = {
+                'human': {
+                    'dirname': 'human_hg38',
+                    'motif': (
+                        'https://resources.aertslab.org/cistarget/motif2tf/'
+                        'motifs-v10nr_clust-nr.hgnc-m0.001-o0.0.tbl'
+                    ),
+                    'databases': {
+                        '10kb': (
+                            'https://resources.aertslab.org/cistarget/databases/'
+                            'homo_sapiens/hg38/refseq_r80/mc_v10_clust/gene_based/'
+                            'hg38_10kbp_up_10kbp_down_full_tx_v10_clust.'
+                            'genes_vs_motifs.rankings.feather'
+                        ),
+                        '500bp': (
+                            'https://resources.aertslab.org/cistarget/databases/'
+                            'homo_sapiens/hg38/refseq_r80/mc_v10_clust/gene_based/'
+                            'hg38_500bp_up_100bp_down_full_tx_v10_clust.'
+                            'genes_vs_motifs.rankings.feather'
+                        ),
+                    },
+                },
+                'mouse': {
+                    'dirname': 'mouse_mm10',
+                    'motif': (
+                        'https://resources.aertslab.org/cistarget/motif2tf/'
+                        'motifs-v10nr_clust-nr.mgi-m0.001-o0.0.tbl'
+                    ),
+                    'databases': {
+                        '10kb': (
+                            'https://resources.aertslab.org/cistarget/databases/'
+                            'mus_musculus/mm10/refseq_r80/mc_v10_clust/gene_based/'
+                            'mm10_10kbp_up_10kbp_down_full_tx_v10_clust.'
+                            'genes_vs_motifs.rankings.feather'
+                        ),
+                        '500bp': (
+                            'https://resources.aertslab.org/cistarget/databases/'
+                            'mus_musculus/mm10/refseq_r80/mc_v10_clust/gene_based/'
+                            'mm10_500bp_up_100bp_down_full_tx_v10_clust.'
+                            'genes_vs_motifs.rankings.feather'
+                        ),
+                    },
+                },
+                'fly': {
+                    'dirname': 'fly_dm6',
+                    'motif': (
+                        'https://resources.aertslab.org/cistarget/motif2tf/'
+                        'motifs-v10nr_clust-nr.flybase-m0.001-o0.0.tbl'
+                    ),
+                    'databases': {
+                        'default': (
+                            'https://resources.aertslab.org/cistarget/databases/'
+                            'drosophila_melanogaster/dm6/flybase_r6.02/'
+                            'mc_v10_clust/gene_based/'
+                            'dm6_v10_clust.genes_vs_motifs.rankings.feather'
+                        ),
+                    },
+                },
+            }
+
+            species_key = species_aliases.get(str(species).lower().replace('-', '_'))
+            if species_key is None:
+                valid = ', '.join(sorted(resource_specs))
+                raise ValueError(f"Unsupported species {species!r}. Supported species: {valid}.")
+
+            spec = resource_specs[species_key]
+            resource_dir = Path(data_dir).expanduser() / spec['dirname']
+            resource_dir.mkdir(parents=True, exist_ok=True)
+
+            if db_glob is None:
+                available_databases = spec['databases']
+                if db_names is None:
+                    selected_db_names = list(available_databases)
+                elif isinstance(db_names, str):
+                    selected_db_names = list(available_databases) if db_names == 'all' else [db_names]
+                else:
+                    selected_db_names = list(db_names)
+
+                db_paths = []
+                for name in selected_db_names:
+                    if name not in available_databases:
+                        valid = ', '.join(available_databases)
+                        raise ValueError(
+                            f"Unknown SCENIC database {name!r} for species {species_key!r}. "
+                            f"Available databases: {valid}."
+                        )
+                    url = available_databases[name]
+                    filename = url.rsplit('/', 1)[-1]
+                    local_path = resource_dir / filename
+                    if not local_path.exists():
+                        if not download:
+                            raise FileNotFoundError(
+                                f"Missing SCENIC ranking database {local_path}. "
+                                f"Download URL: {url}"
+                            )
+                        local_path = Path(download_data_requests(url, file_path=filename, dir=str(resource_dir)))
+                    db_paths.append(str(local_path))
+                db_glob = db_paths
+
+            if motif_path is None:
+                motif_url = spec['motif']
+                motif_filename = motif_url.rsplit('/', 1)[-1]
+                local_motif_path = resource_dir / motif_filename
+                if not local_motif_path.exists():
+                    if not download:
+                        raise FileNotFoundError(
+                            f"Missing SCENIC motif annotation file {local_motif_path}. "
+                            f"Download URL: {motif_url}"
+                        )
+                    local_motif_path = Path(download_data_requests(
+                        motif_url,
+                        file_path=motif_filename,
+                        dir=str(resource_dir),
+                    ))
+                motif_path = str(local_motif_path)
+            self.species = species_key
+            self.scenic_resource_dir = str(resource_dir)
+
         self.db_glob = db_glob
         self.motif_path = motif_path
         self.n_jobs = n_jobs
@@ -274,7 +457,10 @@ class SCENIC:
         print(f"   {Colors.BLUE}Mean genes per cell: {Colors.BOLD}{mean_genes_per_cell:.1f}{Colors.ENDC}")
         
         # Database information
-        db_fnames = glob.glob(db_glob)  # e.g. your feather files
+        if isinstance(db_glob, (list, tuple)):
+            db_fnames = [str(fname) for fname in db_glob]
+        else:
+            db_fnames = glob.glob(db_glob)  # e.g. your feather files
         print(f"   {Colors.GREEN}Ranking databases found: {Colors.BOLD}{len(db_fnames)}{Colors.ENDC}")
         
         if len(db_fnames) == 0:
