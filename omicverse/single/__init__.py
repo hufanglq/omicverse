@@ -138,6 +138,11 @@ from ._velo import (
 from ._milo_dev import Milo
 from ._markers import find_markers, get_markers
 from ._dynamic_features import DynamicFeaturesResult, dynamic_features
+from ._cefcon import (
+    convert_human_to_mouse_network,
+    load_human_prior_interaction_network,
+    mouse_hsc_nestorowa16,
+)
 
 _TORCH_DEPS = ("torch", "torch_geometric")
 
@@ -198,12 +203,7 @@ bind_optional_symbols(
 bind_optional_symbols(
     globals(),
     "._cefcon",
-    [
-        "pyCEFCON",
-        "convert_human_to_mouse_network",
-        "load_human_prior_interaction_network",
-        "mouse_hsc_nestorowa16",
-    ],
+    ["pyCEFCON"],
     package=__name__,
     feature="omicverse.single.pyCEFCON",
     dependencies=_TORCH_DEPS,
