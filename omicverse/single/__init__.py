@@ -121,7 +121,17 @@ from ._cellmatch import CellOntologyMapper,download_cl
 from ._scenic import SCENIC, grn, build_correlation_network_umap_layout, add_tf_regulation, plot_grn
 from ._annotation import Annotation
 from ._annotation_ref import AnnotationRef
-from ._velo import Velo,velocity_embedding
+from ._velo import (
+    Velo,
+    velocity_embedding,
+    velocity,
+    cellrank_fate,
+    state_names,
+    clean_lineages,
+    perturbation_effect,
+    cell_fate_perturbation,
+    velocity_effect,
+)
 from ._milo_dev import Milo
 from ._markers import find_markers, get_markers
 from ._dynamic_features import DynamicFeaturesResult, dynamic_features
@@ -310,6 +320,13 @@ __all__ = [
     # Network and communication analysis
     'scnocd',
     'pyCEFCON',
+    'velocity',
+    'cellrank_fate',
+    'state_names',
+    'clean_lineages',
+    'perturbation_effect',
+    'cell_fate_perturbation',
+    'velocity_effect',
     'convert_human_to_mouse_network',
     'load_human_prior_interaction_network',
     'mouse_hsc_nestorowa16',

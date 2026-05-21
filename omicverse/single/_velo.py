@@ -1,17 +1,17 @@
 from .._settings import Colors, EMOJI
 from .._monitor import monitor
 from .._registry import register_function
-
+from .._optional import build_optional_dependency_error
 
 @register_function(
-    aliases=['RNA velocity分析器', 'Velo', 'RNA velocity pipeline', 'dynamo scvelo wrapper', '细胞状态转变速度分析'],
+    aliases=['RNA velocity分析器', 'Velo', 'RNA velocity pipeline', 'dynamo scvelo regvelo wrapper', '细胞状态转变速度分析'],
     category="single",
-    description="Unified RNA velocity workflow supporting dynamo, scvelo, latentvelo and graphvelo to infer transcriptional state transitions and directional trajectories.",
+    description="Unified RNA velocity workflow supporting dynamo, scvelo, latentvelo, graphvelo and RegVelo to infer transcriptional state transitions and directional trajectories.",
     prerequisites={'optional_functions': ['pp.preprocess', 'pp.neighbors']},
     requires={'layers': ['spliced/unspliced or counts'], 'obsm': ['X_umap (recommended)']},
     produces={'layers': ['velocity-related layers'], 'obsm': ['velocity embeddings'], 'uns': ['velocity graphs']},
     auto_fix='escalate',
-    examples=['velo_obj = ov.single.Velo(adata)', 'velo_obj.cal_velocity(method="dynamo")', 'velo_obj.plot_cell_velocity()'],
+    examples=['velo_obj = ov.single.Velo(adata)', 'velo_obj.cal_velocity(method="dynamo")', 'velo_obj.cal_velocity(method="regvelo", prior_grn=adata.uns["skeleton"])'],
     related=['single.Velo', 'pl.add_streamplot', 'utils.cal_paga']
 )
 class Velo:
@@ -143,6 +143,114 @@ class Velo:
             scv.pp.moments(self.adata, n_pcs=n_pcs, n_neighbors=n_neighbors,**kwargs)
         else:
             raise ValueError(f"Backend {backend} not supported")
+
+    def prepare_regvelo(
+        self,
+        prior_grn,
+        regulators=None,
+        tf_key='is_tf',
+        n_neighbors=30,
+        n_pcs=50,
+        moment_backend='scvelo',
+        prior_orientation='regulator_by_target',
+        use_ov_neighbors=True,
+        preprocess_kwargs=None,
+        set_prior_kwargs=None,
+        neighbors_kwargs=None,
+        moments_kwargs=None,
+    ):
+        """
+        Prepare AnnData for ``cal_velocity(method='regvelo')``.
+
+        This method wraps the common upstream RegVelo preparation pattern in an
+        OmicVerse-facing step: build a neighbor graph, compute ``Ms``/``Mu``
+        moment layers, run RegVelo gene preprocessing, align the prior GRN to
+        the retained genes, and store it in ``adata.uns['skeleton']``.
+
+        Parameters
+        ----------
+        prior_grn : pandas.DataFrame or array-like
+            Prior GRN used by RegVelo. The RegVelo tutorial dataset returns a
+            regulator-by-target matrix, so ``prior_orientation`` defaults to
+            ``'regulator_by_target'`` and the matrix is transposed before
+            calling ``regvelo.pp.set_prior_grn``. Use
+            ``'target_by_regulator'`` when rows are already target genes and
+            columns are regulators. DataFrame edge lists with TF/source/regulator
+            and target columns are also accepted and are interpreted from their
+            explicit column names.
+        regulators : sequence of str or None
+            Regulator names. If ``None`` and ``adata.var[tf_key]`` exists, TFs
+            are inferred before preprocessing and intersected with retained
+            genes.
+        tf_key : str
+            Column in ``adata.var`` used to store TF/regulator flags.
+        n_neighbors, n_pcs : int
+            Neighbor/moment parameters.
+        moment_backend : {'scvelo', 'dynamo'}
+            Backend used by :meth:`moments`.
+        prior_orientation : {'regulator_by_target', 'target_by_regulator'}
+            Orientation of ``prior_grn`` before passing to RegVelo.
+        use_ov_neighbors : bool
+            Whether to run ``ov.pp.neighbors`` before computing moments.
+        preprocess_kwargs, set_prior_kwargs, neighbors_kwargs, moments_kwargs
+            Additional options for RegVelo preprocessing, RegVelo prior-GRN
+            alignment, OmicVerse neighbors, and moment computation.
+
+        Returns
+        -------
+        tuple
+            ``(prior_grn, regulators)`` aligned to the prepared AnnData.
+        """
+        _, _, rgv = self._import_regvelo()
+
+        if regulators is None and tf_key in self.adata.var:
+            regulators = self.adata.var_names[self.adata.var[tf_key].astype(bool)].tolist()
+        elif regulators is not None:
+            regulators = list(regulators)
+
+        if use_ov_neighbors:
+            from ..pp import neighbors as ov_neighbors
+            neighbor_params = {'n_neighbors': n_neighbors, 'n_pcs': n_pcs}
+            if neighbors_kwargs:
+                neighbor_params.update(neighbors_kwargs)
+            ov_neighbors(self.adata, **neighbor_params)
+
+        moment_params = {'n_neighbors': n_neighbors, 'n_pcs': n_pcs}
+        if moments_kwargs:
+            moment_params.update(moments_kwargs)
+        self.moments(backend=moment_backend, **moment_params)
+
+        preprocess_params = {}
+        if preprocess_kwargs:
+            preprocess_params.update(preprocess_kwargs)
+        prepared = rgv.pp.preprocess_data(self.adata, **preprocess_params)
+        if prepared is not None:
+            self.adata = prepared
+
+        prior_for_regvelo = self._orient_prior_for_regvelo(prior_grn, prior_orientation)
+        set_prior_params = {}
+        if set_prior_kwargs:
+            set_prior_params.update(set_prior_kwargs)
+        prepared = rgv.pp.set_prior_grn(self.adata, prior_for_regvelo, **set_prior_params)
+        if prepared is not None:
+            self.adata = prepared
+
+        if regulators is None and tf_key in self.adata.var:
+            regulators = self.adata.var_names[self.adata.var[tf_key].astype(bool)].tolist()
+        elif regulators is not None:
+            regulators = sorted(set(regulators).intersection(self.adata.var_names))
+            self.adata.var[tf_key] = self.adata.var_names.isin(regulators)
+
+        self.adata.uns['regvelo_prepare'] = {
+            'n_neighbors': n_neighbors,
+            'n_pcs': n_pcs,
+            'moment_backend': moment_backend,
+            'prior_orientation': prior_orientation,
+            'tf_key': tf_key,
+            'n_regulators': None if regulators is None else len(regulators),
+        }
+        self.adata.uns['regvelo_regulators'] = regulators
+        return self.adata.uns['skeleton'], regulators
     
     def dynamics(self,backend='dynamo',**kwargs):
         """
@@ -184,6 +292,23 @@ class Velo:
         n_top_genes=2000,
         param_name_key='tmp/latentvelo_params',
         latentvelo_VAE_kwargs={},
+        prior_grn=None,
+        regulators=None,
+        spliced_layer='Ms',
+        unspliced_layer='Mu',
+        n_samples=30,
+        batch_size=None,
+        model_load_path=None,
+        model_save_path=None,
+        model_overwrite=False,
+        reuse_regvelo_output=False,
+        regvelo_kwargs=None,
+        train_kwargs=None,
+        compute_velocity_graph=False,
+        compute_velocity_embedding=False,
+        basis='umap',
+        graph_kwargs=None,
+        embedding_kwargs=None,
         **kwargs
     ):
         """
@@ -191,7 +316,7 @@ class Velo:
 
         Parameters
         ----------
-        method : {'dynamo', 'scvelo', 'latentvelo', 'graphvelo'}
+        method : {'dynamo', 'scvelo', 'latentvelo', 'graphvelo', 'regvelo'}
             Velocity estimation strategy.
         batch_key : str or None
             Batch key used by latentvelo.
@@ -207,6 +332,45 @@ class Velo:
             Directory/key to store latentvelo parameters.
         latentvelo_VAE_kwargs : dict
             Extra arguments for latentvelo VAE construction.
+        prior_grn : pandas.DataFrame, array-like, torch.Tensor or None
+            Prior GRN used by RegVelo. If ``None``, ``adata.uns['skeleton']``
+            is used when available. DataFrames can be square adjacency
+            matrices or edge lists with TF/source/regulator and target columns.
+        regulators : list of str or None
+            Regulator names used by RegVelo. If ``None`` and
+            ``adata.var['is_tf']`` exists, TF genes are inferred from it.
+        spliced_layer, unspliced_layer : str
+            Layers passed to ``REGVELOVI.setup_anndata`` for RegVelo.
+        n_samples : int
+            Posterior samples passed to ``regvelo.tl.set_output``.
+        batch_size : int or None
+            Batch size passed to ``regvelo.tl.set_output``. Defaults to
+            ``adata.n_obs`` for RegVelo.
+        model_load_path : str or None
+            Optional directory of an existing RegVelo model. When provided,
+            OmicVerse loads the model and skips training.
+        model_save_path : str or None
+            Optional directory where the trained RegVelo model is saved.
+        model_overwrite : bool
+            Whether to overwrite ``model_save_path`` if it already exists.
+        reuse_regvelo_output : bool
+            Whether to reuse existing ``adata.layers[velocity_key]`` or
+            ``adata.layers['velocity']`` and skip the expensive RegVelo output
+            export step. This is useful when loading a model for an AnnData
+            object that already has RegVelo velocities.
+        regvelo_kwargs, train_kwargs : dict or None
+            Extra arguments passed to ``REGVELOVI`` and ``REGVELOVI.train``.
+        compute_velocity_graph : bool
+            Whether to run ``scvelo.tl.velocity_graph`` after RegVelo.
+        compute_velocity_embedding : bool
+            Whether to project RegVelo velocities to ``basis`` after building
+            the velocity graph.
+        basis : str
+            Embedding basis used for optional RegVelo graph/embedding output.
+        graph_kwargs, embedding_kwargs : dict or None
+            Extra arguments forwarded to ``velocity_graph`` and
+            ``velocity_embedding`` when the optional RegVelo downstream steps
+            are enabled.
         **kwargs
             Additional backend-specific options.
 
@@ -219,6 +383,7 @@ class Velo:
         --------
         >>> velo.cal_velocity(method='dynamo')
         >>> velo.cal_velocity(method='graphvelo', n_jobs=4)
+        >>> velo.cal_velocity(method='regvelo', prior_grn=adata.uns['skeleton'])
         """
         
         if method == 'dynamo':
@@ -265,11 +430,34 @@ class Velo:
                     print(f"{Colors.WARNING}scvelo run failed.{Colors.ENDC}")
                     raise ValueError("scvelo also run failed.")
             
+        elif method == 'regvelo':
+            self._regvelo_cal(
+                velocity_key=velocity_key,
+                prior_grn=prior_grn,
+                regulators=regulators,
+                spliced_layer=spliced_layer,
+                unspliced_layer=unspliced_layer,
+                n_samples=n_samples,
+                batch_size=batch_size,
+                model_load_path=model_load_path,
+                model_save_path=model_save_path,
+                model_overwrite=model_overwrite,
+                reuse_regvelo_output=reuse_regvelo_output,
+                regvelo_kwargs=regvelo_kwargs,
+                train_kwargs=train_kwargs,
+                compute_velocity_graph=compute_velocity_graph,
+                compute_velocity_embedding=compute_velocity_embedding,
+                basis=basis,
+                graph_kwargs=graph_kwargs,
+                embedding_kwargs=embedding_kwargs,
+                **kwargs
+            )
             
 
 
         else:
             raise ValueError(f"Method {method} not supported")
+        return self.adata
 
     def graphvelo(
         self,xkey='Ms',vkey='velocity_S',
@@ -372,6 +560,555 @@ class Velo:
         import scvelo as scv
         scv.tl.velocity_embedding(self.adata, basis=basis, vkey=vkey, **kwargs)
         #return self.adata
+
+    def velocity_streamplot(
+        self,
+        basis='umap',
+        velocity_key='velocity_S',
+        color=None,
+        ax=None,
+        show=False,
+        size=100,
+        alpha=0.3,
+        embedding_kwargs=None,
+        stream_kwargs=None,
+        title=None,
+    ):
+        """
+        Plot cells and velocity streamlines with OmicVerse plotting helpers.
+
+        Parameters
+        ----------
+        basis : str
+            Embedding basis, either ``'umap'`` or an AnnData key such as
+            ``'X_umap'``.
+        velocity_key : str
+            Projected velocity key in ``adata.obsm``. For a layer
+            ``'velo_regvelo'`` projected on UMAP, this is usually
+            ``'velo_regvelo_umap'``.
+        color : str or None
+            Observation/feature key used to color cells. If ``None``, a
+            sensible observation key such as ``cell_type`` or ``clusters`` is
+            selected when available.
+        ax : matplotlib Axes or None
+            Axis to draw on.
+        show : bool
+            Whether to show the figure immediately.
+        size, alpha : float
+            Cell point size and transparency.
+        embedding_kwargs, stream_kwargs : dict or None
+            Extra keyword arguments forwarded to ``ov.pl.embedding`` and
+            ``ov.pl.add_streamplot``.
+        title : str or None
+            Optional plot title.
+
+        Returns
+        -------
+        matplotlib Axes
+            Axis containing the plot.
+        """
+        from .. import pl as _pl
+        from .. import plt as _plt
+
+        basis_key = basis if str(basis).startswith('X_') else f'X_{basis}'
+        if basis_key not in self.adata.obsm:
+            raise KeyError(f"Could not find embedding `{basis_key}` in adata.obsm")
+        if velocity_key not in self.adata.obsm:
+            raise KeyError(f"Could not find projected velocity `{velocity_key}` in adata.obsm")
+
+        if color is None:
+            color = self._default_velocity_color_key()
+
+        if ax is None:
+            _, ax = _plt.subplots(figsize=(4, 4))
+
+        embedding_params = {'show': False, 'size': size, 'alpha': alpha}
+        if embedding_kwargs:
+            embedding_params.update(embedding_kwargs)
+        _pl.embedding(
+            self.adata,
+            basis=basis_key,
+            color=color,
+            ax=ax,
+            **embedding_params,
+        )
+
+        stream_params = {}
+        if stream_kwargs:
+            stream_params.update(stream_kwargs)
+        _pl.add_streamplot(
+            self.adata,
+            basis=basis_key,
+            velocity_key=velocity_key,
+            ax=ax,
+            **stream_params,
+        )
+
+        if title is not None:
+            ax.set_title(title)
+        if show:
+            _plt.show()
+        return ax
+
+    def cellrank_fate(
+        self,
+        velocity_key='velocity_S',
+        xkey='Ms',
+        cluster_key=None,
+        terminal_states=None,
+        n_states=8,
+        n_cells=30,
+        connectivity_weight=0.2,
+        compute_fate_probabilities=False,
+        fate_kwargs=None,
+        clean=False,
+        plot=False,
+        basis='umap',
+        **kwargs,
+    ):
+        """
+        Run a CellRank fate-analysis step from OmicVerse velocity output.
+
+        This mirrors the RegVelo reproducibility workflow, where the RegVelo
+        velocity field is converted into a CellRank velocity kernel and
+        optionally mixed with a connectivity kernel.
+
+        Parameters
+        ----------
+        velocity_key : str
+            Velocity layer used to construct the CellRank velocity kernel.
+        xkey : str
+            Expression or moment layer used by the velocity kernel.
+        cluster_key : str or None
+            Observation column used to constrain macrostate discovery.
+        terminal_states : str, sequence of str or None
+            Terminal states to set after macrostate discovery. Missing states
+            are skipped with a warning.
+        n_states : int
+            Number of GPCCA macrostates to compute.
+        n_cells : int or None
+            Number of representative cells per macrostate.
+        connectivity_weight : float
+            Weight of the connectivity kernel mixed into the velocity kernel.
+        compute_fate_probabilities : bool
+            Whether to compute CellRank fate probabilities.
+        fate_kwargs : dict or None
+            Extra arguments forwarded to
+            ``estimator.compute_fate_probabilities``.
+        clean : bool
+            Whether to sanitize lineage probabilities after fate computation.
+        plot : bool
+            Whether to plot terminal states with ``ov.pl.cell_fate``.
+        basis : str
+            Embedding basis for optional plotting.
+        **kwargs
+            Additional arguments forwarded to ``estimator.compute_macrostates``.
+
+        Returns
+        -------
+        cellrank.estimators.GPCCA
+            Fitted GPCCA estimator. It is also stored as
+            ``self.cellrank_estimator`` and in
+            ``adata.uns['velocity_cellrank']['estimator']``.
+        """
+        try:
+            import cellrank as cr
+        except ImportError as exc:
+            raise build_optional_dependency_error(
+                "omicverse.single.Velo.cellrank_fate",
+                ("cellrank",),
+                install_hint="Install with `pip install cellrank`.",
+            ) from exc
+
+        vk = cr.kernels.VelocityKernel(self.adata, xkey=xkey, vkey=velocity_key)
+        vk.compute_transition_matrix()
+        if connectivity_weight:
+            ck = cr.kernels.ConnectivityKernel(self.adata).compute_transition_matrix()
+            kernel = (1 - connectivity_weight) * vk + connectivity_weight * ck
+        else:
+            kernel = vk
+
+        estimator = cr.estimators.GPCCA(kernel)
+        macrostate_kwargs = {'n_states': n_states}
+        if n_cells is not None:
+            macrostate_kwargs['n_cells'] = n_cells
+        if cluster_key is not None:
+            macrostate_kwargs['cluster_key'] = cluster_key
+        macrostate_kwargs.update(kwargs)
+        estimator.compute_macrostates(**macrostate_kwargs)
+        requested_terminal_states = terminal_states
+        missing_terminal_states = []
+        terminal_states_used = None
+        if terminal_states is not None:
+            if isinstance(terminal_states, str):
+                requested = [terminal_states]
+            else:
+                requested = list(terminal_states)
+            available = state_names(getattr(estimator, 'macrostates', None))
+            if not available:
+                terminal_states_used = requested
+            else:
+                available_set = set(available)
+                terminal_states_used = [state for state in requested if state in available_set]
+                missing_terminal_states = [
+                    state for state in requested if state not in available_set
+                ]
+                if missing_terminal_states:
+                    warnings.warn(
+                        "Some requested terminal states are not CellRank macrostates "
+                        f"and will be skipped: {missing_terminal_states}. "
+                        f"Valid macrostates are: {available}.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+            if terminal_states_used:
+                estimator.set_terminal_states(terminal_states_used)
+            else:
+                warnings.warn(
+                    "None of the requested terminal states were found in the "
+                    "CellRank macrostates. Skipping `set_terminal_states()`.",
+                    UserWarning,
+                        stacklevel=2,
+                    )
+        if compute_fate_probabilities:
+            if terminal_states is not None and not terminal_states_used:
+                warnings.warn(
+                    "Skipping `compute_fate_probabilities()` because no valid "
+                    "terminal states were selected.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            else:
+                if fate_kwargs is None:
+                    fate_kwargs = {}
+                estimator.compute_fate_probabilities(**fate_kwargs)
+                if clean:
+                    clean_lineages(self.adata)
+        if plot:
+            if terminal_states is not None and not terminal_states_used:
+                warnings.warn(
+                    "Skipping terminal-state plot because no valid terminal "
+                    "states were selected.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            else:
+                from .. import pl as _pl
+                _pl.cell_fate(
+                    estimator,
+                    which='terminal',
+                    basis=basis,
+                    legend_loc='right',
+                    s=100,
+                )
+
+        self.cellrank_kernel = kernel
+        self.cellrank_estimator = estimator
+        self.adata.uns['velocity_cellrank'] = {
+            'velocity_key': velocity_key,
+            'xkey': xkey,
+            'cluster_key': cluster_key,
+            'terminal_states': terminal_states_used,
+            'requested_terminal_states': requested_terminal_states,
+            'missing_terminal_states': missing_terminal_states,
+            'n_states': n_states,
+            'n_cells': n_cells,
+            'connectivity_weight': connectivity_weight,
+            'fate_kwargs': fate_kwargs or {},
+            'clean': clean,
+            'estimator': estimator,
+            'kernel': kernel,
+        }
+        return estimator
+
+    def regvelo_perturb(
+        self,
+        tf,
+        model=None,
+        adata=None,
+        effects=0,
+        cutoff=0.001,
+        batch_size=None,
+        **kwargs,
+    ):
+        """
+        Run RegVelo's native in-silico TF regulon blockade from a Velo object.
+
+        Parameters
+        ----------
+        tf : str or list of str
+            Transcription factor(s) to perturb.
+        model : str or RegVelo model or None
+            Saved model path or in-memory model. If ``None``, the method uses
+            ``adata.uns['regvelo_model_path']`` or ``adata.uns['regvelo_model']``.
+        adata : AnnData or None
+            AnnData used for perturbation. Defaults to ``self.adata``.
+        effects, cutoff, batch_size
+            Arguments forwarded to ``regvelo.tl.in_silico_block_simulation``.
+        **kwargs
+            Additional arguments forwarded to RegVelo.
+
+        Returns
+        -------
+        tuple
+            ``(perturbed_adata, perturbed_model)`` returned by RegVelo.
+        """
+        _, _, rgv = self._import_regvelo()
+        model = self._resolve_regvelo_model(model)
+        adata = self.adata if adata is None else adata
+        if batch_size is None:
+            batch_size = adata.n_obs
+
+        perturb = getattr(getattr(rgv, 'tl', None), 'in_silico_block_simulation', None)
+        if perturb is None:
+            perturb = getattr(getattr(rgv, 'tools', None), 'in_silico_block_simulation', None)
+        if perturb is None:
+            raise AttributeError(
+                "regvelo.tl.in_silico_block_simulation is required for RegVelo perturbation"
+            )
+
+        if isinstance(model, (str, bytes)) or hasattr(model, '__fspath__'):
+            result = perturb(
+                model=model,
+                adata=adata,
+                TF=tf,
+                effects=effects,
+                cutoff=cutoff,
+                batch_size=batch_size,
+                **kwargs,
+            )
+        elif hasattr(model, 'save'):
+            import tempfile
+
+            with tempfile.TemporaryDirectory(prefix='ov_regvelo_perturb_') as tmpdir:
+                model.save(tmpdir, overwrite=True)
+                result = perturb(
+                    model=tmpdir,
+                    adata=adata,
+                    TF=tf,
+                    effects=effects,
+                    cutoff=cutoff,
+                    batch_size=batch_size,
+                    **kwargs,
+                )
+        else:
+            raise TypeError(
+                "RegVelo perturbation requires a saved model path or a saveable "
+                "RegVelo model object. Pass `model='path/to/model'` or run "
+                "`cal_velocity(method='regvelo', model_save_path=...)` first."
+            )
+        self.adata.uns.setdefault('regvelo_perturbations', {})[str(tf)] = {
+            'effects': effects,
+            'cutoff': cutoff,
+            'batch_size': batch_size,
+        }
+        return result
+
+    def perturbation_effect(
+        self,
+        perturbed_adata,
+        terminal_states,
+        method='regvelo',
+        key_prefix='perturbation effect on ',
+        **kwargs,
+    ):
+        """
+        Write single-cell perturbation effects back to ``adata.obs``.
+
+        Currently ``method='regvelo'`` wraps RegVelo's fate-probability
+        perturbation effect helper while keeping the public OmicVerse API
+        method-agnostic for future perturbation backends.
+
+        Parameters
+        ----------
+        perturbed_adata : anndata.AnnData
+            Perturbed object containing fate probabilities.
+        terminal_states : str or sequence of str
+            Terminal state(s) for which perturbation effects are computed.
+        method : {'regvelo'}
+            Perturbation backend.
+        key_prefix : str
+            Prefix for columns written to ``adata.obs``.
+        **kwargs
+            Additional arguments forwarded to RegVelo's perturbation-effect
+            helper.
+
+        Returns
+        -------
+        anndata.AnnData
+            Baseline object with perturbation-effect columns in ``obs``.
+        """
+        if method != 'regvelo':
+            raise NotImplementedError(
+                "Only method='regvelo' is currently supported for perturbation_effect()."
+            )
+        _, _, rgv = self._import_regvelo()
+
+        effect = getattr(getattr(rgv, 'tools', None), 'perturbation_effect', None)
+        if effect is None:
+            effect = getattr(getattr(rgv, 'tl', None), 'perturbation_effect', None)
+        if effect is None:
+            raise AttributeError(
+                "regvelo.tools.perturbation_effect is required for perturbation_effect()"
+            )
+
+        result = effect(
+            adata_perturb=perturbed_adata,
+            adata=self.adata,
+            terminal_state=terminal_states,
+            **kwargs,
+        )
+        if result is not None:
+            self.adata = result
+
+        default_prefix = 'perturbation effect on '
+        if key_prefix != default_prefix:
+            states = [terminal_states] if isinstance(terminal_states, str) else list(terminal_states)
+            for state in states:
+                default_key = f'{default_prefix}{state}'
+                custom_key = f'{key_prefix}{state}'
+                if default_key in self.adata.obs and custom_key != default_key:
+                    self.adata.obs[custom_key] = self.adata.obs[default_key]
+                    del self.adata.obs[default_key]
+        return self.adata
+
+    def cell_fate_perturbation(
+        self,
+        perturbed,
+        terminal_states=None,
+        method='regvelo',
+        score_method='likelihood',
+        solver='gmres',
+        **kwargs,
+    ):
+        """
+        Summarize perturbation effects on terminal cell fates.
+
+        The returned table is also stored in
+        ``adata.uns['cell_fate_perturbation']``.
+
+        Parameters
+        ----------
+        perturbed : anndata.AnnData or dict
+            Perturbed object, or mapping of perturbation names to objects.
+        terminal_states : str, sequence of str or None
+            Terminal states to summarize.
+        method : {'regvelo'}
+            Perturbation backend.
+        score_method : str
+            Scoring method forwarded to RegVelo.
+        solver : str
+            Linear solver forwarded to RegVelo.
+        **kwargs
+            Additional arguments forwarded to RegVelo's
+            ``cellfate_perturbation`` function.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Fate perturbation summary table.
+        """
+        if method != 'regvelo':
+            raise NotImplementedError(
+                "Only method='regvelo' is currently supported for cell_fate_perturbation()."
+            )
+        _, _, rgv = self._import_regvelo()
+
+        metrics = getattr(rgv, 'metrics', None)
+        if metrics is None:
+            metrics = getattr(rgv, 'mt', None)
+        cellfate_perturbation = getattr(metrics, 'cellfate_perturbation', None)
+        if cellfate_perturbation is None:
+            raise AttributeError(
+                "regvelo.metrics.cellfate_perturbation is required for "
+                "cell_fate_perturbation()"
+            )
+
+        if not isinstance(perturbed, dict):
+            perturbed = {'perturbation': perturbed}
+
+        result = cellfate_perturbation(
+            perturbed=perturbed,
+            baseline=self.adata,
+            terminal_state=terminal_states,
+            method=score_method,
+            solver=solver,
+            **kwargs,
+        )
+        self.adata.uns['cell_fate_perturbation'] = result
+        return result
+
+    def velocity_effect(
+        self,
+        perturbed_adata,
+        baseline_velocity_key='velo_regvelo',
+        perturbed_velocity_key='velocity',
+        effect_key=None,
+        target=None,
+    ):
+        """
+        Compute per-cell velocity direction change after perturbation.
+
+        The effect is ``1 - cosine_similarity`` between baseline and perturbed
+        velocity vectors and is written to ``adata.obs[effect_key]``.
+
+        Parameters
+        ----------
+        perturbed_adata : anndata.AnnData
+            Perturbed object containing a velocity layer.
+        baseline_velocity_key : str
+            Velocity layer in ``self.adata``.
+        perturbed_velocity_key : str
+            Velocity layer in ``perturbed_adata``.
+        effect_key : str or None
+            Observation column for the output. If ``None``, a key is derived
+            from ``target``.
+        target : str, sequence of str or None
+            Perturbation label used when deriving ``effect_key``.
+
+        Returns
+        -------
+        pandas.Series
+            Per-cell velocity direction-change score.
+        """
+        import numpy as _np
+        from scipy.sparse import issparse as _issparse
+
+        if baseline_velocity_key not in self.adata.layers:
+            raise KeyError(f"adata.layers has no baseline velocity key {baseline_velocity_key!r}.")
+        if perturbed_velocity_key not in perturbed_adata.layers:
+            raise KeyError(
+                f"perturbed_adata.layers has no velocity key {perturbed_velocity_key!r}."
+            )
+
+        def _as_dense(value):
+            return value.toarray() if _issparse(value) else _np.asarray(value)
+
+        baseline_velocity = _as_dense(self.adata.layers[baseline_velocity_key])
+        perturbed_velocity = _as_dense(perturbed_adata.layers[perturbed_velocity_key])
+        if baseline_velocity.shape != perturbed_velocity.shape:
+            raise ValueError(
+                "Baseline and perturbed velocity layers must have the same shape; "
+                f"got {baseline_velocity.shape} and {perturbed_velocity.shape}."
+            )
+
+        numerator = _np.sum(baseline_velocity * perturbed_velocity, axis=1)
+        denominator = (
+            _np.linalg.norm(baseline_velocity, axis=1)
+            * _np.linalg.norm(perturbed_velocity, axis=1)
+        )
+        values = 1 - numerator / _np.maximum(denominator, 1e-12)
+
+        if effect_key is None:
+            if target is None:
+                effect_key = 'velocity_effect'
+            elif isinstance(target, (list, tuple, set)):
+                effect_key = f'{"+".join(map(str, target))}_velocity_effect'
+            else:
+                effect_key = f'{target}_velocity_effect'
+
+        self.adata.obs[effect_key] = values
+        return self.adata.obs[effect_key]
 
 
     def _graphvelo_cal(self,backend='dynamo',xkey='Ms',vkey='velocity_S',n_jobs=1,**kwargs):
@@ -500,6 +1237,480 @@ class Velo:
         self.adata.obsm['X_latentvelo_velo_u'] = latent_data.layers['unspliced_velocity']
 
     
+    def _regvelo_cal(
+        self,
+        velocity_key='velocity_S',
+        prior_grn=None,
+        regulators=None,
+        spliced_layer='Ms',
+        unspliced_layer='Mu',
+        n_samples=30,
+        batch_size=None,
+        model_load_path=None,
+        model_save_path=None,
+        model_overwrite=False,
+        reuse_regvelo_output=False,
+        regvelo_kwargs=None,
+        train_kwargs=None,
+        compute_velocity_graph=False,
+        compute_velocity_embedding=False,
+        basis='umap',
+        graph_kwargs=None,
+        embedding_kwargs=None,
+        **kwargs):
+        """Run RegVelo and export velocity outputs into ``self.adata``."""
+        torch, REGVELOVI, rgv = self._import_regvelo()
+        self._validate_regvelo_layers(spliced_layer, unspliced_layer)
+
+        model_kwargs = {}
+        if regvelo_kwargs:
+            model_kwargs.update(regvelo_kwargs)
+        model_kwargs.update(kwargs)
+
+        train_params = {}
+        if train_kwargs:
+            train_params.update(train_kwargs)
+
+        if model_load_path is not None:
+            load_params = {}
+            for key in ('accelerator', 'device'):
+                if key in train_params:
+                    load_params[key] = train_params[key]
+            if 'device' not in load_params and 'devices' in train_params:
+                load_params['device'] = train_params['devices']
+            reg_vae = REGVELOVI.load(model_load_path, adata=self.adata, **load_params)
+            self.adata.uns['regvelo_model_path'] = model_load_path
+            regulators = self._prepare_regvelo_regulators(regulators)
+        else:
+            prior_matrix = self._prepare_regvelo_prior_grn(prior_grn, torch)
+            regulators = self._prepare_regvelo_regulators(regulators)
+
+            REGVELOVI.setup_anndata(
+                self.adata,
+                spliced_layer=spliced_layer,
+                unspliced_layer=unspliced_layer,
+            )
+            reg_vae = REGVELOVI(self.adata, W=prior_matrix, regulators=regulators, **model_kwargs)
+            reg_vae.train(**train_params)
+
+            if model_save_path is not None:
+                reg_vae.save(model_save_path, overwrite=model_overwrite)
+                self.adata.uns['regvelo_model_path'] = model_save_path
+            else:
+                self.adata.uns['regvelo_model'] = reg_vae
+
+        output_batch_size = batch_size if batch_size is not None else self.adata.n_obs
+        reused_output = self._reuse_regvelo_output(velocity_key) if reuse_regvelo_output else False
+        if not reused_output:
+            set_output = getattr(getattr(rgv, 'tl', None), 'set_output', None)
+            if set_output is None:
+                raise AttributeError("regvelo.tl.set_output is required to export RegVelo outputs")
+            output = set_output(
+                self.adata,
+                reg_vae,
+                n_samples=n_samples,
+                batch_size=output_batch_size,
+            )
+            if output is not None:
+                self.adata = output
+
+        if 'velocity' not in self.adata.layers:
+            raise ValueError("RegVelo completed but did not write adata.layers['velocity']")
+        self.adata.layers[velocity_key] = self.adata.layers['velocity']
+
+        velocity_genes_key = f'{velocity_key}_genes'
+        if regulators is None:
+            self.adata.var[velocity_genes_key] = True
+        else:
+            regulator_set = set(regulators)
+            self.adata.var[velocity_genes_key] = [
+                gene in regulator_set for gene in self.adata.var_names
+            ]
+
+        self.adata.uns['regvelo'] = {
+            'spliced_layer': spliced_layer,
+            'unspliced_layer': unspliced_layer,
+            'n_samples': n_samples,
+            'batch_size': output_batch_size,
+            'velocity_key': velocity_key,
+            'n_regulators': None if regulators is None else len(regulators),
+            'model_load_path': model_load_path,
+            'model_save_path': model_save_path,
+            'model_overwrite': model_overwrite,
+            'reuse_regvelo_output': reuse_regvelo_output,
+            'reused_regvelo_output': reused_output,
+        }
+
+        if compute_velocity_graph or compute_velocity_embedding:
+            graph_params = {}
+            if graph_kwargs:
+                graph_params.update(graph_kwargs)
+            graph_params.setdefault('xkey', spliced_layer)
+            self.velocity_graph(basis=basis, vkey=velocity_key, **graph_params)
+
+        if compute_velocity_embedding:
+            embedding_params = {}
+            if embedding_kwargs:
+                embedding_params.update(embedding_kwargs)
+            self.velocity_embedding(basis=basis, vkey=velocity_key, **embedding_params)
+
+    def _import_regvelo(self):
+        try:
+            import torch
+            from regvelo import REGVELOVI
+            import regvelo as rgv
+        except ImportError as exc:
+            raise build_optional_dependency_error(
+                "omicverse.single.Velo.cal_velocity(method='regvelo')",
+                ("regvelo", "torch", "scvi"),
+                install_hint="Install with `pip install regvelo scvi-tools`.",
+            ) from exc
+        return torch, REGVELOVI, rgv
+
+    def _validate_regvelo_layers(self, spliced_layer, unspliced_layer):
+        missing = [
+            layer
+            for layer in (spliced_layer, unspliced_layer)
+            if layer not in self.adata.layers
+        ]
+        if missing:
+            raise ValueError(
+                "RegVelo requires spliced/unspliced moment layers. "
+                f"Missing layer(s): {', '.join(missing)}"
+            )
+
+    def _prepare_regvelo_prior_grn(self, prior_grn, torch):
+        if prior_grn is None:
+            if 'skeleton' not in self.adata.uns:
+                raise ValueError(
+                    "RegVelo requires a prior GRN. Pass `prior_grn` or set "
+                    "`adata.uns['skeleton']`."
+                )
+            prior_grn = self.adata.uns['skeleton']
+
+        if hasattr(torch, 'is_tensor') and torch.is_tensor(prior_grn):
+            prior_tensor = prior_grn
+        else:
+            prior_array = self._coerce_regvelo_prior_grn_array(prior_grn)
+            tensor_kwargs = {}
+            if hasattr(torch, 'float32'):
+                tensor_kwargs['dtype'] = torch.float32
+            if hasattr(torch, 'as_tensor'):
+                prior_tensor = torch.as_tensor(prior_array, **tensor_kwargs)
+            else:
+                prior_tensor = torch.tensor(prior_array, **tensor_kwargs)
+
+        if getattr(prior_tensor, 'shape', None) != (self.adata.n_vars, self.adata.n_vars):
+            raise ValueError(
+                "RegVelo prior GRN must be a square matrix aligned to "
+                f"adata.var_names with shape {(self.adata.n_vars, self.adata.n_vars)}; "
+                f"got {getattr(prior_tensor, 'shape', None)}."
+            )
+        return prior_tensor.T
+
+    def _coerce_regvelo_prior_grn_array(self, prior_grn):
+        import numpy as _np
+        import pandas as _pd
+
+        if isinstance(prior_grn, _pd.DataFrame):
+            genes = list(self.adata.var_names)
+            if set(genes).issubset(prior_grn.index) and set(genes).issubset(prior_grn.columns):
+                return prior_grn.loc[genes, genes].to_numpy()
+            return self._regvelo_edgelist_to_matrix(prior_grn)
+        return _np.asarray(prior_grn)
+
+    def _regvelo_edgelist_to_matrix(self, edgelist):
+        import numpy as _np
+
+        source_candidates = ('TF', 'tf', 'source', 'regulator')
+        target_candidates = ('target', 'Target')
+        weight_candidates = ('weight', 'importance', 'coef_abs', 'coef_mean', 'score')
+
+        source_col = next((col for col in source_candidates if col in edgelist.columns), None)
+        target_col = next((col for col in target_candidates if col in edgelist.columns), None)
+        if source_col is None or target_col is None:
+            raise ValueError(
+                "RegVelo prior GRN DataFrame must be either a square adjacency "
+                "matrix or an edge list with TF/source/regulator and target columns."
+            )
+
+        weight_col = next((col for col in weight_candidates if col in edgelist.columns), None)
+        gene_to_idx = {gene: idx for idx, gene in enumerate(self.adata.var_names)}
+        matrix = _np.zeros((self.adata.n_vars, self.adata.n_vars), dtype=_np.float32)
+        for _, row in edgelist.iterrows():
+            source = row[source_col]
+            target = row[target_col]
+            if source not in gene_to_idx or target not in gene_to_idx:
+                continue
+            weight = row[weight_col] if weight_col is not None else 1.0
+            matrix[gene_to_idx[target], gene_to_idx[source]] = weight
+        return matrix
+
+    def _prepare_regvelo_regulators(self, regulators):
+        if regulators is not None:
+            return list(regulators)
+        if 'is_tf' in self.adata.var:
+            return self.adata.var_names[self.adata.var['is_tf'].astype(bool)].tolist()
+        return None
+
+    def _orient_prior_for_regvelo(self, prior_grn, prior_orientation):
+        if self._is_regvelo_prior_edgelist(prior_grn):
+            import pandas as _pd
+
+            matrix = self._regvelo_edgelist_to_matrix(prior_grn)
+            return _pd.DataFrame(
+                matrix,
+                index=self.adata.var_names,
+                columns=self.adata.var_names,
+            )
+        if prior_orientation == 'regulator_by_target':
+            if hasattr(prior_grn, 'T'):
+                return prior_grn.T
+            import numpy as _np
+            return _np.asarray(prior_grn).T
+        if prior_orientation == 'target_by_regulator':
+            return prior_grn
+        raise ValueError(
+            "prior_orientation must be 'regulator_by_target' or 'target_by_regulator'"
+        )
+
+    def _is_regvelo_prior_edgelist(self, prior_grn):
+        if not hasattr(prior_grn, 'columns'):
+            return False
+        source_candidates = ('TF', 'tf', 'source', 'regulator')
+        target_candidates = ('target', 'Target')
+        has_source = any(col in prior_grn.columns for col in source_candidates)
+        has_target = any(col in prior_grn.columns for col in target_candidates)
+        return has_source and has_target
+
+    def _resolve_regvelo_model(self, model=None):
+        if model is not None:
+            return model
+        if 'regvelo_model_path' in self.adata.uns:
+            return self.adata.uns['regvelo_model_path']
+        if 'regvelo_model' in self.adata.uns:
+            return self.adata.uns['regvelo_model']
+        raise ValueError(
+            "No RegVelo model found. Pass `model`, or run "
+            "`cal_velocity(method='regvelo', model_save_path=...)` first."
+        )
+
+    def _reuse_regvelo_output(self, velocity_key):
+        if velocity_key in self.adata.layers:
+            self.adata.layers['velocity'] = self.adata.layers[velocity_key]
+            return True
+        if 'velocity' in self.adata.layers:
+            return True
+        return False
+
+    def _default_velocity_color_key(self):
+        for key in ('cell_type', 'clusters', 'stage', 'leiden', 'louvain'):
+            if key in self.adata.obs:
+                return key
+        if len(self.adata.obs.columns) > 0:
+            return self.adata.obs.columns[0]
+        raise KeyError("No observation columns are available for coloring cells")
+
+
+def velocity(adata, **kwargs):
+    """
+    AnnData-first convenience wrapper for :meth:`Velo.cal_velocity`.
+
+    Results are written into ``adata`` and the same AnnData object is returned.
+    This keeps the velocity workflow aligned with other OmicVerse functions
+    that use AnnData as the primary result container.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        Input object. Velocity results are written in place.
+    **kwargs
+        Arguments forwarded to :meth:`Velo.cal_velocity`.
+
+    Returns
+    -------
+    anndata.AnnData or None
+        Return value from :meth:`Velo.cal_velocity`.
+    """
+    velo = Velo(adata)
+    return velo.cal_velocity(**kwargs)
+
+
+def cellrank_fate(adata, **kwargs):
+    """
+    AnnData-first convenience wrapper for :meth:`Velo.cellrank_fate`.
+
+    The CellRank estimator and kernel are stored in
+    ``adata.uns['velocity_cellrank']`` for reuse by ``ov.pl.cell_fate(adata)``.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        Object containing velocity layers.
+    **kwargs
+        Arguments forwarded to :meth:`Velo.cellrank_fate`.
+
+    Returns
+    -------
+    cellrank.estimators.GPCCA
+        Fitted CellRank estimator.
+    """
+    velo = Velo(adata)
+    return velo.cellrank_fate(**kwargs)
+
+
+def state_names(estimator):
+    """
+    Return state names from a CellRank estimator or state container.
+
+    Parameters
+    ----------
+    estimator
+        CellRank estimator, categorical state object, Lineage-like object or
+        array-like object with state labels.
+
+    Returns
+    -------
+    list of str
+        State names. Returns an empty list if names cannot be inferred.
+    """
+    states = getattr(estimator, "macrostates", estimator)
+    if states is None:
+        return []
+    if hasattr(states, "cat"):
+        return [str(state) for state in list(states.cat.categories)]
+    names = getattr(states, "names", None)
+    if names is not None:
+        return [str(state) for state in list(names)]
+    try:
+        import pandas as _pd
+        return sorted(map(str, _pd.unique(states)))
+    except Exception:
+        return []
+
+
+def clean_lineages(adata, key="lineages_fwd"):
+    """
+    Make lineage probabilities finite, non-negative, and row-normalized.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        Object containing CellRank lineage probabilities in ``adata.obsm``.
+    key : str
+        Key in ``adata.obsm`` containing a CellRank ``Lineage`` object or a
+        numeric lineage-probability matrix.
+
+    Returns
+    -------
+    cellrank.Lineage
+        Cleaned lineage probabilities written back to ``adata.obsm[key]``.
+    """
+    import numpy as _np
+
+    if key not in adata.obsm:
+        raise KeyError(f"adata.obsm has no lineage key {key!r}.")
+
+    lineages = adata.obsm[key]
+    values = _np.asarray(lineages, dtype=float).copy()
+    names = list(getattr(lineages, "names", [f"lineage_{i}" for i in range(values.shape[1])]))
+    colors = getattr(lineages, "colors", None)
+
+    changed = not _np.isfinite(values).all() or _np.any(values < 0)
+    values = _np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+    values[values < 0] = 0.0
+
+    row_sums = values.sum(axis=1, keepdims=True)
+    nonzero = row_sums[:, 0] > 0
+    if _np.any(nonzero):
+        values[nonzero] = values[nonzero] / row_sums[nonzero]
+    if _np.any(~nonzero):
+        values[~nonzero] = 1.0 / values.shape[1]
+        changed = True
+
+    try:
+        from cellrank import Lineage
+        adata.obsm[key] = Lineage(values, names=names, colors=colors)
+    except ImportError as exc:
+        raise build_optional_dependency_error(
+            "omicverse.single.clean_lineages",
+            ("cellrank",),
+            install_hint="Install with `pip install cellrank`.",
+        ) from exc
+
+    if changed:
+        adata.uns.setdefault("lineage_clean", {})[key] = {
+            "finite": True,
+            "non_negative": True,
+            "row_normalized": True,
+        }
+    return adata.obsm[key]
+
+
+def perturbation_effect(adata, perturbed_adata, **kwargs):
+    """
+    AnnData-first convenience wrapper for :meth:`Velo.perturbation_effect`.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        Baseline object containing fate probabilities.
+    perturbed_adata : anndata.AnnData
+        Perturbed object containing fate probabilities.
+    **kwargs
+        Arguments forwarded to :meth:`Velo.perturbation_effect`.
+
+    Returns
+    -------
+    anndata.AnnData
+        Baseline object with perturbation-effect columns added to ``obs``.
+    """
+    velo = Velo(adata)
+    return velo.perturbation_effect(perturbed_adata, **kwargs)
+
+
+def cell_fate_perturbation(adata, perturbed, **kwargs):
+    """
+    AnnData-first convenience wrapper for :meth:`Velo.cell_fate_perturbation`.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        Baseline object containing CellRank fate probabilities.
+    perturbed : anndata.AnnData or dict
+        Perturbed object or mapping of perturbation names to perturbed objects.
+    **kwargs
+        Arguments forwarded to :meth:`Velo.cell_fate_perturbation`.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Fate perturbation summary table returned by RegVelo.
+    """
+    velo = Velo(adata)
+    return velo.cell_fate_perturbation(perturbed, **kwargs)
+
+
+def velocity_effect(adata, perturbed_adata, **kwargs):
+    """
+    AnnData-first convenience wrapper for :meth:`Velo.velocity_effect`.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        Baseline object containing a velocity layer.
+    perturbed_adata : anndata.AnnData
+        Perturbed object containing a velocity layer.
+    **kwargs
+        Arguments forwarded to :meth:`Velo.velocity_effect`.
+
+    Returns
+    -------
+    pandas.Series
+        Per-cell velocity direction-change score written to ``adata.obs``.
+    """
+    velo = Velo(adata)
+    return velo.velocity_effect(perturbed_adata, **kwargs)
 
 
 
