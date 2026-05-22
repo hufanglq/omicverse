@@ -136,4 +136,9 @@ from ._ev import (
     ev_masev,
     ev_marker_reference,
 )
+from ._ambient import (
+    # Real raw 10x droplet datasets for the ov.pp.ambient tutorial
+    pbmc_raw_10x,
+    hgmm_mixture,
+)
 from ._signatures import load_signatures_from_file, predefined_signatures
