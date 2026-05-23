@@ -106,7 +106,6 @@ from ._branch_streamplot import (
 from ._trajectory import (
     cell_fate,
     cellrank_macrostates,
-    lineage_probability,
     plot_stream,
     trajectory,
     trajectory_graph,
@@ -277,7 +276,6 @@ __all__ = [
     "tapered_kde",
     "cell_fate",
     "cellrank_macrostates",
-    "lineage_probability",
     "plot_stream",
     "trajectory",
     "trajectory_graph",
