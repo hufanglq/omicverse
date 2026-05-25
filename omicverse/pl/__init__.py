@@ -15,7 +15,7 @@ Visualization categories:
     
 Key modules:
     _single: Single-cell specific plotting functions
-    _bulk: Bulk RNA-seq plotting functions  
+    _bulk: Bulk RNA-seq plotting functions
     _space: Spatial transcriptomics visualizations
     _multi: Multi-omics integration plots
     _heatmap: Heatmap and clustering visualizations
@@ -25,6 +25,9 @@ Key modules:
     _flowsig: Flow cytometry-style visualizations
     _embedding: Dimensionality reduction visualizations
     _density: Density and distribution plots
+    _funkyheatmap: dynbenchmark-style benchmark / multi-metric heatmaps
+        (funky rectangles + circles + bars + pies + text + image glyphs,
+        wraps the pyfunkyheatmap PyPI package)
 
 Features:
     - Publication-ready figures with customizable aesthetics
@@ -47,6 +50,18 @@ Examples:
     >>> # Spatial visualization
     >>> ov.pl.spatial(adata, color='total_counts')
     >>> ov.pl.spatial_domains(adata, color='domain')
+    >>>
+    >>> # Benchmark / multi-metric tables — dynbenchmark / scIB style
+    >>> # (requires the pyfunkyheatmap PyPI package: pip install pyfunkyheatmap)
+    >>> import pandas as pd
+    >>> bench = pd.DataFrame({
+    ...     'id':       ['UMAP', 't-SNE', 'PHATE', 'PCA'],
+    ...     'accuracy': [0.83, 0.71, 0.94, 0.62],
+    ...     'speed':    [0.42, 0.30, 0.20, 0.91],
+    ...     'memory':   [0.60, 0.55, 0.85, 0.30],
+    ... })
+    >>> fh = ov.pl.funky_heatmap(bench)
+    >>> fh.save('benchmark.png', dpi=150)
 """
 from warnings import warn
 
