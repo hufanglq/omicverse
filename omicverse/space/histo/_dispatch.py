@@ -79,6 +79,7 @@ def predict_expression(
             genes=genes,
             organ=organ,
             tech=tech,
+            reference=reference,
             feature_key=feature_key,
             fm_backbone=fm_backbone or "gigapath",
             device=device,

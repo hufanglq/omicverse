@@ -73,14 +73,32 @@ def embed(
         ``~/.cache/huggingface/token``.
     """
     import lazyslide as zs
+    import os
+    from pathlib import Path
+    import anndata as ad
 
     # NOTE: LazySlide only applies its `{name}_{tile_key}` naming when
     # ``key_added`` is ``None``. If the caller hands us a short name we
     # expand it ourselves to keep the table-naming contract.
     if key_added is None:
         lazyslide_key = None
+        effective_table_key = f"{model}_{tile_key}"
     else:
         lazyslide_key = key_added if key_added.endswith(f"_{tile_key}") else f"{key_added}_{tile_key}"
+        effective_table_key = lazyslide_key
+
+    # Disk cache so notebook re-runs and parameter sweeps don't pay for
+    # the embed twice. Keyed by slide stem + tile count + FM name so
+    # different tile grids on the same WSI live alongside each other.
+    cache_root = Path(os.environ.get("OV_HISTO_CACHE",
+                                     Path.home() / ".cache" / "omicverse" / "histo")) / "tile_features"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    slide_stem = Path(getattr(wsi.reader, "file", "wsi")).stem
+    n_tiles = len(wsi.shapes[tile_key])
+    cache_path = cache_root / f"{model}_{slide_stem}_{tile_key}_n{n_tiles}.h5ad"
+    if cache_path.exists():
+        wsi.tables[effective_table_key] = ad.read_h5ad(cache_path)
+        return wsi
 
     zs.tl.feature_extraction(
         wsi,
@@ -95,4 +113,8 @@ def embed(
         pbar=pbar,
         **kwargs,
     )
+    try:
+        wsi.tables[effective_table_key].write_h5ad(cache_path)
+    except Exception:
+        pass
     return wsi

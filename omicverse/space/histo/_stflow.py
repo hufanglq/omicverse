@@ -46,9 +46,36 @@ def _ensure_stflow_repo(cache_dir: Path) -> Path:
         subprocess.check_call(
             ["git", "clone", "--depth", "1", STFLOW_GITHUB_URL, str(repo)],
         )
+    _patch_stflow_repo(repo)
     if str(repo) not in sys.path:
         sys.path.insert(0, str(repo))
     return repo
+
+
+def _patch_stflow_repo(repo: Path) -> None:
+    """Apply small idempotent fixes to upstream STFlow.
+
+    Upstream's ``stflow/model/transformer.py`` passes ``non_negative=`` to
+    ``GeneUpdate``, but ``GeneUpdate.__init__`` doesn't accept that kwarg
+    — so importing ``stflow.model.denoiser`` and instantiating ``Denoiser``
+    crashes with ``TypeError``. The fix is a one-line edit that drops
+    the unused kwarg; we apply it idempotently after each auto-clone.
+    """
+    target = repo / "stflow" / "model" / "transformer.py"
+    if not target.exists():
+        return
+    text = target.read_text()
+    bad = (
+        "self.gene_updater = GeneUpdate(d_model, n_genes, proj_drop=proj_drop, "
+        "non_negative=gene_exp_non_negative)"
+    )
+    if bad in text:
+        good = (
+            "# omicverse patch: upstream's GeneUpdate does not accept "
+            "`non_negative=`; the flag is unused inside the class anyway.\n"
+            "        self.gene_updater = GeneUpdate(d_model, n_genes, proj_drop=proj_drop)"
+        )
+        target.write_text(text.replace(bad, good))
 
 
 def _ref_features_via_pseudotiles(reference, wsi, *, fm_backbone, tile_key, device):
@@ -103,8 +130,8 @@ def predict_stflow(
     cache = Path(cache_dir) if cache_dir is not None else _default_cache_dir()
     _ensure_stflow_repo(cache)
 
+    from types import SimpleNamespace
     from stflow.model.denoiser import Denoiser
-    from stflow.model.nn_utils.config import ModelConfig as _StflowConfig
     from stflow.flow.interpolant import Interpolant
 
     # 1. Tile-level features for the query.
@@ -135,16 +162,27 @@ def predict_stflow(
 
     # 3. Gene panel & reference targets.
     if genes is None:
-        # default to top-500 HVGs from the reference; small panel keeps
-        # training cheap and matches STFlow's HEST-Bench protocol.
+        # STFlow's upstream MLPAttnEdgeAggregation hardcodes
+        # `+50` in its mlp_attn input dim (see
+        # stflow/model/transformer.py:63), i.e. the gene panel size is
+        # baked into the architecture at 50. Until that assumption is
+        # lifted upstream the default panel sits at 50 HVGs.
         import scanpy as sc
         ref_copy = reference.copy()
         sc.pp.normalize_total(ref_copy, target_sum=1e4)
         sc.pp.log1p(ref_copy)
-        sc.pp.highly_variable_genes(ref_copy, n_top_genes=500, flavor="seurat_v3")
+        sc.pp.highly_variable_genes(ref_copy, n_top_genes=50, flavor="seurat_v3")
         gene_panel = ref_copy.var_names[ref_copy.var["highly_variable"]].tolist()
     else:
         gene_panel = [g for g in genes if g in reference.var_names]
+        if len(gene_panel) != 50:
+            raise ValueError(
+                f"STFlow's upstream transformer hardcodes a 50-gene panel "
+                f"(stflow/model/transformer.py:63). Pass exactly 50 genes "
+                f"or set `genes=None` to use the top-50 HVGs; got "
+                f"{len(gene_panel)} genes after filtering against the "
+                f"reference."
+            )
     if not gene_panel:
         raise ValueError("Empty gene panel after filtering against reference.var_names.")
 
@@ -163,25 +201,27 @@ def predict_stflow(
 
     # 5. Build denoiser.
     dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    cfg = _StflowConfig(
+    # The upstream Denoiser reads attributes (feature_dim, hidden_dim,
+    # pairwise_hidden_dim, activation, …) that don't match
+    # `stflow.model.config.ModelConfig`'s constructor names exactly, so we
+    # supply a SimpleNamespace with the field names Denoiser actually
+    # references.
+    cfg = SimpleNamespace(
         n_genes=len(gene_panel),
-        d_input=feature_dim,
-        d_model=hidden_dim,
-        d_edge_model=hidden_dim // 4,
+        feature_dim=feature_dim,
+        hidden_dim=hidden_dim,
+        pairwise_hidden_dim=hidden_dim // 4,
         n_layers=n_layers,
         n_heads=4,
         dropout=0.0,
         attn_dropout=0.0,
         n_neighbors=n_neighbors,
-        act="gelu",
+        activation="gelu",
     )
-    cfg.feature_dim = feature_dim
-    cfg.hidden_dim = hidden_dim
-    cfg.pairwise_hidden_dim = hidden_dim // 4
-    cfg.activation = "gelu"
 
     model = Denoiser(cfg).to(dev)
-    interpolant = Interpolant(prior_sample_type="normal", normalize=False)
+    # Upstream prior types: "gaussian", "zero", "zinb".
+    interpolant = Interpolant(prior_sample_type="gaussian", normalize=False)
 
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
     r_feat_t = torch.from_numpy(r_features)[None].to(dev)        # [1, N, D]

@@ -24,7 +24,9 @@ if TYPE_CHECKING:
 
 
 STPATH_HF_REPO = "tlhuang/STPath"
-STPATH_WEIGHT_FILE = "stpath.pkl"
+# Upstream HF naming: README still says `stpath.pkl`, repo actually
+# ships `stfm.pth` (the original training script's filename).
+STPATH_WEIGHT_FILE = "stfm.pth"
 STPATH_GENE_VOCAB_URL = (
     "https://raw.githubusercontent.com/"
     "Graph-and-Geometric-Learning/STPath/main/utils_data/symbol2ensembl.json"

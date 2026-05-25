@@ -210,7 +210,15 @@ def super_resolve_istar(
     cached_genes = sorted(p.stem for p in super_dir.glob("*.pickle")) if super_dir.exists() else []
     requested = list(genes) if genes is not None else None
     if cached_genes and (requested is None or set(requested).issubset(cached_genes)):
-        return _gather_istar_pickles(work_dir)
+        out = _gather_istar_pickles(work_dir)
+        out.uns["histo"] = {
+            "method": "istar",
+            "pixel_size": pixel_size,
+            "factor": factor,
+            "work_dir": str(work_dir),
+            "cache_hit": True,
+        }
+        return out
 
     istar_dir = _vendored_istar_dir()
     _ensure_hipt_checkpoints(istar_dir, cache_dir=cache)
