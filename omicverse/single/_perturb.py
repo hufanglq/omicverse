@@ -343,19 +343,37 @@ def _run_sctenifoldknk(
        propagating the perturbation one step through the PCNet
        (matrix-vector product with the network).
     """
-    sctenifoldknk = _try_import_sctenifoldknk()
+    sctenifold = _try_import_sctenifoldknk()
 
-    counts = _expression_matrix(adata, layer=layer)
+    # Real scTenifold API (installed via `pip install sctenifoldpy`):
+    #
+    #   from scTenifold import scTenifoldKnk
+    #   knk = scTenifoldKnk(data=counts_df_gene_x_cell, ko_genes=[...])
+    #   knk.build()
+    #   knk.tensor_dict['WT']  ← gene×gene tensor (numpy.ndarray)
+    #   knk.tensor_dict['KO']  ← gene×gene tensor after virtual KO
+    #   knk.d_regulation       ← DataFrame: Gene, Distance, Z, FC, p-value, …
+    #   knk.shared_gene_names  ← row/col index for the tensors
+    #
+    # The counts DataFrame is gene-rows × cell-columns (transposed
+    # relative to AnnData).
+    counts = _expression_matrix(adata, layer=layer).T  # genes × cells
+    counts_df = pd.DataFrame(
+        counts,
+        index=list(adata.var_names),
+        columns=list(adata.obs_names),
+    )
 
-    # The upstream scTenifoldKnk API: sctenifoldknk.tenifoldKnk(...).
-    # We isolate the call in a try/except so optional-dependency errors
-    # are surfaced cleanly.
     try:
-        ko_result = sctenifoldknk.tenifoldKnk(
-            counts,
-            gKO=list(targets) if mode == "ko" else [],
+        knk = sctenifold.scTenifoldKnk(
+            data=counts_df,
+            ko_genes=list(targets) if mode == "ko" else None,
             **backend_kwargs,
         )
+        knk.build()
+        wt_tensor = knk.tensor_dict.get("WT") if hasattr(knk, "tensor_dict") else None
+        ko_tensor = knk.tensor_dict.get("KO") if hasattr(knk, "tensor_dict") else None
+        gene_names = getattr(knk, "shared_gene_names", None) or list(counts_df.index)
     except Exception as exc:  # pragma: no cover
         raise RuntimeError(
             "scTenifoldKnk backend failed; see traceback for the cause "
@@ -363,18 +381,39 @@ def _run_sctenifoldknk(
             "missing from the network after filtering)."
         ) from exc
 
-    grn_base = _ensure_networkx(getattr(ko_result, "tensor", None)
-                                or getattr(ko_result, "network", None),
-                                var_names=adata.var_names)
-    grn_pert = _apply_perturbation_to_graph(
-        grn_base, targets=targets, mode=mode, fold_change=fold_change
-    )
+    grn_base = _tensor_to_graph(wt_tensor, gene_names=gene_names)
+    # For KO the KO tensor produced by scTenifoldKnk is the perturbed graph.
+    # For KD / OE we scale the WT edges in/out of each target.
+    if mode == "ko" and ko_tensor is not None:
+        grn_pert = _tensor_to_graph(ko_tensor, gene_names=gene_names)
+    else:
+        grn_pert = _apply_perturbation_to_graph(
+            grn_base, targets=targets, mode=mode, fold_change=fold_change
+        )
 
     delta_grn = _diff_grn(grn_base, grn_pert) if return_delta else pd.DataFrame()
-    delta_expr = _delta_from_grn(
-        grn_base, grn_pert,
-        targets=targets, mode=mode, fold_change=fold_change,
-    ) if return_delta else pd.DataFrame()
+
+    # Prefer the d_regulation table that scTenifoldKnk emits — it carries
+    # statistical significance (Z, FC, p-value, adjusted p-value) for each
+    # gene's downstream change. Fall back to our generic GRN-propagation
+    # estimate when scTenifold didn't compute it (KD / OE modes).
+    delta_expr = pd.DataFrame()
+    if return_delta:
+        d_reg = getattr(knk, "d_regulation", None)
+        if mode == "ko" and isinstance(d_reg, pd.DataFrame) and not d_reg.empty:
+            delta_expr = d_reg.rename(
+                columns={"Gene": "gene", "FC": "log2_fc", "Distance": "delta"}
+            ).copy()
+            # Add the columns generic clients expect
+            if "mean_base" not in delta_expr.columns:
+                delta_expr["mean_base"] = np.nan
+            if "mean_pert" not in delta_expr.columns:
+                delta_expr["mean_pert"] = np.nan
+        else:
+            delta_expr = _delta_from_grn(
+                grn_base, grn_pert,
+                targets=targets, mode=mode, fold_change=fold_change,
+            )
 
     return PerturbResult(
         target=targets[0] if len(targets) == 1 else list(targets),
@@ -386,19 +425,26 @@ def _run_sctenifoldknk(
         delta_grn=delta_grn,
         delta_expr=delta_expr,
         trajectory_shift=None,
-        meta={"library": "sctenifoldpy", "n_cells": adata.n_obs},
+        meta={"library": "sctenifoldpy", "n_cells": adata.n_obs,
+              "n_shared_genes": len(gene_names)},
     )
 
 
 def _try_import_sctenifoldknk():
+    """Return the ``scTenifold`` top-level module.
+
+    The PyPI package is ``sctenifoldpy``; the import name is
+    ``scTenifold`` (mixed-case, with a capital T). The user-facing class
+    is ``scTenifold.scTenifoldKnk``.
+    """
     try:
-        import sctenifoldknk  # type: ignore
-        return sctenifoldknk
+        import scTenifold  # type: ignore
+        return scTenifold
     except ImportError as exc:  # pragma: no cover - exercised only when missing
         raise build_optional_dependency_error(
             feature="ov.single.perturb (backend='sctenifoldknk')",
-            dependencies=("sctenifoldknk",),
-            install_hint="pip install sctenifoldknk  # or: pip install scTenifoldpy",
+            dependencies=("scTenifold",),
+            install_hint="pip install sctenifoldpy",
         ) from exc
 
 
@@ -539,6 +585,48 @@ def _expression_matrix(adata, layer: str | None):
         X = adata.X
     arr = X.toarray() if hasattr(X, "toarray") else np.asarray(X)
     return arr
+
+
+def _tensor_to_graph(tensor, *, gene_names: Iterable[str]):
+    """Wrap a 2D gene×gene tensor (numpy.ndarray) into a networkx.DiGraph.
+
+    scTenifoldKnk returns its WT / KO PCNet as ``numpy.ndarray`` of shape
+    ``(n_genes, n_genes)`` with ``shared_gene_names`` for the row / col
+    index. We build a thresholded DiGraph (drop zero / near-zero edges)
+    so the result is usable directly with networkx.draw().
+    """
+    if tensor is None:
+        return None
+    try:
+        import networkx as nx
+    except ImportError as exc:  # pragma: no cover
+        raise build_optional_dependency_error(
+            feature="ov.single.perturb (GRN output)",
+            dependencies=("networkx",),
+            install_hint="pip install networkx",
+        ) from exc
+    arr = np.asarray(tensor)
+    genes = list(gene_names)
+    if arr.ndim != 2 or arr.shape[0] != arr.shape[1] != len(genes):
+        # fall back to the generic adjacency loader
+        return _ensure_networkx(arr, var_names=genes)
+    # Threshold at max(|arr|)/200 to drop the dense low-weight noise
+    # scTenifoldKnk emits; the visible structure is in the strongest 1-5%
+    # of edges anyway.
+    abs_arr = np.abs(arr)
+    if abs_arr.max() == 0:
+        thresh = 0.0
+    else:
+        thresh = abs_arr.max() / 200.0
+    rows, cols = np.where(abs_arr > thresh)
+    G = nx.DiGraph()
+    for g in genes:
+        G.add_node(g)
+    for r, c in zip(rows.tolist(), cols.tolist()):
+        if r == c:
+            continue
+        G.add_edge(genes[r], genes[c], weight=float(arr[r, c]))
+    return G
 
 
 def _ensure_networkx(graph_like, *, var_names: Iterable[str] | None = None):
