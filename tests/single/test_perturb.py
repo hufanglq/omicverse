@@ -63,20 +63,41 @@ def fake_grn(tiny_adata):
 
 
 def _install_fake_sctenifoldknk(monkeypatch, base_graph):
-    """Install a fake ``sctenifoldknk`` module returning ``base_graph``."""
-    fake = types.ModuleType("sctenifoldknk")
+    """Install a fake ``scTenifold`` module returning ``base_graph``.
 
-    class _FakeResult:
-        def __init__(self, network):
-            self.network = network
-            self.tensor = network
+    Mirrors the real ``scTenifold.scTenifoldKnk`` API:
+        knk = scTenifoldKnk(data=df, ko_genes=[...])
+        knk.build()
+        knk.WT_data['network'] / knk.KO_data['network']
+    """
+    fake = types.ModuleType("scTenifold")
 
-    def _fake_knk(counts, gKO=None, **kwargs):
-        # ignore counts — return the pre-built test graph
-        return _FakeResult(base_graph)
+    class _FakeKnk:
+        def __init__(self, data=None, ko_genes=None, **kwargs):
+            import numpy as np
+            self.data = data
+            self.ko_genes = list(ko_genes or [])
+            self.shared_gene_names = list(base_graph.nodes)
+            self.tensor_dict: dict = {}
+            self.d_regulation = None
 
-    fake.tenifoldKnk = _fake_knk
-    monkeypatch.setitem(sys.modules, "sctenifoldknk", fake)
+        def build(self):
+            import numpy as np
+            import networkx as nx
+            n = len(self.shared_gene_names)
+            idx = {g: i for i, g in enumerate(self.shared_gene_names)}
+            wt = np.zeros((n, n), dtype=float)
+            for u, v, d in base_graph.edges(data=True):
+                wt[idx[u], idx[v]] = float(d.get("weight", 1.0))
+            ko = wt.copy()
+            for g in self.ko_genes:
+                if g in idx:
+                    ko[idx[g], :] = 0.0
+                    ko[:, idx[g]] = 0.0
+            self.tensor_dict = {"WT": wt, "KO": ko}
+
+    fake.scTenifoldKnk = _FakeKnk
+    monkeypatch.setitem(sys.modules, "scTenifold", fake)
     return fake
 
 
@@ -228,18 +249,18 @@ def test_sctenifoldknk_backend_missing_raises(monkeypatch, tiny_adata):
     """Without the stub, calling the backend should raise an ImportError."""
     from omicverse.single import perturb
 
-    monkeypatch.delitem(sys.modules, "sctenifoldknk", raising=False)
+    monkeypatch.delitem(sys.modules, "scTenifold", raising=False)
     # blocking import: simulate the package not being installed
     original_import = __import__
 
     def blocked(name, *args, **kwargs):
-        if name == "sctenifoldknk" or name.startswith("sctenifoldknk."):
+        if name == "scTenifold" or name.startswith("scTenifold."):
             raise ImportError(f"No module named '{name}'")
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr("builtins.__import__", blocked)
 
-    with pytest.raises(ImportError, match="(?i)sctenifoldknk"):
+    with pytest.raises(ImportError, match="(?i)scTenifold"):
         perturb(tiny_adata, target="G0", backend="sctenifoldknk")
 
 
