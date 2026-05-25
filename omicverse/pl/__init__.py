@@ -218,6 +218,11 @@ from ._plot_backend import (
     plot_pca_variance_ratio1,
     gen_mpl_labels,
 )
+from ._funkyheatmap import (
+    funky_heatmap,
+    position_arguments as funky_position_arguments,
+    scale_minmax as funky_scale_minmax,
+)
 
 
 def curved_graph(*args, **kwargs):
