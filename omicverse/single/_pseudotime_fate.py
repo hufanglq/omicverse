@@ -1419,6 +1419,8 @@ class PseudotimeFate:
         clip: float | None = 3.0,
         scale_features: bool = False,
         split: bool = False,
+        hide_feature_threshold: float = 0.0,
+        legend_cols: int = 5,
         palette: str | list = 'Set3',
         color: str = 'black',
         size: float = 5,
@@ -1608,7 +1610,12 @@ class PseudotimeFate:
                 if ws % 2 == 0:
                     ws -= 1
                 ws = max(3, ws)
-                smooth = savgol_filter(seg_feats, ws, 1, axis=0)
+                # Hide-feature threshold: zero out values below threshold
+                # so very-weakly-expressed features don't clutter the
+                # plot (MIRA `hide_feature_threshold`).
+                seg_feats_use = np.where(seg_feats < hide_feature_threshold,
+                                          0.0, seg_feats)
+                smooth = savgol_filter(seg_feats_use, ws, 1, axis=0)
                 cum = np.cumsum(smooth, axis=-1)
                 # MIRA `center_baseline=True`: baseline = features[:, -1] / 2
                 # *regardless* of how many features there are. This makes
@@ -1630,8 +1637,7 @@ class PseudotimeFate:
                         c = color
                     ax.fill_between(seg_pt, prev, top_cum[:, k], color=c,
                                      alpha=0.9, edgecolor=linecolor,
-                                     linewidth=linewidth or 0.1,
-                                     label=data_list[k] if use_palette and parent == root_idx and bfs[0][1] == child else None)
+                                     linewidth=linewidth or 0.1)
                     prev = top_cum[:, k]
 
             elif style == 'swarm':
@@ -1681,16 +1687,42 @@ class PseudotimeFate:
                 ax.text(seg_pt_max[child] * 1.005, cl, name,
                         fontsize=10, va='center', ha='left', fontweight='bold')
 
+        # Explicit ylim with padding for Beeswarm dot radii, mirroring
+        # MIRA `_build_tree`'s `ax.set(ylim=(plot_bottom, max_centerline
+        # + max_bar_height/2 + 0.15))`. Without this matplotlib's auto-
+        # ylim leaves the top lineage's cell dots clipped at the figure
+        # edge.
+        min_cl = float(np.min(centerlines))
+        max_cl = float(np.max(centerlines))
+        plot_bottom = min_cl - max_bar_height / 2 - 0.3
+        plot_top = max_cl + max_bar_height / 2 + 0.15
+        ax.set_ylim(plot_bottom, plot_top)
+
         # MIRA-style pseudotime triangle at the bottom of the plot.
-        ylim_lo, ylim_hi = ax.get_ylim()
-        bar_h = 0.04 * (ylim_hi - ylim_lo)
-        base = ylim_lo - bar_h * 1.5
+        bar_h = 0.04 * (plot_top - plot_bottom)
+        base = plot_bottom + 0.05
         ax.fill_between([float(pt.min()), float(pt.max())],
                          [base, base + bar_h], [base, base],
                          color='lightgrey', linewidth=0)
         ax.text(float(pt.max()) * 1.005 + 0.005 * float(np.ptp(pt)), base,
                 "Time", fontsize=11, ha='left', va='bottom')
-        ax.set_ylim(base - bar_h * 0.3, ylim_hi)
+
+        # Multi-feature stream legend: one Patch handle per feature,
+        # MIRA-style colour swatches placed below the plot.
+        if style == 'stream' and numeric and len(data_list) > 1:
+            from matplotlib.patches import Patch
+            cmap_colors = (plt.get_cmap(palette).colors
+                            if isinstance(palette, str) else palette)
+            handles = [
+                Patch(facecolor=cmap_colors[k % len(cmap_colors)],
+                      edgecolor=linecolor, linewidth=linewidth or 0.1,
+                      label=data_list[k])
+                for k in range(len(data_list))
+            ]
+            ax.legend(handles=handles, loc='upper center',
+                       bbox_to_anchor=(0.5, -0.06),
+                       ncol=min(legend_cols, len(data_list)),
+                       frameon=False, fontsize=10)
 
         # Categorical swarm legend (only for swarm style with a finite set
         # of labels — matches MIRA's behaviour on `style='swarm'`).
