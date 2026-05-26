@@ -1362,24 +1362,39 @@ class PseudotimeFate:
 
     # ============================================================ streamplot
     def _dendrogram_levels(self, tree_adj: np.ndarray) -> np.ndarray:
-        """Vertical layout of tree nodes — equivalent to MIRA's
-        ``get_dendogram_levels``. Internal nodes' levels are the
-        average of their children's levels; leaves are spaced evenly."""
+        """Vertical layout of tree nodes — verbatim port of MIRA's
+        ``get_dendogram_levels``.
+
+        Leaves get integer positions 0, 1, 2, … in DFS order; internal
+        nodes get the **mean** of their children. We do **not** rescale
+        to [0, 1] — adjacent leaves are spaced one unit apart so a
+        ``max_bar_height ≤ 1`` strip fits within ±0.5 around each
+        centerline with no overlap into the neighbouring branch.
+        """
         import networkx as nx
         G = nx.from_numpy_array(tree_adj, create_using=nx.DiGraph)
         root = next(n for n, d in G.in_degree() if d == 0)
-        leaves = [n for n in G.nodes if G.out_degree(n) == 0]
-        positions = {leaf: i for i, leaf in enumerate(leaves)}
-        order = list(nx.topological_sort(G))[::-1]
-        for n in order:
-            children = list(G.successors(n))
+        positions: dict = {}
+        counter = [0]
+
+        def _set(node):
+            if node in positions:
+                return positions[node]
+            children = list(G.successors(node))
             if not children:
-                continue
-            positions[n] = float(np.mean([positions[c] for c in children]))
-        max_ = max(positions.values()) or 1.0
-        for k in positions:
-            positions[k] = positions[k] / max_
-        # Return as array indexed by node id (same order as adjacency).
+                positions[node] = float(counter[0])
+                counter[0] += 1
+            else:
+                positions[node] = float(np.mean([_set(c) for c in children]))
+            return positions[node]
+
+        # DFS-tree traversal mirrors MIRA's ``dfs_predecessors[::-1]``
+        # order so leaf indexing matches a typical tree visualisation.
+        for node in reversed(list(nx.dfs_predecessors(G, root))) + [root]:
+            _set(node)
+        for node in G.nodes:
+            if node not in positions:
+                _set(node)
         return np.array([positions[k] for k in G.nodes])
 
     def plot_stream(
