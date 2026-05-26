@@ -1918,7 +1918,15 @@ class PseudotimeFate:
         names = [str(self.adata.obs[self.groupby].iloc[c])
                  if self.groupby else f"L{j}"
                  for j, c in enumerate(self.result.terminal_cells)]
-        cat = pd.Categorical([names[i] for i in F.argmax(axis=1)])
+        # Preserve all terminal lineage names as categories — even when a
+        # lineage receives zero argmax votes (e.g. small terminals like
+        # Delta/Epsilon in pancreas) — so downstream tools that iterate
+        # ``cat.categories`` still see every lineage.
+        unique_names = list(dict.fromkeys(names))
+        cat = pd.Categorical(
+            [names[i] for i in F.argmax(axis=1)],
+            categories=unique_names,
+        )
         self.adata.obs[lk] = cat
         # Propagate the cluster palette to the lineage column so scanpy/
         # PseudotimeFate downstream tools (dynamic_trends, etc.) reuse

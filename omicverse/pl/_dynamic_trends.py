@@ -608,6 +608,14 @@ def dynamic_trends(
                                 linewidths=0,
                             )
                         else:
+                            # Suppress per-point legend entries when lines
+                            # are providing the legend (compare_groups or
+                            # compare_features). Otherwise the legend would
+                            # mix line groups + every point category, which
+                            # the lines already cover semantically.
+                            suppress_point_legend = add_line and (
+                                compare_groups or compare_features
+                            )
                             point_series = dataset_raw[point_color_by]
                             for point_label in list(dict.fromkeys(point_series.dropna().astype(str))):
                                 point_mask = point_series.astype(str).to_numpy() == point_label
@@ -620,7 +628,7 @@ def dynamic_trends(
                                     alpha=scatter_alpha,
                                     color=point_color_map[point_label],
                                     linewidths=0,
-                                    label=point_label,
+                                    label="_nolegend_" if suppress_point_legend else point_label,
                                 )
                 if add_line:
                     axis.plot(
