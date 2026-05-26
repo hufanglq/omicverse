@@ -135,6 +135,21 @@ def _resolve_reverse_lineages(reverse_ht, lineage_names):
     else:
         items = list(items)
 
+    # ``reverse_ht`` is intended for the two-lineage "diverging cascade"
+    # layout (one terminal at far-left reading right-to-left, the trunk
+    # in the middle, the other terminal at far-right reading left-to-
+    # right). With more than two lineages each panel reads in a
+    # different direction, which is confusing — warn the caller.
+    if len(lineage_names) > 2 and items:
+        import warnings
+        warnings.warn(
+            f"reverse_ht is only meaningful for the two-lineage diverging "
+            f"layout; got {len(lineage_names)} lineages ({lineage_names!r}). "
+            "Each panel will read in a different direction. Consider "
+            "passing reverse_ht=None.",
+            UserWarning, stacklevel=3,
+        )
+
     resolved = set()
     for item in items:
         if isinstance(item, (int, np.integer)) and not isinstance(item, bool):
@@ -1048,6 +1063,15 @@ def _prepare_dynamic_matrix(
                             )
                             .to_numpy()
                         )
+                    # Mirror the ``grouped.iloc[::-1]`` reversal applied
+                    # to the expression matrix above — otherwise the
+                    # cluster-annotation strip stays in pt-ascending order
+                    # while the heatmap columns are in pt-descending order,
+                    # so e.g. ``reverse_ht=['Beta']`` paints Beta markers
+                    # on the LEFT while the Beta cluster strip still sits
+                    # on the RIGHT.
+                    if lineage_name in reverse_lineages:
+                        annotation_values[key] = annotation_values[key][::-1]
             metadata_rows.extend(
                 {
                     "column": label,
@@ -1061,8 +1085,17 @@ def _prepare_dynamic_matrix(
                 }
                 for idx, label in enumerate(labels)
             )
+        # Per-lineage standardisation: pooling all lineages before
+        # z-scoring lets a single high-expressing lineage (e.g. Delta's
+        # Sst peak) dominate the global ``std``, which compresses the
+        # other panels' cascades to noise. Each lineage tells a
+        # separate developmental story, so we standardise each chunk
+        # independently and only then concatenate.
+        chunks = [_scale_dynamic_frame(chunk, standard_scale)
+                  for chunk in chunks]
         matrix = pd.concat(chunks, axis=1)
         metadata = pd.DataFrame(metadata_rows).set_index("column")
+        return matrix, metadata
 
     matrix = _scale_dynamic_frame(matrix, standard_scale)
     return matrix, metadata
