@@ -383,7 +383,19 @@ def dynamic_trends(
         if not _is_categorical(point_values):
             raise ValueError("`point_color_by` currently supports categorical raw obs columns only.")
         point_labels = list(dict.fromkeys(point_values.dropna().astype(str)))
-        point_color_map = _resolve_palette(point_labels, palette=point_palette)
+        # Prefer the captured scanpy palette
+        # (``adata.uns[f'{point_color_by}_colors']``) if
+        # ``dynamic_features(..., store_raw=True)`` recorded it AND the
+        # user didn't pass an explicit ``point_palette``.
+        captured = (result.config or {}).get("raw_obs_colors", {}) if hasattr(result, "config") else {}
+        captured_order = (result.config or {}).get("raw_obs_category_order", {}) if hasattr(result, "config") else {}
+        if point_palette is None and point_color_by in captured:
+            colors = captured[point_color_by]
+            order = captured_order.get(point_color_by, [])
+            color_by_name = {c: colors[i] for i, c in enumerate(order) if i < len(colors)}
+            point_color_map = {lbl: color_by_name.get(lbl, "#888888") for lbl in point_labels}
+        else:
+            point_color_map = _resolve_palette(point_labels, palette=point_palette)
     else:
         point_labels = []
         point_color_map = {}
@@ -448,7 +460,26 @@ def dynamic_trends(
     else:
         color_labels = group_list
 
-    color_map = _resolve_palette(color_labels, palette=line_palcolor)
+    # Line palette: if the caller didn't pass an explicit
+    # ``line_palcolor`` AND the labels correspond to groups for which
+    # ``dynamic_features`` captured a scanpy palette
+    # (``adata.uns[f'{groupby}_colors']``), use that — keeps the
+    # per-lineage curves consistent with the cluster colour scheme.
+    captured_lines = (result.config or {}).get("raw_obs_colors", {}) if hasattr(result, "config") else {}
+    captured_order_lines = (result.config or {}).get("raw_obs_category_order", {}) if hasattr(result, "config") else {}
+    groupby_used = (result.config or {}).get("groupby") if hasattr(result, "config") else None
+    if (
+        line_palcolor is None
+        and color_labels is group_list
+        and groupby_used is not None
+        and groupby_used in captured_lines
+    ):
+        cols_line = captured_lines[groupby_used]
+        ord_line = captured_order_lines.get(groupby_used, [])
+        by_name = {c: cols_line[i] for i, c in enumerate(ord_line) if i < len(cols_line)}
+        color_map = {lbl: by_name.get(lbl, "#888888") for lbl in color_labels}
+    else:
+        color_map = _resolve_palette(color_labels, palette=line_palcolor)
     if line_style_by == "groups":
         style_map = _resolve_linestyles(group_list, linestyles=line_styles)
     elif line_style_by == "features":
@@ -577,6 +608,14 @@ def dynamic_trends(
                                 linewidths=0,
                             )
                         else:
+                            # Suppress per-point legend entries when lines
+                            # are providing the legend (compare_groups or
+                            # compare_features). Otherwise the legend would
+                            # mix line groups + every point category, which
+                            # the lines already cover semantically.
+                            suppress_point_legend = add_line and (
+                                compare_groups or compare_features
+                            )
                             point_series = dataset_raw[point_color_by]
                             for point_label in list(dict.fromkeys(point_series.dropna().astype(str))):
                                 point_mask = point_series.astype(str).to_numpy() == point_label
@@ -589,7 +628,7 @@ def dynamic_trends(
                                     alpha=scatter_alpha,
                                     color=point_color_map[point_label],
                                     linewidths=0,
-                                    label=point_label,
+                                    label="_nolegend_" if suppress_point_legend else point_label,
                                 )
                 if add_line:
                     axis.plot(

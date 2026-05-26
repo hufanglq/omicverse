@@ -109,6 +109,11 @@ from ._lazy_checkpoint import lazy_checkpoint, resume_from_checkpoint, list_chec
 # Usage: mono = ov.single.Monocle(adata); mono.preprocess(); ...
 from ._monocle import Monocle
 
+# Pseudotime → terminal-state → fate-probability unification.
+# Usage: fate = ov.single.PseudotimeFate(adata, pseudotime_key='slingshot_pseudotime'); fate.fit()
+# Works downstream of any TrajInfer backend (slingshot / palantir / scorpius / …).
+from ._pseudotime_fate import PseudotimeFate, PseudotimeFateResult
+
 # Single-cell CNV inference — pure-Python CopyKAT / inferCNV wrappers.
 # Usage: cnv = ov.single.CNV(adata, method='copykat'); cnv.run()
 from ._cnv import CNV
@@ -318,6 +323,8 @@ __all__ = [
     'hematopoiesis',
     'scRNA_hematopoiesis',
     'TrajInfer',
+    'PseudotimeFate',
+    'PseudotimeFateResult',
     'fle',
     'diffmap',
     'scLTNN',

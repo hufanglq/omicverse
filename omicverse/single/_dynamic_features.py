@@ -732,6 +732,48 @@ def dynamic_features(
                 stats.loc[valid_idx, "padj"] = padj
     fitted = pd.DataFrame(fitted_records)
     raw = pd.DataFrame(raw_records) if store_raw else None
+
+    # Capture ``adata.uns[f'{key}_colors']`` so downstream
+    # ``ov.pl.dynamic_trends`` can reuse the scanpy palette instead of
+    # falling back to a generic colormap. We collect colours for:
+    #   * each stored ``raw_obs_keys`` entry → point colours
+    #   * ``groupby`` (the per-lineage GAM column) → line colours
+    # Only meaningful for single-AnnData input — for Mapping input the
+    # per-dataset uns would need separate handling, which most callers
+    # don't have.
+    raw_obs_colors: dict = {}
+    raw_obs_category_order: dict = {}
+
+    def _capture_palette(adata_in, k):
+        ck = f"{k}_colors"
+        if ck in adata_in.uns and k in adata_in.obs.columns:
+            series = adata_in.obs[k]
+            cats = (list(series.cat.categories)
+                    if hasattr(series, "cat")
+                    else list(series.dropna().astype(str).unique()))
+            cols = list(adata_in.uns[ck])
+            if cols:
+                raw_obs_colors[k] = [str(c) for c in cols[:len(cats)]]
+                raw_obs_category_order[k] = [str(c) for c in cats]
+
+    if isinstance(data, AnnData):
+        keys_to_capture: list = []
+        if store_raw:
+            if isinstance(raw_obs_keys, str):
+                keys_to_capture = [raw_obs_keys]
+            elif isinstance(raw_obs_keys, Mapping):
+                for v in raw_obs_keys.values():
+                    if isinstance(v, str):
+                        keys_to_capture.append(v)
+                    elif v is not None:
+                        keys_to_capture.extend(list(v))
+            elif raw_obs_keys is not None:
+                keys_to_capture = list(raw_obs_keys)
+        # Always capture the ``groupby`` palette (used for line colours).
+        if groupby is not None:
+            keys_to_capture.append(groupby)
+        for k in dict.fromkeys(keys_to_capture):
+            _capture_palette(data, k)
     if not include_source_dataset:
         for df in (stats, fitted, raw):
             if df is not None and "source_dataset" in df.columns:
@@ -764,6 +806,8 @@ def dynamic_features(
                 if not isinstance(raw_obs_keys, Mapping)
                 else dict(raw_obs_keys)
             ),
+            "raw_obs_colors": raw_obs_colors,
+            "raw_obs_category_order": raw_obs_category_order,
         },
     )
 
