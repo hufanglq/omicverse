@@ -608,6 +608,350 @@ class PseudotimeFate:
             groups.append(keep if keep.size else in_ms)
         return groups
 
+    # =============================================================== drivers
+    def compute_lineage_drivers(
+        self,
+        lineages: str | list | None = None,
+        *,
+        layer: str | None = None,
+        use_raw: bool = False,
+        cluster_key: str | None = None,
+        clusters: list | None = None,
+        method: Literal["fisher", "spearman"] = "fisher",
+        confidence_level: float = 0.95,
+        n_top: int | None = None,
+    ) -> "pd.DataFrame":
+        """Genes whose expression best correlates with each lineage's
+        fate probability — the CellRank ``compute_lineage_drivers``
+        analogue (Lange 2022, Reuter 2019 :cite:t:`reuter:19`).
+
+        Per-gene Pearson correlation between gene expression and the
+        fate-probability column (Fisher z-transform CI, BH-adjusted
+        q-values across all genes), restricted to a subset of clusters
+        via ``cluster_key`` / ``clusters`` (recommended — driver genes
+        are most meaningful within the lineage's basin of attraction).
+
+        Returns a long-form :class:`pandas.DataFrame` with columns
+        ``[gene, lineage, corr, pval, qval, ci_low, ci_high]`` sorted by
+        ``corr`` within each lineage. Also writes the wide-form result
+        to ``adata.varm['<prefix>_lineage_drivers']``.
+        """
+        import pandas as pd
+        from scipy.stats import norm
+
+        if self.result is None or self.result.fate_probabilities is None:
+            raise RuntimeError(
+                "Call fit() first (with compute_fates=True). Driver "
+                "genes need fate probabilities."
+            )
+        adata = self.adata
+        F = self.result.fate_probabilities
+        names = [str(adata.obs[self.groupby].iloc[c])
+                 if self.groupby else f"L{j}"
+                 for j, c in enumerate(self.result.terminal_cells)]
+
+        # Resolve which lineages the user wants
+        if lineages is None:
+            sel = list(range(F.shape[1]))
+        elif isinstance(lineages, str):
+            sel = [names.index(lineages)]
+        else:
+            sel = [names.index(n) for n in lineages]
+
+        # Resolve the expression matrix
+        if use_raw and adata.raw is not None:
+            X = adata.raw.X
+            var_names = list(adata.raw.var_names)
+        elif layer:
+            X = adata.layers[layer]
+            var_names = list(adata.var_names)
+        else:
+            X = adata.X
+            var_names = list(adata.var_names)
+        if sp.issparse(X):
+            X = X.toarray()
+        X = np.asarray(X, dtype=np.float64)
+
+        # Optional cluster restriction
+        if cluster_key and clusters is not None:
+            mask = adata.obs[cluster_key].astype(str).isin([str(c) for c in clusters]).values
+            X = X[mask]
+            F_use = F[mask]
+        else:
+            F_use = F
+
+        n_cells = X.shape[0]
+        if n_cells < 4:
+            raise ValueError(
+                f"too few cells ({n_cells}) for correlation — relax the "
+                "cluster restriction or pick a smaller cluster set."
+            )
+
+        # Pearson correlation (vectorised across genes for one lineage at a time)
+        Xc = X - X.mean(axis=0, keepdims=True)
+        x_norm = np.sqrt((Xc * Xc).sum(axis=0))
+        rows = []
+        for j in sel:
+            yc = F_use[:, j] - F_use[:, j].mean()
+            y_norm = float(np.sqrt(np.sum(yc * yc)))
+            denom = x_norm * y_norm
+            corr = np.where(denom > 0, (Xc.T @ yc) / np.maximum(denom, 1e-12), 0.0)
+            # Fisher z-transform for CI / p-value
+            r = np.clip(corr, -0.999999, 0.999999)
+            z = np.arctanh(r)
+            se = 1.0 / np.sqrt(n_cells - 3)
+            zcrit = norm.ppf(0.5 + confidence_level / 2)
+            lo = np.tanh(z - zcrit * se)
+            hi = np.tanh(z + zcrit * se)
+            # Two-sided p from Fisher z
+            pval = 2 * (1 - norm.cdf(np.abs(z / se)))
+            # BH q-value
+            order = np.argsort(pval)
+            ranked = pval[order]
+            qval_sorted = ranked * len(pval) / (np.arange(len(pval)) + 1)
+            qval_sorted = np.minimum.accumulate(qval_sorted[::-1])[::-1]
+            qval = np.empty_like(pval)
+            qval[order] = qval_sorted
+            for g_idx, gene in enumerate(var_names):
+                rows.append((gene, names[j], float(corr[g_idx]),
+                             float(pval[g_idx]), float(qval[g_idx]),
+                             float(lo[g_idx]), float(hi[g_idx])))
+
+        df = pd.DataFrame(rows, columns=["gene", "lineage", "corr",
+                                          "pval", "qval", "ci_low", "ci_high"])
+        df = df.sort_values(["lineage", "corr"], ascending=[True, False])
+        if n_top:
+            df = df.groupby("lineage", group_keys=False).head(n_top)
+
+        # Wide form into adata.varm for downstream tooling.
+        wide = df.pivot(index="gene", columns="lineage", values="corr").reindex(var_names)
+        prefix = self.pseudotime_key.replace("_pseudotime", "")
+        self.adata.varm[f"{prefix}_lineage_drivers"] = wide.values
+        self.adata.uns[f"{prefix}_lineage_driver_columns"] = list(wide.columns)
+        return df.reset_index(drop=True)
+
+    # ============================================================ projection
+    def compute_circular_projection(
+        self,
+        normalize_by_mean: bool = True,
+        lineage_order: list | None = None,
+    ) -> "np.ndarray":
+        """Velten-2017-style circular embedding: place terminal lineages
+        evenly on the unit circle, then position each cell at the
+        weighted barycentre of those vertices using its fate
+        probabilities. Cells with one dominant fate sit near that
+        vertex; uncommitted cells sit in the middle.
+
+        Writes the (n, 2) projection to ``adata.obsm['<prefix>_X_fate_simplex']``
+        and returns it. ``lineage_order`` (list of terminal-cluster
+        names) lets you control the angular order; the default uses the
+        ``terminal_cells`` order produced by :meth:`fit`.
+        """
+        if self.result is None or self.result.fate_probabilities is None:
+            raise RuntimeError("Call fit() first (with compute_fates=True)")
+        F = self.result.fate_probabilities
+        if normalize_by_mean:
+            mean = F.mean(axis=0, keepdims=True)
+            F = F / np.maximum(mean, 1e-12)
+            F = F / F.sum(axis=1, keepdims=True)
+        names = [str(self.adata.obs[self.groupby].iloc[c])
+                 if self.groupby else f"L{j}"
+                 for j, c in enumerate(self.result.terminal_cells)]
+        if lineage_order is not None:
+            idx = [names.index(n) for n in lineage_order]
+            F = F[:, idx]
+            names = lineage_order
+        K = F.shape[1]
+        angles = np.linspace(0, 2 * np.pi, K, endpoint=False)
+        verts = np.column_stack([np.cos(angles), np.sin(angles)])    # (K, 2)
+        proj = F @ verts                                              # (n, 2)
+        prefix = self.pseudotime_key.replace("_pseudotime", "")
+        self.adata.obsm[f"{prefix}_X_fate_simplex"] = proj
+        self.adata.uns[f"{prefix}_fate_simplex_names"] = names
+        return proj
+
+    def plot_circular_projection(
+        self,
+        color: str | None = None,
+        figsize=(5, 5),
+        ax=None,
+        s: float = 4,
+        cmap: str = "viridis",
+        label_distance: float = 1.20,
+    ):
+        """Render the circular embedding from
+        :meth:`compute_circular_projection`. Cells inside the unit
+        circle, lineage labels arranged on its perimeter."""
+        if self.result is None or self.result.fate_probabilities is None:
+            raise RuntimeError("Call fit() first")
+        import matplotlib.pyplot as plt
+        prefix = self.pseudotime_key.replace("_pseudotime", "")
+        key = f"{prefix}_X_fate_simplex"
+        if key not in self.adata.obsm:
+            self.compute_circular_projection()
+        coords = self.adata.obsm[key]
+        names = self.adata.uns[f"{prefix}_fate_simplex_names"]
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=figsize)
+
+        if color is None or color == 'lineage_entropy':
+            c = self.result.lineage_entropy
+            title = 'lineage entropy'
+        elif color in self.adata.obs.columns:
+            v = self.adata.obs[color]
+            if v.dtype.name == 'category':
+                cmap_ = plt.get_cmap('tab20', v.cat.categories.size)
+                c = cmap_(v.cat.codes.values)
+                title = color
+                cmap = None
+            else:
+                c = v.values
+                title = color
+        else:
+            c = self.adata.obs_vector(color) if color in self.adata.var_names else None
+            title = color
+        sc = ax.scatter(coords[:, 0], coords[:, 1], c=c, s=s, cmap=cmap)
+        # Unit circle outline
+        theta = np.linspace(0, 2 * np.pi, 200)
+        ax.plot(np.cos(theta), np.sin(theta), color='#444', lw=0.8)
+        # Lineage labels around the perimeter
+        K = len(names)
+        for j, name in enumerate(names):
+            ang = 2 * np.pi * j / K
+            ax.text(label_distance * np.cos(ang),
+                    label_distance * np.sin(ang),
+                    name, ha='center', va='center',
+                    fontsize=9, fontweight='bold')
+        ax.set_aspect('equal'); ax.set_xticks([]); ax.set_yticks([])
+        ax.set_title(title)
+        for s_ in ax.spines.values(): s_.set_visible(False)
+        if cmap is not None and color != 'clusters':
+            try:
+                plt.colorbar(sc, ax=ax, shrink=0.6)
+            except Exception:
+                pass
+        return ax
+
+    # =========================================================== differentiation traces
+    def trace_differentiation(
+        self,
+        start_cells: list | int | None = None,
+        n_walks: int = 200,
+        n_steps: int = 1500,
+        seed: int = 0,
+    ) -> "np.ndarray":
+        """Simulate forward random walks through the biased Markov chain.
+
+        Equivalent to ``mira.time.trace_differentiation`` — useful as a
+        teaching aid (visualise how cells "flow" from the origin to the
+        terminals) and as a sanity check on the transition matrix.
+
+        Returns a ``(n_walks, n_steps)`` array of cell indices visited
+        by each walk. ``start_cells`` defaults to the cell with the
+        smallest pseudotime (or a list of candidate roots).
+        """
+        if self.result is None:
+            raise RuntimeError("Call fit() first")
+        rng = np.random.default_rng(seed)
+        P = self.result.transition_matrix.tocsr()
+        n = P.shape[0]
+        pt = self._pt
+        if start_cells is None:
+            start_cells = [int(np.argmin(pt))]
+        elif isinstance(start_cells, int):
+            start_cells = [start_cells]
+        starts = np.asarray(start_cells, dtype=np.int64)
+
+        # Sample n_walks initial cells with replacement from `starts`.
+        traces = np.empty((n_walks, n_steps), dtype=np.int64)
+        cur = rng.choice(starts, size=n_walks, replace=True)
+        traces[:, 0] = cur
+
+        # Build a *dense* per-row CDF tensor (n × max_k), padded with
+        # 1.0 in the unused tail slots so ``argmax(cdf > u)`` always
+        # picks the last valid neighbour for short rows. This turns the
+        # whole walk into a sequence of numpy gather + argmax + gather
+        # operations — no Python-level per-walk loop.
+        indptr = P.indptr.astype(np.int64)
+        nnz_per_row = np.diff(indptr)
+        max_k = int(nnz_per_row.max()) if n > 0 else 0
+        cdf_dense = np.ones((n, max_k), dtype=np.float64)
+        col_dense = np.zeros((n, max_k), dtype=np.int64)
+        # Self-loop fallback so stuck rows stay where they are.
+        col_dense[:] = np.arange(n)[:, None]
+        rsum = np.asarray(P.sum(axis=1)).ravel()
+        data = P.data.astype(np.float64)
+        indices = P.indices
+        for i in range(n):
+            s, e = indptr[i], indptr[i + 1]
+            if e > s and rsum[i] > 0:
+                cdf_dense[i, :e - s] = np.cumsum(data[s:e] / rsum[i])
+                col_dense[i, :e - s] = indices[s:e]
+                # pad the unused tail with the final CDF value (1.0)
+                cdf_dense[i, e - s:] = 1.0
+
+        for t in range(1, n_steps):
+            u = rng.random(n_walks)
+            # cdf_dense[cur] is (n_walks, max_k); argmax of the first
+            # True picks the column slot to use.
+            slot = (cdf_dense[cur] > u[:, None]).argmax(axis=1)
+            cur = col_dense[cur, slot]
+            traces[:, t] = cur
+        return traces
+
+    def plot_trace_density(
+        self,
+        traces: "np.ndarray | None" = None,
+        basis: str = "X_umap",
+        ax=None,
+        figsize=(5, 4),
+        bins: int = 80,
+        cmap: str = "BuPu",
+        n_walks: int = 200,
+        n_steps: int = 1500,
+    ):
+        """Heatmap of cells visited by simulated random walks on UMAP —
+        the MIRA ``show_gif(trace_differentiation())`` static analogue.
+        """
+        if traces is None:
+            traces = self.trace_differentiation(
+                n_walks=n_walks, n_steps=n_steps)
+        import matplotlib.pyplot as plt
+        if ax is None:
+            _, ax = plt.subplots(figsize=figsize)
+        coords = self.adata.obsm[basis]
+        visited = coords[traces.ravel()]
+        ax.hist2d(visited[:, 0], visited[:, 1], bins=bins, cmap=cmap)
+        ax.scatter(coords[:, 0], coords[:, 1], c='lightgrey', s=1, alpha=0.2, zorder=0)
+        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_title(f"Random-walk density ({traces.shape[0]} walks × {traces.shape[1]} steps)")
+        return ax
+
+    # =========================================================== streamplot
+    def write_branch_keys(
+        self,
+        lineage_key: str | None = None,
+        pseudotime_key: str | None = None,
+    ) -> tuple:
+        """Write the lineage assignment + lineage-resolved pseudotime
+        keys that :func:`ov.pl.branch_streamplot` expects. Each cell is
+        assigned to its argmax fate-lineage. Returns the
+        ``(lineage_key, pseudotime_key)`` actually written.
+        """
+        if self.result is None or self.result.fate_probabilities is None:
+            raise RuntimeError("Call fit() first")
+        import pandas as pd
+        prefix = self.pseudotime_key.replace("_pseudotime", "")
+        lk = lineage_key or f"{prefix}_lineage"
+        pk = pseudotime_key or self.pseudotime_key
+        F = self.result.fate_probabilities
+        names = [str(self.adata.obs[self.groupby].iloc[c])
+                 if self.groupby else f"L{j}"
+                 for j, c in enumerate(self.result.terminal_cells)]
+        self.adata.obs[lk] = pd.Categorical([names[i] for i in F.argmax(axis=1)])
+        return lk, pk
+
     # ------------------------------------------------------------------ plots
     def plot_eigengap(self, n_macrostates: int | None = None,
                        ax=None, figsize=(5, 3)):
