@@ -733,38 +733,47 @@ def dynamic_features(
     fitted = pd.DataFrame(fitted_records)
     raw = pd.DataFrame(raw_records) if store_raw else None
 
-    # Capture ``adata.uns[f'{key}_colors']`` for each stored raw obs key
-    # so downstream ``ov.pl.dynamic_trends(point_color_by=...)`` can
-    # reuse the scanpy / PseudotimeFate palette instead of falling back
-    # to a generic colormap. Only meaningful for single AnnData input;
-    # for Mapping input we'd need per-dataset uns which most callers
-    # don't have. ``_color_categories`` lists each key's category order
-    # so values map to colours positionally.
+    # Capture ``adata.uns[f'{key}_colors']`` so downstream
+    # ``ov.pl.dynamic_trends`` can reuse the scanpy palette instead of
+    # falling back to a generic colormap. We collect colours for:
+    #   * each stored ``raw_obs_keys`` entry → point colours
+    #   * ``groupby`` (the per-lineage GAM column) → line colours
+    # Only meaningful for single-AnnData input — for Mapping input the
+    # per-dataset uns would need separate handling, which most callers
+    # don't have.
     raw_obs_colors: dict = {}
     raw_obs_category_order: dict = {}
-    if store_raw and isinstance(data, AnnData):
-        all_keys: list = []
-        if isinstance(raw_obs_keys, str):
-            all_keys = [raw_obs_keys]
-        elif isinstance(raw_obs_keys, Mapping):
-            for v in raw_obs_keys.values():
-                if isinstance(v, str):
-                    all_keys.append(v)
-                elif v is not None:
-                    all_keys.extend(list(v))
-        elif raw_obs_keys is not None:
-            all_keys = list(raw_obs_keys)
-        for k in dict.fromkeys(all_keys):
-            ck = f"{k}_colors"
-            if ck in data.uns and k in data.obs.columns:
-                series = data.obs[k]
-                cats = (list(series.cat.categories)
-                        if hasattr(series, "cat")
-                        else list(series.dropna().astype(str).unique()))
-                cols = list(data.uns[ck])
-                if cols:
-                    raw_obs_colors[k] = [str(c) for c in cols[:len(cats)]]
-                    raw_obs_category_order[k] = [str(c) for c in cats]
+
+    def _capture_palette(adata_in, k):
+        ck = f"{k}_colors"
+        if ck in adata_in.uns and k in adata_in.obs.columns:
+            series = adata_in.obs[k]
+            cats = (list(series.cat.categories)
+                    if hasattr(series, "cat")
+                    else list(series.dropna().astype(str).unique()))
+            cols = list(adata_in.uns[ck])
+            if cols:
+                raw_obs_colors[k] = [str(c) for c in cols[:len(cats)]]
+                raw_obs_category_order[k] = [str(c) for c in cats]
+
+    if isinstance(data, AnnData):
+        keys_to_capture: list = []
+        if store_raw:
+            if isinstance(raw_obs_keys, str):
+                keys_to_capture = [raw_obs_keys]
+            elif isinstance(raw_obs_keys, Mapping):
+                for v in raw_obs_keys.values():
+                    if isinstance(v, str):
+                        keys_to_capture.append(v)
+                    elif v is not None:
+                        keys_to_capture.extend(list(v))
+            elif raw_obs_keys is not None:
+                keys_to_capture = list(raw_obs_keys)
+        # Always capture the ``groupby`` palette (used for line colours).
+        if groupby is not None:
+            keys_to_capture.append(groupby)
+        for k in dict.fromkeys(keys_to_capture):
+            _capture_palette(data, k)
     if not include_source_dataset:
         for df in (stats, fitted, raw):
             if df is not None and "source_dataset" in df.columns:

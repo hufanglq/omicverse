@@ -460,7 +460,26 @@ def dynamic_trends(
     else:
         color_labels = group_list
 
-    color_map = _resolve_palette(color_labels, palette=line_palcolor)
+    # Line palette: if the caller didn't pass an explicit
+    # ``line_palcolor`` AND the labels correspond to groups for which
+    # ``dynamic_features`` captured a scanpy palette
+    # (``adata.uns[f'{groupby}_colors']``), use that — keeps the
+    # per-lineage curves consistent with the cluster colour scheme.
+    captured_lines = (result.config or {}).get("raw_obs_colors", {}) if hasattr(result, "config") else {}
+    captured_order_lines = (result.config or {}).get("raw_obs_category_order", {}) if hasattr(result, "config") else {}
+    groupby_used = (result.config or {}).get("groupby") if hasattr(result, "config") else None
+    if (
+        line_palcolor is None
+        and color_labels is group_list
+        and groupby_used is not None
+        and groupby_used in captured_lines
+    ):
+        cols_line = captured_lines[groupby_used]
+        ord_line = captured_order_lines.get(groupby_used, [])
+        by_name = {c: cols_line[i] for i, c in enumerate(ord_line) if i < len(cols_line)}
+        color_map = {lbl: by_name.get(lbl, "#888888") for lbl in color_labels}
+    else:
+        color_map = _resolve_palette(color_labels, palette=line_palcolor)
     if line_style_by == "groups":
         style_map = _resolve_linestyles(group_list, linestyles=line_styles)
     elif line_style_by == "features":
