@@ -1002,6 +1002,201 @@ class PseudotimeFate:
                        fontsize=8, title=color)
         return ax
 
+    # =========================================================== pseudotime velocity
+    def compute_pseudotime_velocity(
+        self,
+        basis: str = "X_umap",
+        velocity_key: str | None = None,
+        method: str = "naive",
+        n_neighbors: int = 31,
+        laplace_weight: float = 10.0,
+        adj_key: str = "distances",
+    ) -> str:
+        """Convert pseudotime into an embedding-space velocity field
+        suitable for :func:`ov.pl.add_streamplot`.
+
+        Port of the ``naive`` / ``gradient`` paths from
+        ``dynamo.tools.pseudotime_velocity.pseudotime_velocity``
+        (`dynamo-release/f7d977a/dynamo/tools/pseudotime_velocity.py
+        <https://github.com/aristoteleo/dynamo-release/blob/f7d977a2831ee4fde65fe80ed05fc07217a593c4/dynamo/tools/pseudotime_velocity.py#L167>`_):
+
+        1. Build a directed transition matrix ``T`` on the kNN graph,
+           with each edge weighted by the *sign of the pseudotime
+           difference* between source and target. ``method='naive'``
+           uses exponentially-decaying kNN distance weights; ``'gradient'``
+           uses the discrete graph gradient + diffusion Laplacian
+           (``T = ∇f + λ · L_diff`` with ``λ = laplace_weight``).
+        2. Project ``T`` onto the low-dim embedding with
+           ``δX[i] = Σ_j T[i,j] · (X[j] - X[i]) / ||X[j] - X[i]||``
+           (density-corrected — same as scVelo / dynamo's
+           ``projection_with_transition_matrix``).
+
+        Parameters
+        ----------
+        basis
+            ``adata.obsm`` key for the 2-D embedding (default ``'X_umap'``).
+        velocity_key
+            Where to store the resulting ``(n_cells, 2)`` velocity in
+            ``adata.obsm``. Default: ``f'velocity_pseudotime_{basis[2:]}'``.
+        method
+            ``'naive'`` (default) — dynamo's exponential-kNN scheme.
+            ``'gradient'`` — discrete gradient + diffusion-Laplacian
+            transition matrix (closer to dynamo's ``hodge`` path
+            without needing the full Hodge decomposition).
+        n_neighbors
+            kNN size for the naive path (matches dynamo's default of 31).
+        laplace_weight
+            ``λ`` in ``T = ∇f + λ · L_diff`` for the gradient path.
+        adj_key
+            ``adata.obsp`` key for the connectivity / distance graph.
+
+        Returns
+        -------
+        str
+            The ``velocity_key`` written to ``adata.obsm`` —
+            pass it to :func:`ov.pl.add_streamplot` directly::
+
+                fate.compute_pseudotime_velocity(basis='X_umap')
+                ov.pl.add_streamplot(adata, basis='X_umap',
+                                      velocity_key='velocity_pseudotime_umap',
+                                      ax=ax)
+        """
+        if basis not in self.adata.obsm:
+            raise KeyError(f"adata.obsm[{basis!r}] not found.")
+        if adj_key not in self.adata.obsp:
+            raise KeyError(f"adata.obsp[{adj_key!r}] not found. "
+                            f"Run `ov.pp.neighbors(adata)` first.")
+        if velocity_key is None:
+            basis_stem = basis[2:] if basis.startswith("X_") else basis
+            velocity_key = f"velocity_pseudotime_{basis_stem}"
+
+        X = np.asarray(self.adata.obsm[basis], dtype=float)
+        pt = self._pt
+        E = self.adata.obsp[adj_key]
+
+        if method == "naive":
+            T = self._naive_pseudotime_T(E, pt, n_neighbors=n_neighbors)
+        elif method == "gradient":
+            T = self._gradient_pseudotime_T(E, pt, laplace_weight=laplace_weight)
+        else:
+            raise ValueError(f"method must be 'naive' or 'gradient', got {method!r}")
+
+        delta_X = self._project_T_to_embedding(T, X, correct_density=True)
+        self.adata.obsm[velocity_key] = delta_X
+        return velocity_key
+
+    @staticmethod
+    def _naive_pseudotime_T(E: sp.csr_matrix, pt: np.ndarray,
+                              n_neighbors: int = 31) -> sp.csr_matrix:
+        """Port of the ``method='naive'`` branch of
+        ``dynamo.tools.pseudotime_velocity.pseudotime_velocity``.
+
+        For each cell i: collect its top-``n_neighbors`` neighbours by
+        distance, weight them by ``exp(d / mean_d)``, then sign-flip
+        each weight by ``sign(pt[j] - pt[i])`` so that downstream cells
+        get positive flux and ancestors negative.
+        """
+        from scipy.sparse import csr_matrix
+        n = E.shape[0]
+        E = E.tocsr()
+        rows, cols, vals = [], [], []
+        for i in range(n):
+            s, e = E.indptr[i], E.indptr[i + 1]
+            nbr_idx = E.indices[s:e]
+            nbr_d = E.data[s:e]
+            if nbr_idx.size == 0:
+                continue
+            # Top-k (dynamo uses 31 including self at position 0; we
+            # don't have a guaranteed self-edge so we sort and take
+            # the first ``n_neighbors``).
+            order = np.argsort(nbr_d)[:n_neighbors]
+            nbr_idx = nbr_idx[order]
+            nbr_d = nbr_d[order]
+            if nbr_d.size <= 1:
+                continue
+            tail_d = nbr_d[1:] if nbr_idx[0] == i else nbr_d
+            tail_idx = nbr_idx[1:] if nbr_idx[0] == i else nbr_idx
+            mean_d = float(np.mean(tail_d)) if tail_d.size else 1.0
+            if mean_d <= 0:
+                continue
+            w = tail_d / mean_d
+            w_exp = np.exp(w)
+            sum_w = float(w_exp.sum())
+            if sum_w <= 0:
+                continue
+            w_scaled = w_exp / sum_w
+            pt_diff = pt[tail_idx] - pt[i]
+            w_scaled *= np.sign(pt_diff)
+            rows.append(np.full(tail_idx.size, i, dtype=np.int64))
+            cols.append(tail_idx.astype(np.int64))
+            vals.append(w_scaled.astype(np.float64))
+        if not rows:
+            return csr_matrix((n, n), dtype=np.float64)
+        return csr_matrix(
+            (np.concatenate(vals),
+             (np.concatenate(rows), np.concatenate(cols))),
+            shape=(n, n),
+        )
+
+    @staticmethod
+    def _gradient_pseudotime_T(E: sp.csr_matrix, pt: np.ndarray,
+                                 laplace_weight: float = 10.0) -> sp.csr_matrix:
+        """Port of the ``method='gradient'`` branch — ``pseudotime_
+        transition(E, pt, laplace_weight)`` from dynamo. ``T = ∇f +
+        λ · L_diff`` where ``∇f[i, j] = f[j] - f[i]`` over kNN edges
+        and ``L_diff`` is the diffusion Laplacian (-graph Laplacian).
+        """
+        from scipy.sparse import csr_matrix, coo_matrix, diags
+        E = E.tocoo()
+        # Graph gradient
+        mask = E.row != E.col
+        g_row = E.row[mask]
+        g_col = E.col[mask]
+        g_val = pt[g_col] - pt[g_row]
+        keep = g_val != 0
+        grad = csr_matrix(
+            (g_val[keep], (g_row[keep], g_col[keep])),
+            shape=E.shape,
+        )
+        # Diffusion Laplacian (-L)
+        A = E.copy()
+        A.data = np.ones_like(A.data, dtype=np.float64)
+        A = A.tocsr()
+        L_diff = (A - diags(np.asarray(A.sum(0)).ravel(), 0)).tocsr()
+        return grad + laplace_weight * L_diff
+
+    @staticmethod
+    def _project_T_to_embedding(T: sp.csr_matrix, X: np.ndarray,
+                                  correct_density: bool = True) -> np.ndarray:
+        """Port of ``dynamo.tools.utils.projection_with_transition_matrix``.
+
+        ``δX[i] = Σ_j T[i,j] · (X[j] - X[i]) / ||X[j] - X[i]||``
+        (the distance normalisation matches dynamo's default
+        ``norm_dist=True``). If ``correct_density``, subtract the mean
+        of the transition row times the *sum* of normalised diffs —
+        cancels the bias from over-represented neighbourhoods.
+        """
+        n = T.shape[0]
+        delta = np.zeros((n, X.shape[1]), dtype=np.float64)
+        Tcsr = T.tocsr()
+        for i in range(n):
+            s, e = Tcsr.indptr[i], Tcsr.indptr[i + 1]
+            idx = Tcsr.indices[s:e]
+            if idx.size == 0:
+                continue
+            row_T = Tcsr.data[s:e]
+            diff = X[idx] - X[i]
+            d_norm = np.linalg.norm(diff, axis=1)
+            valid = d_norm > 0
+            if not valid.any():
+                continue
+            diff_n = np.zeros_like(diff)
+            diff_n[valid] = diff[valid] / d_norm[valid, None]
+            delta[i] = row_T @ diff_n
+            if correct_density:
+                delta[i] -= row_T.mean() * diff_n.sum(0)
+        return delta
+
     # =========================================================== differentiation traces
     def trace_differentiation(
         self,
