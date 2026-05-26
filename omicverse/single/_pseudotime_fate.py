@@ -254,43 +254,65 @@ def _coarse_grain(P: sp.csr_matrix, Z: np.ndarray) -> np.ndarray:
 
 # -------------------------------------------------------------------- step 4
 def _solve_fate_probabilities(
-    P: sp.csr_matrix, terminal_cells: np.ndarray, *,
+    P: sp.csr_matrix,
+    terminal_groups: list[np.ndarray],
+    *,
     tol: float = 1e-6, max_iter: int = 5000,
 ) -> np.ndarray:
-    """Compute absorption probabilities into each terminal-cell set via
-    Neumann-series power iteration — the right tool for the absorbing-
-    Markov-chain structure here.
+    """Compute absorption probabilities into each terminal **group** of
+    cells via Neumann-series power iteration.
 
-    Recall that fate probabilities satisfy ``(I − Q) X = R`` where
-    ``Q`` is the row-stochastic transition matrix among transient cells
-    and ``R`` are transition probabilities from transient cells to
-    absorbing (terminal) cells. The closed-form ``X = (I − Q)^{-1} R``
-    is the Neumann series ``X = (Σ_k Q^k) R`` which converges
-    geometrically because ρ(Q) < 1 once the terminals are absorbing.
+    Each terminal group is a *set* of cells (the macrostate assigned to
+    that lineage), not a single representative. Aggregating absorption
+    over all cells in the macrostate is what CellRank's GPCCA and the
+    original Palantir do, and it is what gives a smooth fate-
+    probability landscape rather than a delta function at one cell.
 
-    Implementation:
-        X ← 0
-        Δ ← R
-        for it in range(max_iter):
-            X ← X + Δ
-            Δ ← Q · Δ
-            if ||Δ||_max < tol: break
+    Solves ``(I − Q) X = R`` where ``Q`` = transitions among non-
+    terminal cells, and ``R`` is **column-aggregated** so that each
+    column is the sum of transitions from transient cells into every
+    member of that terminal group.
 
-    Each step is a single sparse mat-vec — O(nnz · n_terminals). At
-    n=30k, k_neighbors=15, K_terminal=4 this is ~few hundred ms total,
-    vs. tens-of-seconds for sparse direct factorisation.
+    Returns: ``(n, K_groups)`` matrix. Rows sum to ≤ 1 (= 1 for cells
+    inside any terminal group, ≤ 1 for transient cells that may bleed
+    into unfilled mass when groups don't span the full Markov chain).
     """
     n = P.shape[0]
+    if len(terminal_groups) == 0:
+        return np.zeros((n, 0))
+
+    # Union of all terminal cells across groups (a cell may *not* sit
+    # in two groups; we enforce this by deduping greedily by group order).
+    in_any: set = set()
+    cleaned_groups = []
+    for g in terminal_groups:
+        g_arr = np.asarray(g, dtype=np.int64)
+        g_arr = np.array([c for c in g_arr if c not in in_any], dtype=np.int64)
+        in_any.update(g_arr.tolist())
+        cleaned_groups.append(g_arr)
+    terminal_groups = cleaned_groups
+
     absorb = np.zeros(n, dtype=bool)
-    absorb[terminal_cells] = True
+    for g in terminal_groups:
+        absorb[g] = True
     trans_idx = np.where(~absorb)[0]
-    term_idx = np.where(absorb)[0]
+    if trans_idx.size == 0:
+        out = np.zeros((n, len(terminal_groups)))
+        for j, g in enumerate(terminal_groups):
+            out[g, j] = 1.0
+        return out
 
     Pcsr = P.tocsr()
     Q = Pcsr[trans_idx][:, trans_idx]
-    R = Pcsr[trans_idx][:, term_idx].toarray()
 
-    # Neumann-series power iteration.
+    # Aggregated R: column j = sum of transitions from each transient cell
+    # into every member of terminal group j.
+    R_full = Pcsr[trans_idx]                             # (n_trans, n)
+    R = np.empty((R_full.shape[0], len(terminal_groups)))
+    for j, g in enumerate(terminal_groups):
+        R[:, j] = np.asarray(R_full[:, g].sum(axis=1)).ravel()
+
+    # Neumann series.
     X = np.zeros_like(R)
     delta = R.copy()
     for _ in range(max_iter):
@@ -299,9 +321,10 @@ def _solve_fate_probabilities(
         if np.max(np.abs(delta)) < tol:
             break
 
-    out = np.zeros((n, len(term_idx)), dtype=np.float64)
+    out = np.zeros((n, len(terminal_groups)), dtype=np.float64)
     out[trans_idx] = X
-    out[term_idx, np.arange(len(term_idx))] = 1.0
+    for j, g in enumerate(terminal_groups):
+        out[g, j] = 1.0
     out = np.clip(out, 0.0, None)
     rs = out.sum(axis=1, keepdims=True)
     out = np.divide(out, rs, where=rs > 0)
@@ -460,11 +483,22 @@ class PseudotimeFate:
         terminal_ms = candidate
         self._forward_flow = forward_flow
 
-        terminal_cells = self._pick_terminal_cells(ms, terminal_ms)
+        terminal_cells, kept_terminal_ms = self._pick_terminal_cells(ms, terminal_ms)
+        # Per-lineage absorbing SETS — restricted to the *dominant cluster*
+        # of each macrostate when a ``groupby`` is provided. Including
+        # off-cluster "contaminants" (e.g. 4 Alpha cells that wandered
+        # into an Epsilon-dominated macrostate) leaks fate mass across
+        # lineages because those off-cluster cells are kNN hubs to their
+        # actual cluster; restricting the absorbing set to the dominant
+        # cluster removes that bridge. Without ``groupby`` we fall back
+        # to the full macrostate.
+        terminal_groups = self._build_terminal_groups(ms, kept_terminal_ms,
+                                                       terminal_cells)
+        terminal_ms = kept_terminal_ms
 
         fates = entropy = None
         if compute_fates and len(terminal_cells) > 0:
-            fates = _solve_fate_probabilities(P, terminal_cells)
+            fates = _solve_fate_probabilities(P, terminal_groups)
             with np.errstate(divide='ignore', invalid='ignore'):
                 logp = np.where(fates > 0, np.log(fates), 0.0)
                 entropy = -np.sum(fates * logp, axis=1)
@@ -497,36 +531,35 @@ class PseudotimeFate:
         raise ValueError(f"unknown scheme {self.scheme!r}")
 
     def _pick_terminal_cells(self, ms: np.ndarray,
-                              terminal_ms: np.ndarray) -> np.ndarray:
-        """For each terminal macrostate, pick a single representative
-        cell.
+                              terminal_ms: np.ndarray
+                              ) -> tuple[np.ndarray, np.ndarray]:
+        """For each terminal macrostate, pick (rep_cell, kept_ms_id).
 
-        With a ``groupby`` annotation we identify the *characteristic*
-        cluster of the macrostate by **purity** — for each cluster
-        present in the macrostate, compute the fraction of that
-        cluster's total population that landed inside this macrostate.
-        The cluster with the highest such purity wins: small but pure
-        populations (think pancreatic Epsilon, ~50 cells, all in one
-        macrostate) outrank large but split populations (e.g. Pre-
-        endocrine cells that bleed across multiple macrostates).
-
-        Without a groupby annotation we fall back to the max-pseudotime
-        cell within the macrostate.
+        Returns
+        -------
+        rep_cells : (K_kept,) int — one representative cell per kept macrostate.
+        kept_ms_ids : (K_kept,) int — the subset of ``terminal_ms`` that
+            survived cluster-purity deduplication. The two arrays are
+            index-aligned, so downstream code can call
+            ``[np.where(ms == k)[0] for k in kept_ms_ids]`` and trust
+            that the j-th column of the fate matrix corresponds to the
+            j-th entry of ``rep_cells``.
         """
         groupby = getattr(self, 'groupby', None)
         if not groupby or groupby not in self.adata.obs.columns:
-            reps = []
+            reps, kept = [], []
             for k in terminal_ms:
                 in_ms = np.where(ms == k)[0]
                 if in_ms.size:
                     reps.append(int(in_ms[np.argmax(self._pt[in_ms])]))
-            return np.asarray(reps, dtype=np.int64)
+                    kept.append(int(k))
+            return np.asarray(reps, dtype=np.int64), np.asarray(kept, dtype=np.int64)
 
         clusters = self.adata.obs[groupby].astype(str).values
         from collections import Counter
         total_per_cluster = Counter(clusters)
 
-        reps = []
+        reps, kept = [], []
         seen_clusters: set = set()
         for k in terminal_ms:
             in_ms = np.where(ms == k)[0]
@@ -534,7 +567,6 @@ class PseudotimeFate:
                 continue
             ms_clusters = clusters[in_ms]
             in_ms_counts = Counter(ms_clusters)
-            # Purity = how concentrated each cluster is inside this ms
             purity_ranked = sorted(
                 in_ms_counts.items(),
                 key=lambda kv: kv[1] / max(1, total_per_cluster[kv[0]]),
@@ -548,12 +580,131 @@ class PseudotimeFate:
             if chosen_cluster is None:
                 continue
             seen_clusters.add(chosen_cluster)
-            # Rep cell = max-pseudotime cell IN that cluster IN this macrostate
             in_cluster_in_ms = in_ms[ms_clusters == chosen_cluster]
             rep = int(in_cluster_in_ms[np.argmax(self._pt[in_cluster_in_ms])])
             reps.append(rep)
-        return np.asarray(reps, dtype=np.int64)
+            kept.append(int(k))
+        return (np.asarray(reps, dtype=np.int64),
+                np.asarray(kept, dtype=np.int64))
 
+    def _build_terminal_groups(self, ms: np.ndarray,
+                                kept_terminal_ms: np.ndarray,
+                                terminal_cells: np.ndarray) -> list:
+        """Per-lineage absorbing-set indices, restricted to the
+        dominant cluster of each macrostate (the cluster of the rep cell).
+        """
+        groupby = getattr(self, 'groupby', None)
+        if not groupby or groupby not in self.adata.obs.columns:
+            return [np.where(ms == k)[0] for k in kept_terminal_ms]
+
+        clusters = self.adata.obs[groupby].astype(str).values
+        groups = []
+        for k, rep in zip(kept_terminal_ms, terminal_cells):
+            in_ms = np.where(ms == k)[0]
+            rep_cluster = clusters[int(rep)]
+            keep = in_ms[clusters[in_ms] == rep_cluster]
+            # If filtering wipes the set (shouldn't happen because rep
+            # is in the set by construction), fall back to full macrostate.
+            groups.append(keep if keep.size else in_ms)
+        return groups
+
+    # ------------------------------------------------------------------ plots
+    def plot_eigengap(self, n_macrostates: int | None = None,
+                       ax=None, figsize=(5, 3)):
+        """Plot the leading eigenvalues of the transition matrix and the
+        consecutive gap between them. Inspired by :func:`mira.plots.
+        plot_eigengap`. Large gaps indicate natural cut-points for
+        ``n_macrostates`` — pick K just above a gap.
+
+        Must be called after :meth:`fit`. If ``n_macrostates`` is given,
+        the corresponding bar is highlighted.
+        """
+        if self.result is None:
+            raise RuntimeError("Call fit() first")
+        import matplotlib.pyplot as plt
+        K = n_macrostates or self.n_macrostates
+        P = self.result.transition_matrix
+        vals, _ = spla.eigs(P.T.astype(np.float64),
+                            k=min(K + 5, P.shape[0] - 2),
+                            which="LM", maxiter=1000, tol=1e-6)
+        vals = np.sort(np.abs(vals))[::-1]
+        gaps = -np.diff(vals)
+        if ax is None:
+            _, ax = plt.subplots(figsize=figsize)
+        x = np.arange(1, len(gaps) + 1)
+        bars = ax.bar(x, gaps, color="#888888")
+        if K - 1 < len(gaps):
+            bars[K - 1].set_color("#d62728")
+            ax.axvline(K, color="#d62728", ls="--", lw=0.8,
+                       label=f"K = {K}")
+            ax.legend(loc="upper right", fontsize=8)
+        ax.set_xlabel("between eigenvalues k and k+1")
+        ax.set_ylabel("|λ_k| − |λ_{k+1}|")
+        ax.set_title("Macrostate eigengap")
+        return ax
+
+    def plot_fate(self, basis: str = "X_umap", cmap: str = "magma",
+                   ncols: int = 3, figsize: tuple | None = None,
+                   show_terminals: bool = True):
+        """One UMAP panel per inferred lineage, coloured by fate
+        probability. The terminal cell of each lineage is overlaid as a
+        yellow star (``show_terminals=True``). Equivalent to MIRA's
+        per-branch UMAP overlay (``sc.pl.umap(color='lineage_prob')``)
+        but plots all lineages in a single grid.
+        """
+        if self.result is None or self.result.fate_probabilities is None:
+            raise RuntimeError("Call fit() first (with compute_fates=True)")
+        import matplotlib.pyplot as plt
+        F = self.result.fate_probabilities
+        n_lin = F.shape[1]
+        nrows = (n_lin + ncols - 1) // ncols
+        figsize = figsize or (3.5 * ncols, 3.2 * nrows)
+        fig, axes = plt.subplots(nrows, ncols, figsize=figsize,
+                                  squeeze=False)
+        names = [str(self.adata.obs[self.groupby].iloc[c])
+                 if self.groupby else f"L{j}"
+                 for j, c in enumerate(self.result.terminal_cells)]
+        prefix = self.pseudotime_key.replace("_pseudotime", "")
+        coords = self.adata.obsm[basis]
+        for j in range(n_lin):
+            ax = axes.flat[j]
+            sc_obj = ax.scatter(coords[:, 0], coords[:, 1], c=F[:, j],
+                                 cmap=cmap, s=2, vmin=0, vmax=1)
+            if show_terminals:
+                c = self.result.terminal_cells[j]
+                ax.scatter(coords[c, 0], coords[c, 1], s=200, marker="*",
+                            edgecolor="black", facecolor="yellow",
+                            linewidth=1.2, zorder=10)
+            ax.set_title(f"{prefix} → {names[j]}")
+            ax.set_xticks([]); ax.set_yticks([])
+            fig.colorbar(sc_obj, ax=ax, shrink=0.7)
+        for k in range(n_lin, nrows * ncols):
+            axes.flat[k].axis("off")
+        fig.tight_layout()
+        return fig
+
+    def plot_macrostates(self, basis: str = "X_umap", ax=None):
+        """Colour cells by their hard macrostate assignment on a UMAP.
+        Highlights the inferred terminal macrostates with a star.
+        """
+        if self.result is None:
+            raise RuntimeError("Call fit() first")
+        import matplotlib.pyplot as plt
+        if ax is None:
+            _, ax = plt.subplots(figsize=(5, 4))
+        coords = self.adata.obsm[basis]
+        ms = self.result.macrostate_assignment
+        cmap = plt.get_cmap("tab20", ms.max() + 1)
+        ax.scatter(coords[:, 0], coords[:, 1], c=cmap(ms), s=2)
+        for c in self.result.terminal_cells:
+            ax.scatter(coords[c, 0], coords[c, 1], s=200, marker="*",
+                        edgecolor="black", facecolor="yellow",
+                        linewidth=1.2, zorder=10)
+        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_title("Macrostates (★ = terminal)")
+        return ax
+
+    # ------------------------------------------------------------------ adata
     def _write_adata(self, res: PseudotimeFateResult) -> None:
         prefix = self.pseudotime_key.replace('_pseudotime', '')
         self.adata.obs[f'{prefix}_macrostate'] = pd.Categorical(
