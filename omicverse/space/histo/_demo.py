@@ -1,15 +1,18 @@
-r"""Convenience loader for the 10x Visium Breast Cancer Block A Section 1.
+r"""Convenience loaders for 10x Visium demo datasets used by HE-zoo.
 
-This is the canonical demo dataset used across the HE-zoo tutorials so
-every backend predicts on the **same H&E**. The full-resolution image
-weighs ~1.7 GB; the loader caches everything under
-``OV_HISTO_CACHE/he_zoo/visium_breast`` (default
-``~/.cache/omicverse/histo/he_zoo/visium_breast``) and only re-downloads
-missing assets.
+Two adjacent sections from the same patient/block are pre-wired:
 
-Tutorials that need just predictions and no training reference can drop
-the full-resolution image and use the Space Ranger ``tissue_hires_image``
-that ships inside ``spatial.tar.gz``.
+* **Section 1** (``load_breast(section=1)``, the default) — used as the
+  reference / training slide across all HE-zoo tutorials.
+* **Section 2** (``load_breast(section=2)``) — the *held-out* slide for
+  cross-slide evaluation. Same patient, adjacent physical section, so
+  it shares anatomy and staining batch but is a genuinely new H&E from
+  the model's point of view.
+
+Both ship the full-resolution H&E (~1.7 GB each), Space Ranger
+``spatial/`` outputs, and the filtered count matrix. Everything caches
+under ``$OV_HISTO_CACHE/he_zoo/{visium_breast,visium_breast_s2}`` and
+only re-downloads missing assets.
 """
 from __future__ import annotations
 
@@ -22,20 +25,29 @@ if TYPE_CHECKING:
     from wsidata import WSIData
 
 
-_BASE = (
+_BASE_TMPL = (
     "https://cf.10xgenomics.com/samples/spatial-exp/1.1.0/"
-    "V1_Breast_Cancer_Block_A_Section_1/"
+    "V1_Breast_Cancer_Block_A_Section_{section}/"
 )
-_FILES = {
-    "counts": "V1_Breast_Cancer_Block_A_Section_1_filtered_feature_bc_matrix.h5",
-    "spatial": "V1_Breast_Cancer_Block_A_Section_1_spatial.tar.gz",
-    "image": "V1_Breast_Cancer_Block_A_Section_1_image.tif",
+_FILE_TMPL = {
+    "counts": "V1_Breast_Cancer_Block_A_Section_{section}_filtered_feature_bc_matrix.h5",
+    "spatial": "V1_Breast_Cancer_Block_A_Section_{section}_spatial.tar.gz",
+    "image": "V1_Breast_Cancer_Block_A_Section_{section}_image.tif",
 }
+_DIR_TMPL = {1: "visium_breast", 2: "visium_breast_s2"}
 
 
-def _default_dir() -> Path:
+def _files_for(section: int) -> dict[str, str]:
+    return {k: v.format(section=section) for k, v in _FILE_TMPL.items()}
+
+
+def _base_for(section: int) -> str:
+    return _BASE_TMPL.format(section=section)
+
+
+def _default_dir(section: int = 1) -> Path:
     base = os.environ.get("OV_HISTO_CACHE", Path.home() / ".cache" / "omicverse" / "histo")
-    return Path(base) / "he_zoo" / "visium_breast"
+    return Path(base) / "he_zoo" / _DIR_TMPL[section]
 
 
 def _download(target: Path, url: str) -> None:
@@ -49,42 +61,60 @@ def _download(target: Path, url: str) -> None:
 def download_breast(
     cache_dir: str | Path | None = None,
     *,
+    section: int = 1,
     include_image: bool = True,
 ) -> Path:
-    """Download the Visium Breast Cancer demo dataset.
+    """Download a Visium Breast Cancer Block A section.
 
-    Returns the dataset directory. Skips files that already exist.
+    Parameters
+    ----------
+    section
+        ``1`` (default) or ``2``. Section 1 is the demo / training
+        slide used across HE-zoo; Section 2 is the held-out slide.
     """
-    dst = Path(cache_dir) if cache_dir is not None else _default_dir()
+    if section not in (1, 2):
+        raise ValueError(f"section must be 1 or 2, got {section!r}")
+    dst = Path(cache_dir) if cache_dir is not None else _default_dir(section)
     dst.mkdir(parents=True, exist_ok=True)
-    _download(dst / _FILES["counts"], _BASE + _FILES["counts"])
-    _download(dst / _FILES["spatial"], _BASE + _FILES["spatial"])
+    files = _files_for(section)
+    base = _base_for(section)
+    _download(dst / files["counts"], base + files["counts"])
+    _download(dst / files["spatial"], base + files["spatial"])
     if not (dst / "spatial").is_dir():
         import tarfile
-        with tarfile.open(dst / _FILES["spatial"]) as tar:
+        with tarfile.open(dst / files["spatial"]) as tar:
             tar.extractall(dst)
     if include_image:
-        _download(dst / _FILES["image"], _BASE + _FILES["image"])
+        _download(dst / files["image"], base + files["image"])
     return dst
 
 
 def load_breast(
     cache_dir: str | Path | None = None,
     *,
+    section: int = 1,
     include_image: bool = True,
 ) -> "tuple[AnnData, WSIData | None]":
-    """Download the demo sample and return ``(adata, wsi)``.
+    """Download a Visium Breast Cancer Block A section and return ``(adata, wsi)``.
+
+    Parameters
+    ----------
+    section
+        ``1`` (default) or ``2``. Use Section 2 as the held-out slide
+        for cross-slide evaluation across HE-zoo tutorials.
 
     Examples
     --------
     >>> import omicverse as ov
-    >>> adata, wsi = ov.space.histo.load_breast()
-    >>> ov.space.histo.tile(wsi, tile_px=224, mpp=0.5)
+    >>> adata, wsi = ov.space.histo.load_breast()              # section 1
+    >>> adata2, wsi2 = ov.space.histo.load_breast(section=2)   # held-out
     """
     from ._io import read_visium_with_image
-    base = download_breast(cache_dir=cache_dir, include_image=include_image)
+    base = download_breast(cache_dir=cache_dir, section=section,
+                           include_image=include_image)
+    files = _files_for(section)
     return read_visium_with_image(
         base,
-        image_path=(base / _FILES["image"]) if include_image else None,
-        count_file=_FILES["counts"],
+        image_path=(base / files["image"]) if include_image else None,
+        count_file=files["counts"],
     )

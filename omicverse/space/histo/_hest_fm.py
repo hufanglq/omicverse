@@ -24,6 +24,38 @@ if TYPE_CHECKING:
     from wsidata import WSIData
 
 
+def spot_features(
+    reference: "AnnData",
+    wsi: "WSIData",
+    *,
+    fm_backbone: str = "ctranspath",
+    fm_weight_path: str | None = None,
+    hf_token: str | None = None,
+    device: str | None = None,
+    tile_key: str = "tiles",
+) -> "AnnData":
+    """Embed every Visium spot's H&E patch with a pathology FM.
+
+    Returns an :class:`anndata.AnnData` whose rows are Visium spots
+    (same order as ``reference.obs``) and columns are the pathology
+    FM's feature dimensions. Mostly a thin public re-export of the
+    internal helper used by HEST-FM / STFlow so notebooks can build
+    custom held-out evaluations, k-fold CV, etc., without touching
+    private internals.
+
+    The result is cached on disk under
+    ``$OV_HISTO_CACHE/ref_features/{backbone}_{slide}_n{n_spots}.h5ad``
+    so subsequent calls (same slide + spot count + backbone) return
+    instantly.
+    """
+    return _spot_features_from_reference(
+        reference, wsi,
+        fm_backbone=fm_backbone, tile_key=tile_key,
+        device=device, feature_key=None,
+        fm_weight_path=fm_weight_path, token=hf_token,
+    )
+
+
 def _ensure_features(
     wsi: "WSIData",
     *,
