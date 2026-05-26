@@ -837,95 +837,253 @@ class PseudotimeFate:
     def trace_differentiation(
         self,
         start_cells: list | int | None = None,
-        n_walks: int = 200,
-        n_steps: int = 1500,
-        seed: int = 0,
+        n_steps: int = 2000,
+        direction: Literal["forward", "backward"] = "forward",
+        log_prob: bool = False,
+        sqrt_time: bool = False,
     ) -> "np.ndarray":
-        """Simulate forward random walks through the biased Markov chain.
+        """Deterministic forward probability diffusion through the
+        biased Markov chain — the **exact** equivalent of MIRA's
+        ``mira.time.trace_differentiation`` (Lopez Garcia, mira/
+        pseudotime/backtrace.py ``_trace``).
 
-        Equivalent to ``mira.time.trace_differentiation`` — useful as a
-        teaching aid (visualise how cells "flow" from the origin to the
-        terminals) and as a sanity check on the transition matrix.
+        Starts from an initial probability distribution concentrated on
+        ``start_cells`` and iteratively applies ``P^T``::
 
-        Returns a ``(n_walks, n_steps)`` array of cell indices visited
-        by each walk. ``start_cells`` defaults to the cell with the
-        smallest pseudotime (or a list of candidate roots).
+            p_{t+1} = P^T · p_t
+
+        so ``p_t[i]`` is the probability that a walker starting from the
+        initial distribution is at cell ``i`` after ``t`` Markov steps.
+        Unlike a Monte-Carlo random walk this is **deterministic and
+        smooth** — the same input always gives the same trace, and
+        every cell carries a non-negative mass at every frame.
+
+        Returns
+        -------
+        states : (n_steps, n_cells) ndarray
+            Probability distribution over cells at each time step. Use
+            :meth:`plot_trace_density` or :meth:`plot_trace_animation`
+            to render. ``sqrt_time=True`` returns frames spaced
+            quadratically in time — useful for processes that evolve
+            fastest near the start.
         """
         if self.result is None:
             raise RuntimeError("Call fit() first")
-        rng = np.random.default_rng(seed)
         P = self.result.transition_matrix.tocsr()
         n = P.shape[0]
         pt = self._pt
         if start_cells is None:
-            start_cells = [int(np.argmin(pt))]
+            start_cells = [int(np.argmin(pt) if direction == "forward"
+                                else np.argmax(pt))]
         elif isinstance(start_cells, int):
             start_cells = [start_cells]
         starts = np.asarray(start_cells, dtype=np.int64)
+        if direction not in ("forward", "backward"):
+            raise ValueError(f"direction must be 'forward' or 'backward', got {direction!r}")
 
-        # Sample n_walks initial cells with replacement from `starts`.
-        traces = np.empty((n_walks, n_steps), dtype=np.int64)
-        cur = rng.choice(starts, size=n_walks, replace=True)
-        traces[:, 0] = cur
+        # Initial probability distribution.
+        p = np.zeros(n, dtype=np.float64)
+        p[starts] = 1.0
+        if p.sum() <= 0:
+            raise ValueError("start_cells set is empty")
+        p = p / p.sum()
 
-        # Build a *dense* per-row CDF tensor (n × max_k), padded with
-        # 1.0 in the unused tail slots so ``argmax(cdf > u)`` always
-        # picks the last valid neighbour for short rows. This turns the
-        # whole walk into a sequence of numpy gather + argmax + gather
-        # operations — no Python-level per-walk loop.
-        indptr = P.indptr.astype(np.int64)
-        nnz_per_row = np.diff(indptr)
-        max_k = int(nnz_per_row.max()) if n > 0 else 0
-        cdf_dense = np.ones((n, max_k), dtype=np.float64)
-        col_dense = np.zeros((n, max_k), dtype=np.int64)
-        # Self-loop fallback so stuck rows stay where they are.
-        col_dense[:] = np.arange(n)[:, None]
-        rsum = np.asarray(P.sum(axis=1)).ravel()
-        data = P.data.astype(np.float64)
-        indices = P.indices
-        for i in range(n):
-            s, e = indptr[i], indptr[i + 1]
-            if e > s and rsum[i] > 0:
-                cdf_dense[i, :e - s] = np.cumsum(data[s:e] / rsum[i])
-                col_dense[i, :e - s] = indices[s:e]
-                # pad the unused tail with the final CDF value (1.0)
-                cdf_dense[i, e - s:] = 1.0
+        # Backward = same algorithm but with the time-reversed map (P
+        # rather than P^T). Implemented exactly as MIRA does.
+        operator = P.T.tocsr() if direction == "forward" else P.tocsr()
 
-        for t in range(1, n_steps):
-            u = rng.random(n_walks)
-            # cdf_dense[cur] is (n_walks, max_k); argmax of the first
-            # True picks the column slot to use.
-            slot = (cdf_dense[cur] > u[:, None]).argmax(axis=1)
-            cur = col_dense[cur, slot]
-            traces[:, t] = cur
-        return traces
+        # Allocate full trace tensor and propagate.
+        if sqrt_time:
+            frames = np.unique(np.square(
+                np.linspace(0, np.sqrt(n_steps - 1), n_steps)
+            ).astype(int))
+            states = np.empty((len(frames), n), dtype=np.float64)
+            cur = p
+            states[0] = cur
+            keep_idx = 1
+            for t in range(1, frames.max() + 1):
+                cur = operator @ cur
+                if t in frames:
+                    states[keep_idx] = cur
+                    keep_idx += 1
+            states = states[:keep_idx]
+        else:
+            states = np.empty((n_steps, n), dtype=np.float64)
+            states[0] = p
+            for t in range(1, n_steps):
+                states[t] = operator @ states[t - 1]
+
+        if log_prob:
+            states = np.log(states + 1e-12)
+        return states
 
     def plot_trace_density(
         self,
-        traces: "np.ndarray | None" = None,
+        states: "np.ndarray | None" = None,
         basis: str = "X_umap",
         ax=None,
         figsize=(5, 4),
-        bins: int = 80,
         cmap: str = "BuPu",
-        n_walks: int = 200,
-        n_steps: int = 1500,
+        n_steps: int = 2000,
+        frame: int | None = None,
+        vmax_quantile: float = 0.99,
+        time_average: bool = True,
     ):
-        """Heatmap of cells visited by simulated random walks on UMAP —
-        the MIRA ``show_gif(trace_differentiation())`` static analogue.
+        """Per-cell probability mass from
+        :meth:`trace_differentiation`, plotted on the embedding. Either
+        a single frame (``frame=...``) or the time-averaged mass across
+        all frames (``time_average=True``, default).
+
+        Equivalent to a single frame of MIRA's ``show_gif`` rendering.
         """
-        if traces is None:
-            traces = self.trace_differentiation(
-                n_walks=n_walks, n_steps=n_steps)
         import matplotlib.pyplot as plt
+        if states is None:
+            states = self.trace_differentiation(n_steps=n_steps)
+        if frame is not None:
+            density = states[frame]
+        elif time_average:
+            density = states.mean(axis=0)
+        else:
+            density = states[-1]
         if ax is None:
             _, ax = plt.subplots(figsize=figsize)
         coords = self.adata.obsm[basis]
-        visited = coords[traces.ravel()]
-        ax.hist2d(visited[:, 0], visited[:, 1], bins=bins, cmap=cmap)
-        ax.scatter(coords[:, 0], coords[:, 1], c='lightgrey', s=1, alpha=0.2, zorder=0)
+        order = density.argsort()
+        vmax = float(np.quantile(density, vmax_quantile))
+        sc = ax.scatter(coords[order, 0], coords[order, 1],
+                         c=density[order], s=4, cmap=cmap,
+                         vmin=0.0, vmax=max(vmax, 1e-12))
         ax.set_xticks([]); ax.set_yticks([])
-        ax.set_title(f"Random-walk density ({traces.shape[0]} walks × {traces.shape[1]} steps)")
+        ax.set_title(
+            "Diffusion trace — time-averaged density"
+            if frame is None and time_average else f"Diffusion trace — frame {frame}"
+        )
+        try:
+            ax.get_figure().colorbar(sc, ax=ax, shrink=0.6)
+        except Exception:
+            pass
+        return ax
+
+    def plot_trace_animation(
+        self,
+        states: "np.ndarray | None" = None,
+        basis: str = "X_umap",
+        figsize=(7, 5),
+        cmap: str = "BuPu",
+        fps: int = 24,
+        num_frames: int = 80,
+        save_path: str | None = None,
+        n_steps: int = 2000,
+        vmax_quantile: float = 0.99,
+    ):
+        """Build a MIRA-style ``trace_differentiation`` GIF animation.
+
+        Returns the :class:`matplotlib.animation.FuncAnimation` so the
+        caller can display it inline (`HTML(anim.to_jshtml())`) or save
+        it with ``save_path=...``.
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib.animation import FuncAnimation, PillowWriter
+        if states is None:
+            states = self.trace_differentiation(n_steps=n_steps)
+        frame_idx = np.linspace(0, len(states) - 1, num_frames).astype(int)
+        coords = self.adata.obsm[basis]
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.scatter(coords[:, 0], coords[:, 1], c="lightgrey", s=2, zorder=0)
+        density0 = states[frame_idx[0]]
+        order = density0.argsort()
+        vmax0 = float(np.quantile(density0, vmax_quantile))
+        scat = ax.scatter(coords[order, 0], coords[order, 1],
+                           c=density0[order], cmap=cmap, s=4,
+                           vmin=0.0, vmax=max(vmax0, 1e-12), zorder=1)
+        ax.set_xticks([]); ax.set_yticks([])
+
+        def update(i):
+            d = states[frame_idx[i]]
+            order_i = d.argsort()
+            scat.set_offsets(coords[order_i])
+            scat.set_array(d[order_i])
+            vmax_i = float(np.quantile(d, vmax_quantile))
+            scat.set_clim(0, max(vmax_i, 1e-12))
+            ax.set_title(f"Diffusion trace — frame {frame_idx[i]}")
+            return (scat,)
+
+        anim = FuncAnimation(fig, update, frames=num_frames,
+                              interval=1000 / fps, blit=False)
+        if save_path:
+            anim.save(save_path, writer=PillowWriter(fps=fps))
+        return anim
+
+    # ============================================================ streamplot
+    def plot_stream(
+        self,
+        feature: str | None = None,
+        n_bins: int = 80,
+        max_bar_height: float = 0.6,
+        smooth_window: int = 7,
+        palette: list | None = None,
+        figsize=(9, 5),
+        ax=None,
+        log_pseudotime: bool = False,
+    ):
+        """MIRA ``mira.pl.plot_stream``-style streamgraph: one
+        horizontal stripe per lineage, filled with cell density (or
+        smoothed feature value) along pseudotime.
+
+        Unlike ``ov.pl.branch_streamplot`` (which renders all lineages
+        on a shared baseline as a stacked density), this places each
+        lineage on its own y-offset and supports an optional feature
+        overlay (e.g. a marker gene). Width within a stripe is the
+        Gaussian-smoothed sum of fate probability × feature value in
+        each pseudotime bin.
+        """
+        import matplotlib.pyplot as plt
+        from scipy.ndimage import gaussian_filter1d
+        if self.result is None or self.result.fate_probabilities is None:
+            raise RuntimeError("Call fit() first")
+        F = self.result.fate_probabilities
+        K = F.shape[1]
+        if ax is None:
+            _, ax = plt.subplots(figsize=figsize)
+        names = [str(self.adata.obs[self.groupby].iloc[c])
+                 if self.groupby else f"L{j}"
+                 for j, c in enumerate(self.result.terminal_cells)]
+        pt = self._pt.copy()
+        if log_pseudotime:
+            pt = np.log1p(pt - pt.min())
+        bins = np.linspace(pt.min(), pt.max(), n_bins + 1)
+        centers = 0.5 * (bins[:-1] + bins[1:])
+        idx = np.clip(np.digitize(pt, bins) - 1, 0, n_bins - 1)
+
+        # Feature overlay (optional)
+        if feature is None:
+            v = np.ones(F.shape[0])
+            title = "Lineage cell density"
+        else:
+            v = np.asarray(self.adata.obs_vector(feature), dtype=float)
+            title = f"Lineage stream — {feature}"
+
+        if palette is None:
+            cmap = plt.get_cmap("tab10")
+            palette = [cmap(j % 10) for j in range(K)]
+
+        for j in range(K):
+            w = F[:, j] * v
+            stream = np.bincount(idx, weights=w, minlength=n_bins).astype(float)
+            if stream.max() > 0:
+                stream = gaussian_filter1d(stream, sigma=max(1, smooth_window / 3))
+                stream = stream / stream.max() * max_bar_height
+            y0 = j * (max_bar_height + 0.25)
+            ax.fill_between(centers, y0 - stream / 2, y0 + stream / 2,
+                             color=palette[j], alpha=0.85, linewidth=0)
+            ax.text(centers[-1] + 0.02 * (centers[-1] - centers[0]),
+                    y0, names[j], ha="left", va="center",
+                    fontsize=10, fontweight="bold")
+
+        ax.set_yticks([])
+        ax.set_xlabel("pseudotime")
+        ax.set_title(title)
+        for s in ("top", "right", "left"): ax.spines[s].set_visible(False)
         return ax
 
     # =========================================================== streamplot
