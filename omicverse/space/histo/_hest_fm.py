@@ -19,11 +19,23 @@ from typing import TYPE_CHECKING, Sequence
 
 import numpy as np
 
+from ..._registry import register_function
+
 if TYPE_CHECKING:
     from anndata import AnnData
     from wsidata import WSIData
 
 
+@register_function(
+    aliases=["spot特征", "spot_features", "提取spot特征", "Visium_spot_embed"],
+    category="space",
+    description="Embed every Visium spot's H&E patch with a pathology FM. Cuts spot-diameter patches on the WSI at each spot centroid and runs the chosen backbone, returning an AnnData of (n_spots × feature_dim). Result cached to $OV_HISTO_CACHE/ref_features/.",
+    examples=[
+        "ref_emb = ov.space.histo.spot_features(adata, wsi, fm_backbone='ctranspath')",
+        "ref_emb = ov.space.histo.spot_features(adata, wsi, fm_backbone='gigapath', hf_token='hf_...')",
+    ],
+    related=["space.histo.embed", "space.histo.predict_expression"],
+)
 def spot_features(
     reference: "AnnData",
     wsi: "WSIData",

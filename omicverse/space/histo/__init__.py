@@ -118,6 +118,16 @@ bind_optional_symbols(
     install_hint=_INSTALL_HINT,
 )
 
+bind_optional_symbols(
+    globals(),
+    "._hest_fm",
+    ["spot_features"],
+    package=__name__,
+    feature="omicverse.space.histo.spot_features",
+    dependencies=_HF_DEPS,
+    install_hint=_INSTALL_HINT,
+)
+
 
 __all__ = [
     # IO
@@ -133,4 +143,5 @@ __all__ = [
     # Prediction
     "predict_expression",
     "super_resolve",
+    "spot_features",
 ]

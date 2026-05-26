@@ -20,6 +20,8 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..._registry import register_function
+
 if TYPE_CHECKING:
     from anndata import AnnData
     from wsidata import WSIData
@@ -58,6 +60,16 @@ def _download(target: Path, url: str) -> None:
         urllib.request.urlretrieve(url, target)
 
 
+@register_function(
+    aliases=["下载乳腺癌Demo", "download_breast", "Visium乳腺数据下载"],
+    category="space",
+    description="Download a Visium Breast Cancer Block A section (1 or 2) from 10x Genomics into the on-disk cache. Section 1 is the demo / training slide; Section 2 is the adjacent held-out slide used in HE-zoo cross-slide evaluation.",
+    examples=[
+        "ov.space.histo.download_breast(section=1)",
+        "ov.space.histo.download_breast(section=2, cache_dir='/scratch/heatlas')",
+    ],
+    related=["space.histo.load_breast", "space.histo.read_visium_with_image"],
+)
 def download_breast(
     cache_dir: str | Path | None = None,
     *,
@@ -89,6 +101,16 @@ def download_breast(
     return dst
 
 
+@register_function(
+    aliases=["加载乳腺癌Demo", "load_breast", "load_demo", "Visium乳腺数据"],
+    category="space",
+    description="Download a Visium Breast Cancer Block A section and return (adata, wsi) — the canonical demo dataset for HE-zoo tutorials. section=1 is the training slide; section=2 is the adjacent held-out slide for cross-slide evaluation.",
+    examples=[
+        "adata, wsi = ov.space.histo.load_breast()                # section 1",
+        "adata2, wsi2 = ov.space.histo.load_breast(section=2)     # held-out",
+    ],
+    related=["space.histo.download_breast", "space.histo.read_visium_with_image", "space.histo.predict_expression"],
+)
 def load_breast(
     cache_dir: str | Path | None = None,
     *,

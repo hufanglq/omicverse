@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, Sequence
 
+from ..._registry import register_function
+
 if TYPE_CHECKING:
     from anndata import AnnData
     from wsidata import WSIData
@@ -12,6 +14,17 @@ PredictMethod = Literal["stpath", "stflow", "hest_fm", "bleep"]
 SuperResMethod = Literal["istar"]
 
 
+@register_function(
+    aliases=["HE预测空转", "predict_expression", "HE2ST", "H&E预测基因", "histo_predict"],
+    category="space",
+    description="Predict spot-level spatial gene expression from a tiled WSI using a HE→ST backend (method='stpath' / 'stflow' / 'hest_fm'). Output AnnData is stored as wsi.tables[{key_added or method}_{tile_key}] with tile-pixel centroids in obsm['spatial'].",
+    examples=[
+        "ov.space.histo.predict_expression(wsi, method='stpath', organ='Breast', tech='Visium')",
+        "ov.space.histo.predict_expression(wsi, method='hest_fm', reference=adata, fm_backbone='ctranspath')",
+        "ov.space.histo.predict_expression(wsi, method='stflow', reference=adata, n_epochs=80)",
+    ],
+    related=["space.histo.super_resolve", "space.histo.embed", "space.histo.spot_features", "space.histo.tile"],
+)
 def predict_expression(
     wsi: "WSIData",
     *,
@@ -156,6 +169,16 @@ def predict_expression(
     )
 
 
+@register_function(
+    aliases=["空转超分", "super_resolve", "Visium超分", "iStar超分"],
+    category="space",
+    description="Super-resolve a paired (Visium, H&E) sample to near-single-cell sub-spot tiles via iStar. Trains a per-slide HIPT regression head on the paired Visium counts (NOT a zero-shot model — needs paired ST). For H&E-only prediction use predict_expression(method='stpath') instead.",
+    examples=[
+        "pred = ov.space.histo.super_resolve(adata, wsi=wsi, method='istar')",
+        "pred = ov.space.histo.super_resolve(adata, wsi=wsi, method='istar', pixel_size=0.5, epochs=80, n_top_genes=50)",
+    ],
+    related=["space.histo.predict_expression", "space.histo.read_visium_with_image"],
+)
 def super_resolve(
     adata: "AnnData",
     *,

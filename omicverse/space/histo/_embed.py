@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ..._registry import register_function
+
 if TYPE_CHECKING:
     from wsidata import WSIData
 
@@ -32,6 +34,15 @@ _RECOMMENDED_BACKBONES = (
 )
 
 
+@register_function(
+    aliases=["FM列表", "available_backbones", "backbones"],
+    category="space",
+    description="Return the curated list of pathology foundation models supported by ov.space.histo.embed (filtered from LazySlide's model registry to those useful for HE→ST prediction).",
+    examples=[
+        "ov.space.histo.available_backbones()",
+    ],
+    related=["space.histo.embed"],
+)
 def available_backbones() -> list[str]:
     """Return the curated list of pathology FMs recommended for HE→ST."""
     try:
@@ -42,6 +53,17 @@ def available_backbones() -> list[str]:
     return [name for name in _RECOMMENDED_BACKBONES if name in registered]
 
 
+@register_function(
+    aliases=["提取特征", "embed", "FM提特征", "wsi_embed", "病理特征"],
+    category="space",
+    description="Extract per-tile pathology FM embeddings on a WSIData (wraps lazyslide.tl.feature_extraction). Writes features as wsi.tables[{model}_{tile_key}] (AnnData with one row per tile). Supports UNI/UNI2/CONCH/Virchow/GigaPath/CTransPath/Hibou/etc.",
+    examples=[
+        "ov.space.histo.embed(wsi, model='ctranspath', batch_size=16)",
+        "ov.space.histo.embed(wsi, model='gigapath', token='hf_...')",
+        "ov.space.histo.embed(wsi, model='uni2', model_path='/path/to/uni2.pth')",
+    ],
+    related=["space.histo.tile", "space.histo.available_backbones", "space.histo.predict_expression"],
+)
 def embed(
     wsi: "WSIData",
     model: str = "gigapath",

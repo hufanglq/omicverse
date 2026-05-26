@@ -12,11 +12,23 @@ from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
+from ..._registry import register_function
+
 if TYPE_CHECKING:
     from anndata import AnnData
     from wsidata import WSIData
 
 
+@register_function(
+    aliases=["打开WSI", "open_wsi", "wsi_reader", "HE加载", "病理图加载"],
+    category="space",
+    description="Open a whole-slide H&E image as a wsidata.WSIData container (thin wrapper around wsidata.open_wsi). Returns a SpatialData subclass with WSI accessors that downstream ov.space.histo.* functions consume.",
+    examples=[
+        "wsi = ov.space.histo.open_wsi('slide.svs')",
+        "wsi = ov.space.histo.open_wsi('slide.tif', reader='tiffslide')",
+    ],
+    related=["space.histo.tile", "space.histo.embed", "space.histo.read_visium_with_image"],
+)
 def open_wsi(
     path: str | Path,
     *,
@@ -52,6 +64,16 @@ def open_wsi(
     )
 
 
+@register_function(
+    aliases=["切片", "tile", "wsi_tile", "WSI切块", "tile_wsi"],
+    category="space",
+    description="Tile a WSIData into a grid of patches (delegates to LazySlide find_tissues + tile_tissues). Tile geometries land in wsi.shapes[tile_key]; tile_spec in wsi.attrs['tile_spec'][tile_key].",
+    examples=[
+        "ov.space.histo.tile(wsi, tile_px=224, mpp=0.5)",
+        "ov.space.histo.tile(wsi, tile_px=256, mpp=0.5, overlap=0.1)",
+    ],
+    related=["space.histo.open_wsi", "space.histo.embed", "space.histo.predict_expression"],
+)
 def tile(
     wsi: "WSIData",
     tile_px: int = 224,
@@ -99,6 +121,16 @@ def tile(
     return wsi
 
 
+@register_function(
+    aliases=["读取Visium带图像", "read_visium_with_image", "load_visium_he", "Visium配对加载"],
+    category="space",
+    description="Load a Space Ranger Visium output AND wrap its source H&E as a WSIData. Returns (adata, wsi). The two share the same physical coordinate system; downstream HE-zoo backends use adata as the paired reference and wsi for tile-level inference.",
+    examples=[
+        "adata, wsi = ov.space.histo.read_visium_with_image('/path/to/outs', image_path='HE.tif')",
+        "adata, wsi = ov.space.histo.read_visium_with_image('outs', image_path='HE.tif', count_file='filtered_feature_bc_matrix.h5')",
+    ],
+    related=["space.histo.open_wsi", "space.histo.load_breast", "space.histo.tile"],
+)
 def read_visium_with_image(
     visium_path: str | Path,
     *,
