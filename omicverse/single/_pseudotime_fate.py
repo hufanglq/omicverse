@@ -1459,6 +1459,42 @@ class PseudotimeFate:
         return {str(c): mc.to_hex(colors[i])
                 for i, c in enumerate(cats) if i < len(colors)}
 
+    @staticmethod
+    def _cellrank_create_colors(
+        base_color,
+        n: int,
+        hue_range=(-0.1, 0.1),
+        saturation_range=(-0.3, 0.3),
+        value_range=(-0.3, 0.3),
+    ) -> list:
+        """Verbatim port of ``cellrank._utils._colors._create_colors``.
+
+        Returns ``n`` hex colour variations of ``base_color`` by
+        perturbing HSV channels within the given ranges. Doubles the
+        sample count and takes every-other to avoid neighbour colours
+        becoming visually indistinguishable. For ``n == 1`` returns the
+        base unchanged.
+
+        The duplicate-cluster macrostate path uses
+        ``saturation_range=None`` (CellRank ``_map_names_and_colors``)
+        so we shift hue + value only.
+        """
+        import matplotlib.colors as mc
+        base_hsv = mc.rgb_to_hsv(mc.to_rgb(base_color))
+        if n == 1:
+            return [mc.to_hex(mc.hsv_to_rgb(base_hsv))]
+        n2 = n * 2
+        res = np.repeat(base_hsv[..., np.newaxis], n2, axis=1).T
+        for i, r in enumerate((hue_range, saturation_range, value_range)):
+            if r is None:
+                continue
+            r_low, r_high = sorted(r)
+            c = base_hsv[i]
+            res[:, i] = np.linspace(max(c + r_low, 0), min(c + r_high, 1), n2)
+        res_rgb = [mc.hsv_to_rgb(c) for c in res]
+        res_hex = [mc.to_hex(c) for c in res_rgb]
+        return res_hex[::2]
+
     def _resolve_cluster_colors(self, categories,
                                   fallback_palette: str = "Set3") -> list:
         """List-aligned hex colors for ``categories`` (may contain duplicates).
@@ -1466,16 +1502,27 @@ class PseudotimeFate:
         Reuses ``adata.uns[f'{groupby}_colors']`` when a category name
         matches a cluster. For categories that occur more than once
         (e.g. two macrostates that collapse to the same cluster name),
-        applies a CellRank-style HLS lightness perturbation around the
-        base colour so each occurrence is visually distinct.
+        CellRank's ``_map_names_and_colors`` is invoked with
+        ``saturation_range=None`` so each occurrence is visually
+        distinguishable (hue + value variants of the base colour).
         """
         import matplotlib.colors as mc
         import matplotlib.pyplot as plt
-        import colorsys
         from collections import Counter, defaultdict
         cmap_base = self._cluster_color_map()
         cmap_fallback = plt.get_cmap(fallback_palette)
         counts = Counter(map(str, categories))
+        # Pre-generate the variant pool per duplicated cluster name.
+        variants: dict = {}
+        for cat, total in counts.items():
+            if total <= 1:
+                continue
+            base = cmap_base.get(cat)
+            if base is None:
+                continue
+            variants[cat] = self._cellrank_create_colors(
+                base, total, saturation_range=None
+            )
         seen: dict = defaultdict(int)
         out: list = []
         n_unknown = 0
@@ -1489,15 +1536,10 @@ class PseudotimeFate:
             total = counts[cat_s]
             idx = seen[cat_s]
             seen[cat_s] += 1
-            if total > 1:
-                r, g, b = mc.to_rgb(base)
-                h, L, s = colorsys.rgb_to_hls(r, g, b)
-                span = 0.30
-                offset = (idx / (total - 1) - 0.5) * span
-                L_new = float(np.clip(L + offset, 0.2, 0.85))
-                nr, ng, nb = colorsys.hls_to_rgb(h, L_new, s)
-                base = mc.to_hex((nr, ng, nb))
-            out.append(base)
+            if total > 1 and cat_s in variants:
+                out.append(variants[cat_s][idx])
+            else:
+                out.append(mc.to_hex(base))
         return out
 
     def plot_stream(
