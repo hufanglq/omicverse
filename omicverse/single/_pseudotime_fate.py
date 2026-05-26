@@ -2193,6 +2193,160 @@ class PseudotimeFate:
         return ax
 
     # =========================================================== streamplot
+    def fit_lineage_trends(
+        self,
+        genes,
+        *,
+        pseudotime_key: str | None = None,
+        n_splines: int = 6,
+        spline_order: int = 3,
+        grid_size: int = 100,
+        confidence_level: float = 0.95,
+        store_raw: bool = False,
+        verbose: bool = True,
+    ):
+        """Fit one GAM per lineage using ``fate_probabilities`` as cell
+        weights — the CellRank ``gene_trends`` approach.
+
+        Unlike a ``dynamic_features(groupby=lineage_key)`` call (which
+        hard-partitions cells by argmax-lineage and so leaves each
+        lineage's GAM extrapolating outside its narrow ``pt`` window),
+        this helper fits each lineage's curve on **all cells**, with
+        the lineage's fate probability as the per-cell weight. Trunk
+        cells contribute to every curve in proportion to their soft
+        membership, giving smooth full-pt-range curves that match the
+        CellRank visualization.
+
+        Parameters
+        ----------
+        genes
+            Gene name(s) to fit. Same shape as
+            ``dynamic_features(genes=...)``.
+        pseudotime_key
+            ``adata.obs`` column for pseudotime. Defaults to
+            ``self.pseudotime_key``.
+        n_splines, spline_order, grid_size, confidence_level
+            Passed through to :func:`ov.single.dynamic_features`.
+            Defaults match CellRank (``n_splines=6``) which gives
+            slightly smoother fits than the ``dynamic_features``
+            default of ``n_splines=8``.
+        store_raw
+            If ``True``, attach a raw per-cell scatter to the result so
+            ``ov.pl.dynamic_trends(add_point=True)`` works. The raw
+            ``dataset`` column is just the highest-weight lineage per
+            cell (an argmax label, used only for scatter colouring).
+
+        Returns
+        -------
+        :class:`ov.single.dynamic_features.DynamicFeaturesResult`
+            One ``dataset == lineage_name`` block per lineage. Pass
+            directly to :func:`ov.pl.dynamic_trends`::
+
+                fit = fate.fit_lineage_trends(genes=top_genes[:5])
+                ov.pl.dynamic_trends(fit, compare_groups=True)
+        """
+        from ._dynamic_features import dynamic_features, DynamicFeaturesResult
+        if self.result is None or self.result.fate_probabilities is None:
+            raise RuntimeError("Call fit(compute_fates=True) first.")
+        F = self.result.fate_probabilities
+        terminal_cells = list(self.result.terminal_cells)
+        lineage_names_raw = [
+            str(self.adata.obs[self.groupby].iloc[c])
+            if self.groupby else f"L{j}"
+            for j, c in enumerate(terminal_cells)
+        ]
+        # Disambiguate duplicate cluster names (CellRank style: _1, _2)
+        from collections import Counter
+        counts = Counter(lineage_names_raw)
+        seen: dict = {}
+        lineage_names = []
+        for nm in lineage_names_raw:
+            if counts[nm] > 1:
+                seen[nm] = seen.get(nm, 0) + 1
+                lineage_names.append(f"{nm}_{seen[nm]}")
+            else:
+                lineage_names.append(nm)
+
+        pt_key = pseudotime_key or self.pseudotime_key
+        # Sanitize gene list to those actually in the AnnData (raw or
+        # current X)
+        if isinstance(genes, str):
+            genes = [genes]
+        genes = [str(g) for g in genes]
+
+        stats_blocks, fitted_blocks, raw_blocks = [], [], []
+        for j, lin_name in enumerate(lineage_names):
+            w = F[:, j].astype(float).copy()
+            if w.sum() <= 0:
+                continue
+            # Stash weights in a temporary obs column — dynamic_features
+            # reads weights via column name when given a string.
+            w_key = f"__fate_w_{lin_name}"
+            self.adata.obs[w_key] = w
+            try:
+                res = dynamic_features(
+                    self.adata,
+                    genes=genes,
+                    pseudotime=pt_key,
+                    weights=w_key,
+                    n_splines=n_splines,
+                    spline_order=spline_order,
+                    grid_size=grid_size,
+                    confidence_level=confidence_level,
+                    store_raw=store_raw,
+                    raw_obs_keys=([self.groupby] if (store_raw and self.groupby) else None),
+                    verbose=False,
+                )
+            finally:
+                del self.adata.obs[w_key]
+            stats = res.stats.copy()
+            stats["dataset"] = lin_name
+            fitted = res.fitted.copy()
+            fitted["dataset"] = lin_name
+            stats_blocks.append(stats)
+            fitted_blocks.append(fitted)
+            if res.raw is not None:
+                raw = res.raw.copy()
+                raw["dataset"] = lin_name
+                raw_blocks.append(raw)
+            if verbose:
+                ok = int(stats.get("success", pd.Series([True] * len(stats))).sum())
+                print(f"  {lin_name}: {ok}/{len(stats)} genes fitted")
+
+        if not stats_blocks:
+            raise RuntimeError("No lineage had positive fate-probability mass.")
+        stats_all = pd.concat(stats_blocks, ignore_index=True)
+        fitted_all = pd.concat(fitted_blocks, ignore_index=True)
+        raw_all = pd.concat(raw_blocks, ignore_index=True) if raw_blocks else None
+
+        # Propagate the cluster palette via the lineage_key naming so
+        # dynamic_trends picks it up as ``raw_obs_colors`` (same code
+        # path as ``dynamic_features(groupby=lineage_key)``).
+        groupby_col = self._prefix_from_pseudotime_key() + "_lineage"
+        config: dict = {
+            "pseudotime": pt_key,
+            "groupby": groupby_col,
+            "weights": "fate_probabilities[:, j]",
+            "n_splines": n_splines,
+            "spline_order": spline_order,
+            "grid_size": grid_size,
+            "confidence_level": confidence_level,
+            "store_raw": store_raw,
+            "raw_obs_keys": [self.groupby] if (store_raw and self.groupby) else None,
+        }
+        cluster_map = self._cluster_color_map()
+        if cluster_map:
+            cols = self._resolve_cluster_colors(lineage_names)
+            config["raw_obs_colors"] = {groupby_col: cols}
+            config["raw_obs_category_order"] = {groupby_col: list(lineage_names)}
+        return DynamicFeaturesResult(
+            stats=stats_all,
+            fitted=fitted_all,
+            raw=raw_all,
+            models=None,
+            config=config,
+        )
+
     def write_branch_keys(
         self,
         lineage_key: str | None = None,
