@@ -1,14 +1,18 @@
-"""End-to-end smoke test for ov.space.histo on the Visium Breast Cancer slide.
+"""End-to-end smoke script for ov.space.histo on the Visium Breast Cancer slide.
 
-Runs each backend on the same H&E and asserts the predicted AnnData is
-well-formed (shape, gene names, finite values). Intended to be run from
-the omicdev env with HF token available:
+This is a **manual integration script**, not a unit test. It downloads
+~1.7 GB of public Visium data on first use and exercises each backend
+end-to-end on a real H&E. Run from a host with at least one CUDA GPU,
+the omicdev env active, and an HF token with GigaPath access:
 
-    OV_HISTO_CACHE=/scratch/users/steorra/cache/omicverse_histo \
+    OV_HISTO_CACHE=/scratch/path/to/cache \\
         python tests/test_histo_e2e.py [backend]
 
 Pass a backend name to run only one of: ``embed``, ``hest_fm``, ``stpath``,
 ``stflow``, ``istar``. Default is to run them all in sequence.
+
+The module top auto-skips pytest collection so CI doesn't try to import
+it (it depends on hardcoded paths + gated HF weights).
 """
 from __future__ import annotations
 
@@ -18,14 +22,26 @@ import time
 import warnings
 from pathlib import Path
 
+# Make sure `pytest` skips this file — it's a manual integration
+# script, not a unit test. The collect_ignore hook below is honoured by
+# pytest when set as a module-level attribute.
+import pytest
+collect_ignore_glob = ["*"]
+pytestmark = pytest.mark.skip(reason="manual integration script; not a unit test")
+
 warnings.filterwarnings("ignore")
 
-DATA_DIR = Path("/scratch/users/steorra/cache/he_zoo/visium_breast")
+DATA_DIR = Path(os.environ.get(
+    "OV_HISTO_DEMO_DIR",
+    "/scratch/users/steorra/cache/he_zoo/visium_breast",
+))
 VISIUM_PATH = DATA_DIR  # Spaceranger 1.1.0 layout: filtered_feature_bc_matrix.h5 + spatial/
 HE_IMAGE = DATA_DIR / "V1_Breast_Cancer_Block_A_Section_1_image.tif"
 CACHE = Path(os.environ.get("OV_HISTO_CACHE", Path.home() / ".cache" / "omicverse" / "histo"))
-SCRATCH = Path("/scratch/users/steorra/cache/he_zoo/runs")
-SCRATCH.mkdir(parents=True, exist_ok=True)
+SCRATCH = Path(os.environ.get(
+    "OV_HISTO_SCRATCH",
+    str(CACHE / "he_zoo" / "runs"),
+))
 
 
 def load_inputs():
@@ -144,4 +160,5 @@ def main():
 
 
 if __name__ == "__main__":
+    SCRATCH.mkdir(parents=True, exist_ok=True)
     main()
