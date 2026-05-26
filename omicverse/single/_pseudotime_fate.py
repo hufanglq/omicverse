@@ -1103,6 +1103,17 @@ class PseudotimeFate:
         frame_idx = np.linspace(0, len(states) - 1, num_frames).astype(int)
         coords = self.adata.obsm[basis]
         fig, ax = plt.subplots(figsize=figsize)
+        # Frameless layout: no spines, no ticks, equal aspect so the
+        # embedding isn't squashed, axes fill the full figure so the
+        # GIF has no white border.
+        fig.subplots_adjust(left=0, right=1, top=0.93, bottom=0)
+        ax.set_aspect("equal")
+        ax.axis("off")
+        # Lock data limits to the UMAP extent so the camera doesn't pan
+        # as different cells are highlighted across frames.
+        pad = 0.04 * np.ptp(coords, axis=0)
+        ax.set_xlim(coords[:, 0].min() - pad[0], coords[:, 0].max() + pad[0])
+        ax.set_ylim(coords[:, 1].min() - pad[1], coords[:, 1].max() + pad[1])
         density0 = states[frame_idx[0]]
         order = density0.argsort()
         vmin0 = float(density0.min())
@@ -1110,7 +1121,6 @@ class PseudotimeFate:
         scat = ax.scatter(coords[order, 0], coords[order, 1],
                            c=density0[order], cmap=cmap, s=4,
                            vmin=vmin0, vmax=max(vmax0, vmin0 + 1e-12))
-        ax.set_xticks([]); ax.set_yticks([])
 
         def update(i):
             d = states[frame_idx[i]]
