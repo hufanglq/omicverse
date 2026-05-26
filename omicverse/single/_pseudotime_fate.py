@@ -1484,7 +1484,9 @@ class PseudotimeFate:
         if ax is None:
             _, ax = plt.subplots(figsize=figsize)
 
-        # Normalise features (clip + scale)
+        # Normalise features (clip + scale) — port of MIRA
+        # `_normalize_numerical_features`. Bounds the stream to
+        # ``[centerline ± max_bar_height/2]``.
         if numeric and clip is not None:
             mu = features.mean(0, keepdims=True)
             sd = features.std(0, keepdims=True)
@@ -1498,9 +1500,17 @@ class PseudotimeFate:
             else:
                 features = features - f_min
             features = np.maximum(features, 0)
-            normaliser = max(features.sum(-1).max() if style == 'stream' and not split
-                              else features.max(0).max(), 1e-12)
-            features = features / normaliser * max_bar_height
+            if style == 'stream' and not split and features.shape[1] > 1:
+                # Stacked multi-feature stream — bound the *total* height
+                # so cumsum tops out at ``max_bar_height``.
+                normaliser = max(float(features.sum(-1).max()), 1e-12)
+                features = features / normaliser * max_bar_height
+            else:
+                # Single-feature stream (or split-panel) — per-feature
+                # max so each panel fills the band regardless of absolute
+                # expression scale.
+                normaliser = np.maximum(features.max(axis=0), 1e-12)
+                features = features / normaliser * max_bar_height
 
         # Walk the tree (BFS from root) and plot each segment.
         import networkx as nx
@@ -1562,32 +1572,39 @@ class PseudotimeFate:
 
             # ---- segment rendering ----
             if style == 'stream' and numeric:
-                # Savgol smoothing
-                ws = min(window_size, max(3, len(seg_pt) // 2 * 2 - 1))
-                if ws > len(seg_pt):
-                    ws = len(seg_pt) - (1 - len(seg_pt) % 2)
-                ws = max(3, ws if ws % 2 == 1 else ws - 1)
+                # Savgol smoothing (matches MIRA — window auto-clipped to
+                # the segment length, must be odd).
+                max_ws = max(3, len(seg_pt) - 1)
+                if max_ws % 2 == 0:
+                    max_ws -= 1
+                ws = min(window_size, max_ws)
+                if ws % 2 == 0:
+                    ws -= 1
+                ws = max(3, ws)
                 smooth = savgol_filter(seg_feats, ws, 1, axis=0)
                 cum = np.cumsum(smooth, axis=-1)
-                base = cum[:, -1] / 2 if cum.shape[1] > 1 else cum[:, -1] * 0
+                # MIRA `center_baseline=True`: baseline = features[:, -1] / 2
+                # *regardless* of how many features there are. This makes
+                # the stream symmetric around the centerline (expands both
+                # up AND down) for single- and multi-feature alike.
+                base = cum[:, -1] / 2
                 bottom = cl - base
                 top_cum = cum - base[:, None] + cl
                 colors = plt.get_cmap(palette).colors if isinstance(palette, str) else palette
-                if len(data_list) == 1:
-                    ax.fill_between(seg_pt, bottom, top_cum[:, 0],
-                                     color=(colors[0] if isinstance(colors, (list, tuple))
-                                            else 'black'), alpha=0.9,
-                                     edgecolor=linecolor,
-                                     linewidth=linewidth or 0.1)
-                else:
-                    prev = bottom
-                    for k in range(top_cum.shape[1]):
+                prev = bottom
+                # Single-feature default colour matches MIRA's `color='black'`;
+                # multi-feature uses the palette.
+                use_palette = len(data_list) > 1
+                for k in range(top_cum.shape[1]):
+                    if use_palette:
                         c = colors[k % len(colors)]
-                        ax.fill_between(seg_pt, prev, top_cum[:, k], color=c,
-                                         alpha=0.9, edgecolor=linecolor,
-                                         linewidth=linewidth or 0.1,
-                                         label=data_list[k] if parent == root_idx and bfs[0][1] == child else None)
-                        prev = top_cum[:, k]
+                    else:
+                        c = colors[0] if isinstance(colors, (list, tuple)) else 'black'
+                    ax.fill_between(seg_pt, prev, top_cum[:, k], color=c,
+                                     alpha=0.9, edgecolor=linecolor,
+                                     linewidth=linewidth or 0.1,
+                                     label=data_list[k] if use_palette and parent == root_idx and bfs[0][1] == child else None)
+                    prev = top_cum[:, k]
 
             elif style == 'swarm':
                 # Categorical-feature swarm — port of MIRA
