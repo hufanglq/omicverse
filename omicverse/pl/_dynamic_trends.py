@@ -383,7 +383,19 @@ def dynamic_trends(
         if not _is_categorical(point_values):
             raise ValueError("`point_color_by` currently supports categorical raw obs columns only.")
         point_labels = list(dict.fromkeys(point_values.dropna().astype(str)))
-        point_color_map = _resolve_palette(point_labels, palette=point_palette)
+        # Prefer the captured scanpy palette
+        # (``adata.uns[f'{point_color_by}_colors']``) if
+        # ``dynamic_features(..., store_raw=True)`` recorded it AND the
+        # user didn't pass an explicit ``point_palette``.
+        captured = (result.config or {}).get("raw_obs_colors", {}) if hasattr(result, "config") else {}
+        captured_order = (result.config or {}).get("raw_obs_category_order", {}) if hasattr(result, "config") else {}
+        if point_palette is None and point_color_by in captured:
+            colors = captured[point_color_by]
+            order = captured_order.get(point_color_by, [])
+            color_by_name = {c: colors[i] for i, c in enumerate(order) if i < len(colors)}
+            point_color_map = {lbl: color_by_name.get(lbl, "#888888") for lbl in point_labels}
+        else:
+            point_color_map = _resolve_palette(point_labels, palette=point_palette)
     else:
         point_labels = []
         point_color_map = {}

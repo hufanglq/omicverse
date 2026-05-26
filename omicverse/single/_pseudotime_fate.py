@@ -906,14 +906,29 @@ class PseudotimeFate:
         if ax is None:
             _, ax = plt.subplots(figsize=figsize)
 
+        cat_legend_labels = None  # set when categorical with named legend
         if color is None or color == 'lineage_entropy':
             c = self.result.lineage_entropy
             title = 'lineage entropy'
         elif color in self.adata.obs.columns:
             v = self.adata.obs[color]
             if v.dtype.name == 'category':
-                cmap_ = plt.get_cmap('tab20', v.cat.categories.size)
-                c = cmap_(v.cat.codes.values)
+                cats = list(v.cat.categories)
+                # Reuse ``adata.uns[f'{color}_colors']`` if available
+                # (set when ``color == self.groupby``), otherwise fall
+                # back to tab20.
+                src_key = f"{color}_colors"
+                if src_key in self.adata.uns:
+                    import matplotlib.colors as mc
+                    cat_colors = [mc.to_hex(x) for x in self.adata.uns[src_key]]
+                    cat_colors = cat_colors[:len(cats)] + [
+                        '#dddddd'
+                    ] * max(0, len(cats) - len(cat_colors))
+                else:
+                    cmap_ = plt.get_cmap('tab20', max(3, len(cats)))
+                    cat_colors = [cmap_(i % cmap_.N) for i in range(len(cats))]
+                c = [cat_colors[i] for i in v.cat.codes.values]
+                cat_legend_labels = list(zip(cats, cat_colors))
                 title = color
                 cmap = None
             else:
@@ -926,14 +941,18 @@ class PseudotimeFate:
         # Unit circle outline
         theta = np.linspace(0, 2 * np.pi, 200)
         ax.plot(np.cos(theta), np.sin(theta), color='#444', lw=0.8)
-        # Lineage labels around the perimeter
+        # Lineage labels around the perimeter — colour each label using
+        # the cluster palette (perturbed for duplicates), matching the
+        # tree-leaf colour scheme in ``plot_stream``.
+        label_colors = self._resolve_cluster_colors(names)
         K = len(names)
         for j, name in enumerate(names):
             ang = 2 * np.pi * j / K
             ax.text(label_distance * np.cos(ang),
                     label_distance * np.sin(ang),
                     name, ha='center', va='center',
-                    fontsize=9, fontweight='bold')
+                    fontsize=9, fontweight='bold',
+                    color=label_colors[j])
         ax.set_aspect('equal'); ax.set_xticks([]); ax.set_yticks([])
         ax.set_title(title)
         for s_ in ax.spines.values(): s_.set_visible(False)
@@ -942,6 +961,17 @@ class PseudotimeFate:
                 plt.colorbar(sc, ax=ax, shrink=0.6)
             except Exception:
                 pass
+        elif cat_legend_labels is not None:
+            from matplotlib.lines import Line2D
+            handles = [
+                Line2D([0], [0], marker='o', linestyle='none',
+                        markerfacecolor=col, markeredgecolor='none',
+                        markersize=7, label=lbl)
+                for lbl, col in cat_legend_labels
+            ]
+            ax.legend(handles=handles, loc='center left',
+                       bbox_to_anchor=(1.02, 0.5), frameon=False,
+                       fontsize=8, title=color)
         return ax
 
     # =========================================================== differentiation traces
@@ -1408,6 +1438,68 @@ class PseudotimeFate:
                 _set(node)
         return np.array([positions[k] for k in G.nodes])
 
+    # ------------------------------------------------------------------ colors
+    def _cluster_color_map(self) -> dict:
+        """Return ``{category_name: hex}`` from ``adata.uns[f'{groupby}_colors']``.
+
+        Empty dict if ``groupby`` is unset or scanpy hasn't written the
+        palette yet (it writes it the first time you call
+        ``sc.pl.embedding(color=groupby)``).
+        """
+        import matplotlib.colors as mc
+        if self.groupby is None:
+            return {}
+        key = f"{self.groupby}_colors"
+        if key not in self.adata.uns:
+            return {}
+        series = self.adata.obs[self.groupby]
+        cats = (list(series.cat.categories)
+                if hasattr(series, "cat") else list(series.unique()))
+        colors = list(self.adata.uns[key])
+        return {str(c): mc.to_hex(colors[i])
+                for i, c in enumerate(cats) if i < len(colors)}
+
+    def _resolve_cluster_colors(self, categories,
+                                  fallback_palette: str = "Set3") -> list:
+        """List-aligned hex colors for ``categories`` (may contain duplicates).
+
+        Reuses ``adata.uns[f'{groupby}_colors']`` when a category name
+        matches a cluster. For categories that occur more than once
+        (e.g. two macrostates that collapse to the same cluster name),
+        applies a CellRank-style HLS lightness perturbation around the
+        base colour so each occurrence is visually distinct.
+        """
+        import matplotlib.colors as mc
+        import matplotlib.pyplot as plt
+        import colorsys
+        from collections import Counter, defaultdict
+        cmap_base = self._cluster_color_map()
+        cmap_fallback = plt.get_cmap(fallback_palette)
+        counts = Counter(map(str, categories))
+        seen: dict = defaultdict(int)
+        out: list = []
+        n_unknown = 0
+        for cat in categories:
+            cat_s = str(cat)
+            if cat_s in cmap_base:
+                base = cmap_base[cat_s]
+            else:
+                base = mc.to_hex(cmap_fallback(n_unknown % cmap_fallback.N))
+                n_unknown += 1
+            total = counts[cat_s]
+            idx = seen[cat_s]
+            seen[cat_s] += 1
+            if total > 1:
+                r, g, b = mc.to_rgb(base)
+                h, L, s = colorsys.rgb_to_hls(r, g, b)
+                span = 0.30
+                offset = (idx / (total - 1) - 0.5) * span
+                L_new = float(np.clip(L + offset, 0.2, 0.85))
+                nr, ng, nb = colorsys.hls_to_rgb(h, L_new, s)
+                base = mc.to_hex((nr, ng, nb))
+            out.append(base)
+        return out
+
     def plot_stream(
         self,
         data,                                                # str | list[str]
@@ -1547,6 +1639,14 @@ class PseudotimeFate:
         root_idx = next(n for n, d in G.in_degree() if d == 0)
         bfs = [(root_idx, root_idx), *list(nx.bfs_edges(G, root_idx))]
 
+        # Pre-compute one colour per leaf, reusing the cluster palette
+        # (``adata.uns[f'{groupby}_colors']``) with HLS perturbation when
+        # the same cluster name appears on multiple leaves.
+        leaf_nodes = [n for n in G.nodes if G.out_degree(n) == 0]
+        leaf_names_list = [tree_state_names[n] for n in leaf_nodes]
+        leaf_colors_list = self._resolve_cluster_colors(leaf_names_list)
+        leaf_color_by_node = dict(zip(leaf_nodes, leaf_colors_list))
+
         # Segment positions cache so we can draw scaffold connectors.
         seg_pt_min, seg_pt_max = {}, {}
         seg_pt_min[root_idx] = float(pt.min())
@@ -1654,11 +1754,20 @@ class PseudotimeFate:
                 # segments).
                 if not hasattr(self, "_swarm_color_cache") or self._swarm_color_cache.get("ms_key") is not id(palette):
                     all_cats = sorted(set(features[:, 0].astype(str)))
-                    cm_name = palette if isinstance(palette, str) else "Set3"
-                    cm = plt.get_cmap(cm_name, max(3, len(all_cats)))
+                    # Prefer the cluster palette when every label is a
+                    # known cluster name; fall back to ``palette`` cmap
+                    # otherwise. Duplicates get HLS-perturbed copies.
+                    cluster_map = self._cluster_color_map()
+                    if cluster_map and all(c in cluster_map for c in all_cats):
+                        color_list = self._resolve_cluster_colors(all_cats)
+                        cmap_used = {c: color_list[i] for i, c in enumerate(all_cats)}
+                    else:
+                        cm_name = palette if isinstance(palette, str) else "Set3"
+                        cm = plt.get_cmap(cm_name, max(3, len(all_cats)))
+                        cmap_used = {c: cm(i % cm.N) for i, c in enumerate(all_cats)}
                     self._swarm_color_cache = {
                         "ms_key": id(palette),
-                        "map": {c: cm(i % cm.N) for i, c in enumerate(all_cats)},
+                        "map": cmap_used,
                     }
                 color_map = self._swarm_color_cache["map"]
 
@@ -1682,10 +1791,12 @@ class PseudotimeFate:
                 )
                 _Beeswarm(orient="h", width=max_bar_height)(pts, cl)
 
-            # Leaf label
+            # Leaf label — coloured by cluster palette (perturbed for
+            # duplicates) so a stream plot reads like a coloured tree.
             if G.out_degree(child) == 0:
                 ax.text(seg_pt_max[child] * 1.005, cl, name,
-                        fontsize=10, va='center', ha='left', fontweight='bold')
+                        fontsize=10, va='center', ha='left', fontweight='bold',
+                        color=leaf_color_by_node.get(child, 'black'))
 
         # Explicit ylim with padding for Beeswarm dot radii, mirroring
         # MIRA `_build_tree`'s `ax.set(ylim=(plot_bottom, max_centerline
@@ -1765,7 +1876,18 @@ class PseudotimeFate:
         names = [str(self.adata.obs[self.groupby].iloc[c])
                  if self.groupby else f"L{j}"
                  for j, c in enumerate(self.result.terminal_cells)]
-        self.adata.obs[lk] = pd.Categorical([names[i] for i in F.argmax(axis=1)])
+        cat = pd.Categorical([names[i] for i in F.argmax(axis=1)])
+        self.adata.obs[lk] = cat
+        # Propagate the cluster palette to the lineage column so scanpy/
+        # PseudotimeFate downstream tools (dynamic_trends, etc.) reuse
+        # ``adata.uns[f'{groupby}_colors']`` instead of falling back to a
+        # generic colormap. Order follows ``cat.categories``; duplicate
+        # cluster names (two macrostates of the same cluster) get
+        # HLS-perturbed copies (CellRank style).
+        cluster_map = self._cluster_color_map()
+        if cluster_map:
+            base_for_cat = list(cat.categories)
+            self.adata.uns[f"{lk}_colors"] = self._resolve_cluster_colors(base_for_cat)
         return lk, pk
 
     # ------------------------------------------------------------------ plots
@@ -1843,25 +1965,120 @@ class PseudotimeFate:
         fig.tight_layout()
         return fig
 
-    def plot_macrostates(self, basis: str = "X_umap", ax=None):
-        """Colour cells by their hard macrostate assignment on a UMAP.
-        Highlights the inferred terminal macrostates with a star.
+    def plot_macrostates(
+        self,
+        which: str = "terminal",
+        basis: str = "X_umap",
+        ax=None,
+        size: float = 30.0,
+        background_color: str = "lightgrey",
+        background_size: float = 2.0,
+        legend: bool = True,
+        legend_loc: str = "right",
+    ):
+        """Colour cells assigned to a macrostate by that macrostate; the
+        rest of the cells are shown in ``background_color``. Mirrors
+        CellRank's ``g.plot_macrostates(which='all' | 'terminal')`` —
+        each macrostate is named ``<cluster>`` (unique) or
+        ``<cluster>_<i>`` (duplicates), and the duplicate copies are
+        coloured with HLS-perturbed variants of the cluster's base
+        colour from ``adata.uns[f'{groupby}_colors']``.
+
+        Parameters
+        ----------
+        which
+            ``'terminal'`` (default) shows only the inferred terminal
+            macrostates — the rest of the macrostates are folded into
+            the grey background. ``'all'`` colours every macrostate.
         """
         if self.result is None:
             raise RuntimeError("Call fit() first")
         import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
         if ax is None:
             _, ax = plt.subplots(figsize=(5, 4))
         coords = self.adata.obsm[basis]
         ms = self.result.macrostate_assignment
-        cmap = plt.get_cmap("tab20", ms.max() + 1)
-        ax.scatter(coords[:, 0], coords[:, 1], c=cmap(ms), s=2)
-        for c in self.result.terminal_cells:
-            ax.scatter(coords[c, 0], coords[c, 1], s=200, marker="*",
-                        edgecolor="black", facecolor="yellow",
-                        linewidth=1.2, zorder=10)
+        if which == "all":
+            ms_ids = np.arange(int(ms.max()) + 1)
+        elif which == "terminal":
+            ms_ids = np.asarray(self.result.terminal_macrostates, dtype=int)
+        else:
+            raise ValueError("`which` must be 'terminal' or 'all'.")
+
+        # Build per-macrostate label: cluster name of its representative
+        # cell (the same convention CellRank uses), suffixed with _i
+        # when several macrostates share a cluster.
+        if self.groupby is not None:
+            terminal_cells = list(self.result.terminal_cells)
+            terminal_ms = list(self.result.terminal_macrostates)
+            ms_to_repcell = {int(m): int(c) for m, c
+                             in zip(terminal_ms, terminal_cells)}
+            base_names = []
+            for m in ms_ids:
+                if int(m) in ms_to_repcell:
+                    base_names.append(
+                        str(self.adata.obs[self.groupby].iloc[ms_to_repcell[int(m)]])
+                    )
+                else:
+                    cells = np.where(ms == int(m))[0]
+                    if len(cells):
+                        # vote majority cluster
+                        labels = self.adata.obs[self.groupby].iloc[cells].astype(str)
+                        base_names.append(labels.value_counts().idxmax())
+                    else:
+                        base_names.append(f"M{int(m)}")
+        else:
+            base_names = [f"M{int(m)}" for m in ms_ids]
+
+        from collections import Counter
+        counts = Counter(base_names)
+        seen: dict = {}
+        ms_labels = []
+        for nm in base_names:
+            if counts[nm] > 1:
+                seen[nm] = seen.get(nm, 0) + 1
+                ms_labels.append(f"{nm}_{seen[nm]}")
+            else:
+                ms_labels.append(nm)
+        ms_colors = self._resolve_cluster_colors(base_names)
+
+        # Grey background — every cell not in `ms_ids`.
+        in_set = np.isin(ms, ms_ids)
+        ax.scatter(coords[~in_set, 0], coords[~in_set, 1],
+                    s=background_size, c=background_color,
+                    linewidths=0, edgecolors='none')
+
+        # Each macrostate on top.
+        for m, lbl, col in zip(ms_ids, ms_labels, ms_colors):
+            sel = ms == int(m)
+            if not sel.any():
+                continue
+            ax.scatter(coords[sel, 0], coords[sel, 1],
+                        s=size, c=col, linewidths=0,
+                        edgecolors='none', label=lbl)
+
+        if legend:
+            handles = [
+                Line2D([0], [0], marker='o', linestyle='none',
+                        markerfacecolor=col, markeredgecolor='none',
+                        markersize=8, label=lbl)
+                for lbl, col in zip(ms_labels, ms_colors)
+            ]
+            if legend_loc == "right":
+                ax.legend(handles=handles, loc='center left',
+                           bbox_to_anchor=(1.02, 0.5), frameon=False,
+                           fontsize=9)
+            else:
+                ax.legend(handles=handles, loc=legend_loc,
+                           frameon=False, fontsize=9)
+
         ax.set_xticks([]); ax.set_yticks([])
-        ax.set_title("Macrostates (★ = terminal)")
+        title = ("terminal states" if which == "terminal"
+                  else "all macrostates")
+        ax.set_title(title)
+        for s_ in ax.spines.values():
+            s_.set_visible(False)
         return ax
 
     # ------------------------------------------------------------------ adata

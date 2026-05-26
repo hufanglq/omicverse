@@ -732,6 +732,39 @@ def dynamic_features(
                 stats.loc[valid_idx, "padj"] = padj
     fitted = pd.DataFrame(fitted_records)
     raw = pd.DataFrame(raw_records) if store_raw else None
+
+    # Capture ``adata.uns[f'{key}_colors']`` for each stored raw obs key
+    # so downstream ``ov.pl.dynamic_trends(point_color_by=...)`` can
+    # reuse the scanpy / PseudotimeFate palette instead of falling back
+    # to a generic colormap. Only meaningful for single AnnData input;
+    # for Mapping input we'd need per-dataset uns which most callers
+    # don't have. ``_color_categories`` lists each key's category order
+    # so values map to colours positionally.
+    raw_obs_colors: dict = {}
+    raw_obs_category_order: dict = {}
+    if store_raw and isinstance(data, AnnData):
+        all_keys: list = []
+        if isinstance(raw_obs_keys, str):
+            all_keys = [raw_obs_keys]
+        elif isinstance(raw_obs_keys, Mapping):
+            for v in raw_obs_keys.values():
+                if isinstance(v, str):
+                    all_keys.append(v)
+                elif v is not None:
+                    all_keys.extend(list(v))
+        elif raw_obs_keys is not None:
+            all_keys = list(raw_obs_keys)
+        for k in dict.fromkeys(all_keys):
+            ck = f"{k}_colors"
+            if ck in data.uns and k in data.obs.columns:
+                series = data.obs[k]
+                cats = (list(series.cat.categories)
+                        if hasattr(series, "cat")
+                        else list(series.dropna().astype(str).unique()))
+                cols = list(data.uns[ck])
+                if cols:
+                    raw_obs_colors[k] = [str(c) for c in cols[:len(cats)]]
+                    raw_obs_category_order[k] = [str(c) for c in cats]
     if not include_source_dataset:
         for df in (stats, fitted, raw):
             if df is not None and "source_dataset" in df.columns:
@@ -764,6 +797,8 @@ def dynamic_features(
                 if not isinstance(raw_obs_keys, Mapping)
                 else dict(raw_obs_keys)
             ),
+            "raw_obs_colors": raw_obs_colors,
+            "raw_obs_category_order": raw_obs_category_order,
         },
     )
 
