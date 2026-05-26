@@ -1520,25 +1520,44 @@ class PseudotimeFate:
                 seg_pt_max[child] = seg_pt_max.get(parent, pt.min())
                 seg_pt_min[child] = seg_pt_max[child]
                 continue
-            seg_pt = pt[mask]
-            order = np.argsort(seg_pt)
-            seg_pt = seg_pt[order]
-            seg_feats = features[mask][order] if numeric else features[mask][order]
+            seg_pt_full = pt[mask]
+            order = np.argsort(seg_pt_full)
+            seg_pt_full = seg_pt_full[order]
+            seg_feats_full = features[mask][order]
+
+            # MIRA-style clipping: a child segment starts where the
+            # parent segment ends. Any cells that ended up tagged with a
+            # leaf/internal state but sit before the parent's split time
+            # (a tree-build artifact for very-low-fate-probability cells)
+            # are pushed back into the parent's range so the scaffold
+            # stays clean and the savgol smoothing of post-split fates
+            # isn't dragged by early-time outliers.
+            if parent != child:
+                t_split = seg_pt_max.get(parent, float(seg_pt_full.min()))
+                clip_mask = seg_pt_full >= t_split
+                if clip_mask.sum() >= 3:
+                    seg_pt = seg_pt_full[clip_mask]
+                    seg_feats = seg_feats_full[clip_mask] if numeric else seg_feats_full[clip_mask]
+                else:
+                    seg_pt = seg_pt_full
+                    seg_feats = seg_feats_full
+            else:
+                seg_pt = seg_pt_full
+                seg_feats = seg_feats_full
 
             seg_pt_min[child] = float(seg_pt.min())
             seg_pt_max[child] = float(seg_pt.max())
             cl = float(centerlines[child])
 
-            # Scaffold connector (vertical then horizontal)
+            # Scaffold connector: L-shaped — short vertical at the split,
+            # then horizontal only up to the child segment's start. The
+            # child segment's stream/swarm draws the rest of the line.
             if parent != child:
                 cl_p = float(centerlines[parent])
                 t_split = seg_pt_max.get(parent, seg_pt_min[child])
                 ax.vlines(t_split, ymin=min(cl, cl_p), ymax=max(cl, cl_p),
                           color=scaffold_linecolor, linewidth=scaffold_linewidth)
-                ax.hlines(cl, xmin=t_split, xmax=seg_pt_max[child],
-                          color=scaffold_linecolor, linewidth=scaffold_linewidth)
-            else:
-                ax.hlines(cl, xmin=seg_pt_min[child], xmax=seg_pt_max[child],
+                ax.hlines(cl, xmin=t_split, xmax=seg_pt_min[child],
                           color=scaffold_linecolor, linewidth=scaffold_linewidth)
 
             # ---- segment rendering ----
