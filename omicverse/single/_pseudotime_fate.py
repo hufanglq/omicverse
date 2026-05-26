@@ -871,9 +871,25 @@ class PseudotimeFate:
         """
         if self.result is None:
             raise RuntimeError("Call fit() first")
-        P = self.result.transition_matrix.tocsr()
-        n = P.shape[0]
+        n = self.adata.n_obs
         pt = self._pt
+        # MIRA's backward direction rebuilds the entire transport map
+        # with reversed pseudotime (prune_edges + adaptive affinity +
+        # row-normalise from scratch) instead of just transposing the
+        # forward chain. The two differ because the pt-biased kNN graph
+        # is not reversible — taking P^T of the forward map is not the
+        # same Markov chain a user would get with pt = max - pt.
+        if direction == "backward":
+            pt_rev = float(pt.max()) - pt
+            biased = (
+                _hard_threshold_bias(self._knn, pt_rev, self.frac_to_keep)
+                if self.scheme == "hard"
+                else _soft_threshold_bias(self._knn, pt_rev, self.soft_b, self.soft_nu)
+            )
+            affinity = _adaptive_affinity(biased, self._dist, self.ka)
+            P = _row_normalise(affinity)
+        else:
+            P = self.result.transition_matrix.tocsr()
         # MIRA `start_lineage='X'` semantics — top ``num_start_cells`` cells
         # by branch probability for that lineage.
         if start_lineage is not None:
@@ -908,9 +924,11 @@ class PseudotimeFate:
             raise ValueError("start set is empty")
         p = p / p.sum()
 
-        # Backward = same algorithm but with the time-reversed map (P
-        # rather than P^T). Implemented exactly as MIRA does.
-        operator = P.T.tocsr() if direction == "forward" else P.tocsr()
+        # Diffusion via ``P^T`` for both directions — for the backward
+        # case the *map itself* was rebuilt with pt = max - pt above,
+        # so the same ``P^T`` propagator that diffuses forward through
+        # the forward map diffuses backward through the backward map.
+        operator = P.T.tocsr()
 
         # Allocate full trace tensor and propagate.
         if sqrt_time:
