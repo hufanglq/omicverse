@@ -932,7 +932,23 @@ class PseudotimeFate:
         elif isinstance(start_cells, int):
             starts = np.array([start_cells], dtype=np.int64)
         else:
-            starts = np.asarray(start_cells, dtype=np.int64)
+            # MIRA accepts either integer indices, barcode strings, or a
+            # boolean mask the size of adata. Coerce all three to indices.
+            sc_arr = np.asarray(start_cells)
+            if sc_arr.dtype == bool:
+                if sc_arr.shape[0] != n:
+                    raise ValueError(
+                        f"boolean start_cells mask has length {sc_arr.shape[0]}, "
+                        f"expected {n}")
+                starts = np.where(sc_arr)[0].astype(np.int64)
+            elif sc_arr.dtype.kind == "U":
+                names_map = {n_: i for i, n_ in enumerate(self.adata.obs_names)}
+                missing = [s for s in sc_arr if s not in names_map]
+                if missing:
+                    raise KeyError(f"barcodes not in adata: {missing[:5]}")
+                starts = np.array([names_map[s] for s in sc_arr], dtype=np.int64)
+            else:
+                starts = sc_arr.astype(np.int64)
         if direction not in ("forward", "backward"):
             raise ValueError(f"direction must be 'forward' or 'backward', got {direction!r}")
 
@@ -950,66 +966,68 @@ class PseudotimeFate:
         # the forward map diffuses backward through the backward map.
         operator = P.T.tocsr()
 
-        # Allocate full trace tensor and propagate.
-        if sqrt_time:
-            frames = np.unique(np.square(
-                np.linspace(0, np.sqrt(num_steps - 1), num_steps)
-            ).astype(int))
-            states = np.empty((len(frames), n), dtype=np.float64)
-            cur = p
-            states[0] = cur
-            keep_idx = 1
-            for t in range(1, frames.max() + 1):
-                cur = operator @ cur
-                if t in frames:
-                    states[keep_idx] = cur
-                    keep_idx += 1
-            states = states[:keep_idx]
-        else:
-            states = np.empty((num_steps, n), dtype=np.float64)
-            states[0] = p
-            for t in range(1, num_steps):
-                states[t] = operator @ states[t - 1]
+        # Compute the FULL ``backtrace`` of shape (num_steps, n_cells)
+        # exactly as MIRA's ``_trace``:
+        #   for i in range(num_steps):
+        #       current = operator @ current
+        #       steps.append(current)
+        # i.e. ``backtrace[k]`` is the state AFTER ``k+1`` applications,
+        # NOT the raw initial distribution.
+        states = np.empty((num_steps, n), dtype=np.float64)
+        cur = p
+        for k in range(num_steps):
+            cur = operator @ cur
+            states[k] = cur
 
+        # log_prob comes BEFORE frame subsampling (MIRA order).
         if log_prob:
-            states = np.log(states + 1e-12)
+            states = np.log(states + 1e-4)
 
-        # ``steps_per_frame`` matches MIRA: subsample the trace before
-        # rendering / saving so the animation has ~num_steps/steps_per_frame
-        # frames. Keeps the returned `states` itself faithful to the full
-        # diffusion.
-        if save_name or num_preview_frames > 0:
-            frame_idx = np.arange(0, len(states), max(1, steps_per_frame))
-            sub = states[frame_idx]
+        # MIRA's frame_slices selection.
+        if sqrt_time:
+            frame_slices = np.square(
+                np.linspace(0, np.sqrt(num_steps - 1), num_steps // steps_per_frame)
+            ).astype(int)
         else:
-            sub = None
+            frame_slices = np.arange(0, num_steps, steps_per_frame)
+        sub = states[frame_slices, :]
+        num_frames = len(sub)
 
-        # Preview a handful of frames at chosen indices — useful in
-        # notebooks before committing to the full animation render.
-        if num_preview_frames > 0 and sub is not None:
+        # MIRA's preview-frames selection:
+        #   test_frames = [1] + range(1, num_partitions)*preview_interval
+        #                     + [num_frames - 1]
+        # so num_preview_frames=4 on num_frames=65 → Frame 1, 21, 42, 64.
+        if num_preview_frames > 0 and num_frames > 1:
             import matplotlib.pyplot as plt
-            picks = np.linspace(0, len(sub) - 1, num_preview_frames).astype(int)
+            num_partitions = max(1, num_preview_frames - 1)
+            preview_interval = max(1, num_frames // num_partitions)
+            test_frames = ([1]
+                            + list(np.arange(1, num_partitions) * preview_interval)
+                            + [num_frames - 1])
+            test_frames = sorted(set(int(f) for f in test_frames if 0 <= f < num_frames))
+            coords = self.adata.obsm[basis]
             fig, axes = plt.subplots(
-                1, num_preview_frames,
-                figsize=(figsize[0] * num_preview_frames / 3, figsize[1] / 2),
+                1, len(test_frames),
+                figsize=(figsize[0] * len(test_frames) / 3, figsize[1] / 2),
                 squeeze=False,
             )
-            for ax, k in zip(axes.flat, picks):
-                self.plot_trace_density(states=sub[k:k + 1], ax=ax,
-                                          basis=basis, cmap=palette,
-                                          vmax_quantile=vmax_quantile,
-                                          frame=0, time_average=False)
-                ax.set_title(f"frame {frame_idx[k]}")
-            plt.show()
+            for ax, k in zip(axes.flat, test_frames):
+                probs = sub[k]
+                vmax = float(np.quantile(probs, vmax_quantile))
+                order = probs.argsort()
+                ax.scatter(coords[order, 0], coords[order, 1],
+                            c=probs[order], cmap=palette, s=2,
+                            vmin=probs.min(), vmax=max(vmax, probs.min() + 1e-12))
+                ax.set_title(f"Frame {k}")
+                ax.set_xticks([]); ax.set_yticks([])
+            plt.tight_layout(); plt.show()
 
         if save_name:
-            anim = self.plot_trace_animation(
+            self.plot_trace_animation(
                 states=sub, basis=basis, figsize=figsize, cmap=palette,
-                fps=fps, num_frames=len(sub), save_path=save_name,
+                fps=fps, num_frames=num_frames, save_path=save_name,
                 vmax_quantile=vmax_quantile,
             )
-            import matplotlib.pyplot as plt
-            plt.close(anim._fig)  # the PillowWriter has already written the file
 
         return states
 
@@ -1085,13 +1103,13 @@ class PseudotimeFate:
         frame_idx = np.linspace(0, len(states) - 1, num_frames).astype(int)
         coords = self.adata.obsm[basis]
         fig, ax = plt.subplots(figsize=figsize)
-        ax.scatter(coords[:, 0], coords[:, 1], c="lightgrey", s=2, zorder=0)
         density0 = states[frame_idx[0]]
         order = density0.argsort()
+        vmin0 = float(density0.min())
         vmax0 = float(np.quantile(density0, vmax_quantile))
         scat = ax.scatter(coords[order, 0], coords[order, 1],
                            c=density0[order], cmap=cmap, s=4,
-                           vmin=0.0, vmax=max(vmax0, 1e-12), zorder=1)
+                           vmin=vmin0, vmax=max(vmax0, vmin0 + 1e-12))
         ax.set_xticks([]); ax.set_yticks([])
 
         def update(i):
@@ -1099,9 +1117,13 @@ class PseudotimeFate:
             order_i = d.argsort()
             scat.set_offsets(coords[order_i])
             scat.set_array(d[order_i])
+            vmin_i = float(d.min())
             vmax_i = float(np.quantile(d, vmax_quantile))
-            scat.set_clim(0, max(vmax_i, 1e-12))
-            ax.set_title(f"Diffusion trace — frame {frame_idx[i]}")
+            # Per-frame autoscale — required so log_prob traces (which
+            # are negative) actually render, and so the colormap tracks
+            # the diffusion's growing/shrinking dynamic range.
+            scat.set_clim(vmin_i, max(vmax_i, vmin_i + 1e-12))
+            ax.set_title(f"Frame {frame_idx[i]}")
             return (scat,)
 
         anim = FuncAnimation(fig, update, frames=num_frames,
