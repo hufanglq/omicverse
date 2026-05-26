@@ -57,12 +57,13 @@ def _ensure_stpath_repo(cache_dir: Path) -> Path:
     return repo_dir
 
 
-def _download_stpath_weight(cache_dir: Path) -> Path:
+def _download_stpath_weight(cache_dir: Path, token: str | None = None) -> Path:
     from huggingface_hub import hf_hub_download
     path = hf_hub_download(
         repo_id=STPATH_HF_REPO,
         filename=STPATH_WEIGHT_FILE,
         cache_dir=str(cache_dir / "hf"),
+        token=token,
     )
     return Path(path)
 
@@ -86,6 +87,9 @@ def predict_stpath(
     tech: str | None = "Visium",
     feature_key: str | None = None,
     fm_backbone: str = "gigapath",
+    weight_path: str | Path | None = None,
+    fm_weight_path: str | Path | None = None,
+    hf_token: str | None = None,
     device: str | None = None,
     cache_dir: str | Path | None = None,
 ) -> "AnnData":
@@ -110,7 +114,8 @@ def predict_stpath(
     feat_table_key = f"{feature_key or fm_backbone}_{tile_key}"
     if feat_table_key not in wsi.tables:
         from ._embed import embed
-        embed(wsi, model=fm_backbone, tile_key=tile_key, key_added=fm_backbone, device=device)
+        embed(wsi, model=fm_backbone, tile_key=tile_key, key_added=fm_backbone,
+              model_path=fm_weight_path, token=hf_token, device=device)
         feat_table_key = f"{fm_backbone}_{tile_key}"
     feat_adata = wsi.tables[feat_table_key]
     img_features = np.asarray(feat_adata.X, dtype=np.float32)
@@ -133,7 +138,10 @@ def predict_stpath(
     _ensure_stpath_repo(cache)
     from stpath.app.pipeline.inference import STPathInference
 
-    weight_path = _download_stpath_weight(cache)
+    if weight_path is None:
+        weight_path = _download_stpath_weight(cache, token=hf_token)
+    else:
+        weight_path = Path(weight_path)
     vocab_path = _gene_vocab(cache)
     dev = device or ("cuda:0" if torch.cuda.is_available() else "cpu")
     agent = STPathInference(

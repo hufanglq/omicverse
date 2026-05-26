@@ -31,12 +31,15 @@ def _ensure_features(
     fm_backbone: str,
     tile_key: str,
     device: str | None,
+    fm_weight_path: str | None = None,
+    token: str | None = None,
 ):
     table_key = f"{feature_key or fm_backbone}_{tile_key}"
     if table_key in wsi.tables:
         return wsi.tables[table_key], (feature_key or fm_backbone)
     from ._embed import embed
-    embed(wsi, model=fm_backbone, tile_key=tile_key, key_added=fm_backbone, device=device)
+    embed(wsi, model=fm_backbone, tile_key=tile_key, key_added=fm_backbone,
+          model_path=fm_weight_path, token=token, device=device)
     return wsi.tables[f"{fm_backbone}_{tile_key}"], fm_backbone
 
 
@@ -48,6 +51,8 @@ def _spot_features_from_reference(
     tile_key: str,
     device: str | None,
     feature_key: str | None,
+    fm_weight_path: str | None = None,
+    token: str | None = None,
 ):
     """Tile the WSI on the reference spot centroids, then embed.
 
@@ -117,7 +122,8 @@ def _spot_features_from_reference(
 
     from ._embed import embed
     ref_key = f"{fm_backbone}__ref"
-    embed(wsi, model=fm_backbone, tile_key=spot_key, key_added=ref_key, device=device)
+    embed(wsi, model=fm_backbone, tile_key=spot_key, key_added=ref_key,
+          model_path=fm_weight_path, token=token, device=device)
     table = wsi.tables[f"{ref_key}_{spot_key}"]
     try:
         table.write_h5ad(cache_path)
@@ -135,6 +141,8 @@ def predict_hest_fm(
     genes: Sequence[str] | None = None,
     feature_key: str | None = None,
     fm_backbone: str = "ctranspath",
+    fm_weight_path: str | None = None,
+    hf_token: str | None = None,
     n_components: int | None = 256,
     alpha: float = 1.0,
     head: str = "ridge",
@@ -162,10 +170,12 @@ def predict_hest_fm(
         reference, wsi,
         fm_backbone=fm_backbone, tile_key=tile_key,
         device=device, feature_key=feature_key,
+        fm_weight_path=fm_weight_path, token=hf_token,
     )
     query_emb, eff_key = _ensure_features(
         wsi, feature_key=feature_key, fm_backbone=fm_backbone,
         tile_key=tile_key, device=device,
+        fm_weight_path=fm_weight_path, token=hf_token,
     )
 
     X_ref = np.asarray(ref_emb.X, dtype=np.float32)

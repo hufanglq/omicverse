@@ -48,6 +48,7 @@ def embed(
     *,
     tile_key: str = "tiles",
     key_added: str | None = None,
+    model_path: str | None = None,
     batch_size: int = 32,
     num_workers: int = 0,
     device: str | None = None,
@@ -67,6 +68,10 @@ def embed(
     ----------
     model
         Backbone name; one of :func:`available_backbones`.
+    model_path
+        Path to a pre-staged backbone weight file (e.g. CTransPath
+        ``.pth``, GigaPath ``pytorch_model.bin``). Forwarded to LazySlide
+        as ``model_path`` to skip the HuggingFace download.
     token
         HuggingFace token for gated models (UNI2/CONCH/Virchow2/GigaPath).
         Falls back to ``HUGGING_FACE_HUB_TOKEN`` env var or the cached
@@ -103,6 +108,7 @@ def embed(
     zs.tl.feature_extraction(
         wsi,
         model=model,
+        model_path=model_path,
         tile_key=tile_key,
         key_added=lazyslide_key,
         batch_size=batch_size,

@@ -68,32 +68,48 @@ def _default_cache_dir() -> Path:
     )
 
 
-def _ensure_hipt_checkpoints(istar_dir: Path, cache_dir: Path | None = None) -> None:
+def _ensure_hipt_checkpoints(
+    istar_dir: Path,
+    cache_dir: Path | None = None,
+    *,
+    hipt256_path: str | Path | None = None,
+    hipt4k_path: str | Path | None = None,
+) -> None:
     """Make sure HIPT checkpoints exist next to iStar.
 
-    Looks for ``vit256_small_dino.pth`` / ``vit4k_xs_dino.pth`` in (1)
-    ``cache_dir/istar_checkpoints`` and (2) the iStar workdir; downloads
-    them from the mahmoodlab/HIPT LFS endpoint when missing. Symlinks the
-    final files into ``istar_dir/checkpoints`` so the vendored scripts
-    can find them by their hard-coded relative path.
+    Looks for ``vit256_small_dino.pth`` / ``vit4k_xs_dino.pth`` in:
+    (1) the explicit ``hipt256_path`` / ``hipt4k_path`` overrides;
+    (2) ``cache_dir/istar_checkpoints``;
+    (3) downloads them from the mahmoodlab/HIPT LFS endpoint when missing.
+
+    Symlinks the final files into ``istar_dir/checkpoints/`` so the
+    vendored scripts can find them by their hard-coded relative path.
     """
     ck = istar_dir / "checkpoints"
     ck.mkdir(exist_ok=True)
     user_cache = (cache_dir or _default_cache_dir()) / "istar_checkpoints"
     user_cache.mkdir(parents=True, exist_ok=True)
-    targets = {
+    overrides = {
+        "vit256_small_dino.pth": hipt256_path,
+        "vit4k_xs_dino.pth": hipt4k_path,
+    }
+    sources = {
         "vit256_small_dino.pth": ISTAR_HIPT_SRC_256,
         "vit4k_xs_dino.pth": ISTAR_HIPT_SRC_4K,
     }
     import urllib.request
-    for name, url in targets.items():
-        cached = user_cache / name
-        if not cached.exists() or cached.stat().st_size < 1_000_000:
-            urllib.request.urlretrieve(url, cached)
+    for name, url in sources.items():
+        if overrides[name] is not None:
+            resolved = Path(overrides[name]).resolve()
+        else:
+            cached = user_cache / name
+            if not cached.exists() or cached.stat().st_size < 1_000_000:
+                urllib.request.urlretrieve(url, cached)
+            resolved = cached.resolve()
         dst = ck / name
         if dst.is_symlink() or dst.exists():
             dst.unlink()
-        dst.symlink_to(cached.resolve())
+        dst.symlink_to(resolved)
 
 
 def _stage_inputs(
@@ -158,6 +174,8 @@ def super_resolve_istar(
     epochs: int = 400,
     device: str | None = None,
     cache_dir: str | Path | None = None,
+    hipt256_path: str | Path | None = None,
+    hipt4k_path: str | Path | None = None,
     keep_workdir: bool = True,
 ) -> "AnnData":
     """Run iStar end-to-end on a paired Visium + H&E sample.
@@ -221,7 +239,10 @@ def super_resolve_istar(
         return out
 
     istar_dir = _vendored_istar_dir()
-    _ensure_hipt_checkpoints(istar_dir, cache_dir=cache)
+    _ensure_hipt_checkpoints(
+        istar_dir, cache_dir=cache,
+        hipt256_path=hipt256_path, hipt4k_path=hipt4k_path,
+    )
     _stage_inputs(
         adata, he_image, work_dir,
         spot_diameter_fullres=spot_diameter,

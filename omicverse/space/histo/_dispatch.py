@@ -24,6 +24,10 @@ def predict_expression(
     reference: "AnnData | None" = None,
     feature_key: str | None = None,
     fm_backbone: str | None = None,
+    weight_path: str | None = None,
+    fm_weight_path: str | None = None,
+    cache_dir: str | None = None,
+    hf_token: str | None = None,
     device: str | None = None,
     **kwargs,
 ) -> "AnnData":
@@ -55,6 +59,26 @@ def predict_expression(
         Pathology FM used to extract patch features when ``feature_key`` is
         not already present. Defaults to ``'gigapath'`` (STPath/STFlow) or
         ``'ctranspath'`` (HEST-FM).
+    weight_path
+        Path to an already-downloaded **predictor** checkpoint, bypassing the
+        HuggingFace download. STPath: a local ``stfm.pth`` file. STFlow:
+        ignored (trained per-slide). HEST-FM: ignored (linear head fit per
+        slide).
+    fm_weight_path
+        Path to an already-downloaded **patch-encoder** checkpoint
+        (CTransPath / GigaPath / UNI / …). Forwarded to
+        :func:`lazyslide.tl.feature_extraction` as ``model_path``. Use this
+        when the slide-host doesn't have HuggingFace network access or when
+        you've pre-staged the encoder weights.
+    cache_dir
+        Override the default ``$OV_HISTO_CACHE``
+        (``~/.cache/omicverse/histo``) where this module stores
+        auto-cloned repos (STPath, STFlow), downloaded predictor
+        weights, and on-disk feature caches.
+    hf_token
+        Explicit HuggingFace access token. Falls back to
+        ``$HUGGING_FACE_HUB_TOKEN`` then to
+        ``~/.cache/huggingface/token``.
     """
     if method == "stpath":
         from ._stpath import predict_stpath
@@ -67,6 +91,10 @@ def predict_expression(
             tech=tech,
             feature_key=feature_key,
             fm_backbone=fm_backbone or "gigapath",
+            weight_path=weight_path,
+            fm_weight_path=fm_weight_path,
+            cache_dir=cache_dir,
+            hf_token=hf_token,
             device=device,
             **kwargs,
         )
@@ -82,6 +110,9 @@ def predict_expression(
             reference=reference,
             feature_key=feature_key,
             fm_backbone=fm_backbone or "gigapath",
+            fm_weight_path=fm_weight_path,
+            cache_dir=cache_dir,
+            hf_token=hf_token,
             device=device,
             **kwargs,
         )
@@ -100,6 +131,8 @@ def predict_expression(
             genes=genes,
             feature_key=feature_key,
             fm_backbone=fm_backbone or "ctranspath",
+            fm_weight_path=fm_weight_path,
+            hf_token=hf_token,
             device=device,
             **kwargs,
         )
@@ -133,15 +166,25 @@ def super_resolve(
     genes: Sequence[str] | None = None,
     device: str | None = None,
     cache_dir: str | None = None,
+    hipt256_path: str | None = None,
+    hipt4k_path: str | None = None,
     **kwargs,
 ) -> "AnnData":
     """Super-resolve a paired (Visium, H&E) sample to near-single-cell tiles.
+
+    .. note::
+       iStar is **not** an H&E-only model. The per-slide regression head
+       is trained on the paired Visium counts you pass as ``adata``;
+       super-resolution then extrapolates that fit to sub-spot pixels on
+       the same slide. For H&E-only prediction (no Visium reference)
+       reach for :func:`predict_expression` with ``method='stpath'``.
 
     Parameters
     ----------
     adata
         Visium :class:`AnnData` carrying spot counts and
-        ``obsm['spatial']``.
+        ``obsm['spatial']`` — the **required** paired reference iStar
+        trains its head on.
     wsi
         Optional :class:`wsidata.WSIData` wrapping the source H&E. If absent,
         ``he_image`` must point to the slide and the wrapper opens it.
@@ -152,6 +195,15 @@ def super_resolve(
     factor
         Super-resolution factor; ``8`` gives ~8 µm sub-spot tiles for
         Visium (55 µm spots).
+    cache_dir
+        Override the default ``$OV_HISTO_CACHE``
+        (``~/.cache/omicverse/histo``) where HIPT checkpoints and per-
+        slide iStar working directories live.
+    hipt256_path, hipt4k_path
+        Paths to already-downloaded HIPT checkpoints, bypassing the
+        mahmoodlab/HIPT LFS download. Use this when the host doesn't
+        have GitHub network access or when you've pre-staged the
+        weights.
     """
     if method == "istar":
         from ._istar import super_resolve_istar
@@ -163,6 +215,8 @@ def super_resolve(
             genes=genes,
             device=device,
             cache_dir=cache_dir,
+            hipt256_path=hipt256_path,
+            hipt4k_path=hipt4k_path,
             **kwargs,
         )
     raise ValueError(f"Unknown super-resolution method={method!r}.")

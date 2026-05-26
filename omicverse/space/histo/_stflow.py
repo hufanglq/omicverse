@@ -99,6 +99,8 @@ def predict_stflow(
     reference: "AnnData | None" = None,
     feature_key: str | None = None,
     fm_backbone: str = "gigapath",
+    fm_weight_path: str | None = None,
+    hf_token: str | None = None,
     n_epochs: int = 200,
     n_layers: int = 4,
     n_neighbors: int = 8,
@@ -138,7 +140,8 @@ def predict_stflow(
     feat_table_key = f"{feature_key or fm_backbone}_{tile_key}"
     if feat_table_key not in wsi.tables:
         from ._embed import embed
-        embed(wsi, model=fm_backbone, tile_key=tile_key, key_added=fm_backbone, device=device)
+        embed(wsi, model=fm_backbone, tile_key=tile_key, key_added=fm_backbone,
+              model_path=fm_weight_path, token=hf_token, device=device)
         feat_table_key = f"{fm_backbone}_{tile_key}"
     q_feat = wsi.tables[feat_table_key]
     img_features = np.asarray(q_feat.X, dtype=np.float32)
