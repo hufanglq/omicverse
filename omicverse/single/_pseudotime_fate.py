@@ -837,6 +837,8 @@ class PseudotimeFate:
     def trace_differentiation(
         self,
         start_cells: list | int | None = None,
+        start_lineage: str | None = None,
+        num_start_cells: int = 50,
         n_steps: int = 2000,
         direction: Literal["forward", "backward"] = "forward",
         log_prob: bool = False,
@@ -872,20 +874,38 @@ class PseudotimeFate:
         P = self.result.transition_matrix.tocsr()
         n = P.shape[0]
         pt = self._pt
-        if start_cells is None:
-            start_cells = [int(np.argmin(pt) if direction == "forward"
-                                else np.argmax(pt))]
+        # MIRA `start_lineage='X'` semantics — top ``num_start_cells`` cells
+        # by branch probability for that lineage.
+        if start_lineage is not None:
+            if self.result is None or self.result.fate_probabilities is None:
+                raise RuntimeError("fit() with compute_fates=True required for start_lineage")
+            names = [str(self.adata.obs[self.groupby].iloc[c])
+                     if self.groupby else f"L{j}"
+                     for j, c in enumerate(self.result.terminal_cells)]
+            if start_lineage not in names:
+                raise KeyError(
+                    f"start_lineage {start_lineage!r} not in {names}"
+                )
+            j = names.index(start_lineage)
+            probs = self.result.fate_probabilities[:, j]
+            order = np.argsort(-probs)
+            starts = order[: int(num_start_cells)].astype(np.int64)
+        elif start_cells is None:
+            starts = np.array([int(np.argmin(pt) if direction == "forward"
+                                    else np.argmax(pt))], dtype=np.int64)
         elif isinstance(start_cells, int):
-            start_cells = [start_cells]
-        starts = np.asarray(start_cells, dtype=np.int64)
+            starts = np.array([start_cells], dtype=np.int64)
+        else:
+            starts = np.asarray(start_cells, dtype=np.int64)
         if direction not in ("forward", "backward"):
             raise ValueError(f"direction must be 'forward' or 'backward', got {direction!r}")
 
-        # Initial probability distribution.
+        # Initial probability distribution — uniform over the start set
+        # (matches MIRA's `start_cells/start_cells.sum()` line).
         p = np.zeros(n, dtype=np.float64)
         p[starts] = 1.0
         if p.sum() <= 0:
-            raise ValueError("start_cells set is empty")
+            raise ValueError("start set is empty")
         p = p / p.sum()
 
         # Backward = same algorithm but with the time-reversed map (P
@@ -1014,76 +1034,363 @@ class PseudotimeFate:
             anim.save(save_path, writer=PillowWriter(fps=fps))
         return anim
 
+    # ============================================================ tree
+    def compute_tree_structure(self, threshold: float = 0.1) -> dict:
+        """Port of MIRA ``mira.time.get_tree_structure`` (mira/pseudotime/
+        pseudotime.py:get_tree_structure).
+
+        Iteratively merges the two lineages whose **branch time** is the
+        latest into a parent supercluster, where the branch time is the
+        first pseudotime at which one lineage's log-fold-change versus
+        the other exceeds ``threshold``. Each merge writes a
+        ``tree_state`` label onto every cell whose pseudotime is past
+        that branch and lies in one of the two merged lineages.
+
+        Writes ``adata.obs['tree_states']``, ``adata.uns['tree_state_names']``
+        and ``adata.uns['connectivities_tree']`` exactly as MIRA does
+        (so :func:`mira.pl.plot_stream` would accept them too).
+        """
+        if self.result is None or self.result.fate_probabilities is None:
+            raise RuntimeError("Call fit() first (with compute_fates=True)")
+        import networkx as nx
+        F = self.result.fate_probabilities.astype(np.float64)
+        names_init = [str(self.adata.obs[self.groupby].iloc[c])
+                      if self.groupby else f"L{j}"
+                      for j, c in enumerate(self.result.terminal_cells)]
+        pt = self._pt
+        # Start cell = the global min-pseudotime cell (MIRA's convention).
+        start_cell = int(np.argmin(pt))
+
+        def _prob_fc(branch_probs):
+            ep = 0.01
+            return (np.log2(branch_probs + ep)
+                    - np.log2(branch_probs[start_cell:start_cell + 1] + ep))
+
+        def _branch_time(i, j, pt_, fc_, th):
+            mask = (fc_[:, i] > 0) | (fc_[:, j] > 0)
+            div = fc_[mask, i] - fc_[mask, j]
+            s1 = pt_[mask][div > th]
+            s2 = pt_[mask][div < -th]
+            if len(s1) == 0 and len(s2) == 0:
+                return pt_.max()
+            if len(s1) == 0:
+                return float(s2.min())
+            if len(s2) == 0:
+                return float(s1.min())
+            return float(max(s1.min(), s2.min()))
+
+        def _merge_rows(x, c1, c2):
+            return np.hstack([(x[:, c1] + x[:, c2])[:, None],
+                              x[:, ~np.isin(np.arange(x.shape[-1]),
+                                            [c1, c2])]])
+
+        branch_probs = F.copy()
+        lineages = (_prob_fc(branch_probs) >= 0)
+        names = list(names_init)
+        n_cells, n_lin = branch_probs.shape
+        tree_states = np.zeros(n_cells, dtype=np.int64)
+        tree = nx.DiGraph()
+        states_assigned = 1
+
+        while n_lin > 1:
+            fc = _prob_fc(branch_probs)
+            split = np.full((n_lin, n_lin), -1.0)
+            for i in range(n_lin - 1):
+                for j in range(i + 1, n_lin):
+                    split[i, j] = _branch_time(i, j, pt, fc, threshold)
+            t_branch = float(split.max())
+            i, j = np.where(split == t_branch)
+            m1, m2 = int(i[0]), int(j[0])
+            parent = (names[m1], names[m2])
+
+            assign = (pt >= t_branch) & (lineages[:, m1] | lineages[:, m2])
+            assign = assign & ~tree_states.astype(bool)
+            div = fc[assign, m1] - fc[assign, m2]
+            idx_assign = np.where(assign)[0]
+
+            tree_states[idx_assign[div > 0]] = states_assigned
+            tree.add_edge(parent, names[m1], branch_time=t_branch,
+                           state=states_assigned)
+            states_assigned += 1
+            tree_states[idx_assign[div < 0]] = states_assigned
+            tree.add_edge(parent, names[m2], branch_time=t_branch,
+                           state=states_assigned)
+            states_assigned += 1
+
+            lineages = _merge_rows(lineages.astype(int), m1, m2).astype(bool)
+            branch_probs = _merge_rows(branch_probs, m1, m2)
+            names = [parent] + [n for k, n in enumerate(names) if k not in (m1, m2)]
+            n_lin = branch_probs.shape[1]
+
+        tree.add_edge('Root', names[0], branch_time=-1.0, state=0)
+
+        def _leaves(node):
+            if isinstance(node, tuple):
+                return [*_leaves(node[0]), *_leaves(node[1])]
+            return [node]
+
+        def _node_name(node):
+            return node if node == 'Root' else ', '.join(sorted(set(_leaves(node))))
+
+        state_names = {e[2]['state']: _node_name(e[1]) for e in tree.edges(data=True)}
+        node_list = list(tree.nodes)
+        adj = nx.to_numpy_array(tree, nodelist=node_list, weight='branch_time')
+
+        tree_state_names = [_node_name(n) for n in node_list]
+        tree_state_labels = [state_names[s] for s in tree_states]
+
+        prefix = self.pseudotime_key.replace('_pseudotime', '')
+        self.adata.obs[f'{prefix}_tree_states'] = pd.Categorical(tree_state_labels)
+        self.adata.uns[f'{prefix}_tree_state_names'] = tree_state_names
+        self.adata.uns[f'{prefix}_connectivities_tree'] = adj
+        self._tree_state_names = tree_state_names
+        self._tree_adj = adj
+        return {
+            'tree_states': tree_state_labels,
+            'tree_state_names': tree_state_names,
+            'connectivities_tree': adj,
+        }
+
     # ============================================================ streamplot
+    def _dendrogram_levels(self, tree_adj: np.ndarray) -> np.ndarray:
+        """Vertical layout of tree nodes — equivalent to MIRA's
+        ``get_dendogram_levels``. Internal nodes' levels are the
+        average of their children's levels; leaves are spaced evenly."""
+        import networkx as nx
+        G = nx.from_numpy_array(tree_adj, create_using=nx.DiGraph)
+        root = next(n for n, d in G.in_degree() if d == 0)
+        leaves = [n for n in G.nodes if G.out_degree(n) == 0]
+        positions = {leaf: i for i, leaf in enumerate(leaves)}
+        order = list(nx.topological_sort(G))[::-1]
+        for n in order:
+            children = list(G.successors(n))
+            if not children:
+                continue
+            positions[n] = float(np.mean([positions[c] for c in children]))
+        max_ = max(positions.values()) or 1.0
+        for k in positions:
+            positions[k] = positions[k] / max_
+        # Return as array indexed by node id (same order as adjacency).
+        return np.array([positions[k] for k in G.nodes])
+
     def plot_stream(
         self,
-        feature: str | None = None,
-        n_bins: int = 80,
-        max_bar_height: float = 0.6,
-        smooth_window: int = 7,
-        palette: list | None = None,
-        figsize=(9, 5),
-        ax=None,
+        data,                                                # str | list[str]
+        *,
+        style: Literal['stream', 'swarm'] = 'stream',
         log_pseudotime: bool = False,
+        max_bar_height: float = 0.6,
+        window_size: int = 101,
+        clip: float | None = 3.0,
+        scale_features: bool = False,
+        split: bool = False,
+        palette: str | list = 'Set3',
+        size: float = 5,
+        max_swarm_density: float = 100,
+        title: str | None = None,
+        figsize=(10, 5),
+        plots_per_row: int = 4,
+        scaffold_linecolor: str = 'lightgrey',
+        scaffold_linewidth: float = 1.0,
+        linecolor: str = 'black',
+        linewidth: float | None = None,
+        ax=None,
     ):
-        """MIRA ``mira.pl.plot_stream``-style streamgraph: one
-        horizontal stripe per lineage, filled with cell density (or
-        smoothed feature value) along pseudotime.
+        """Port of ``mira.pl.plot_stream`` (mira/plots/streamplot.py).
 
-        Unlike ``ov.pl.branch_streamplot`` (which renders all lineages
-        on a shared baseline as a stacked density), this places each
-        lineage on its own y-offset and supports an optional feature
-        overlay (e.g. a marker gene). Width within a stripe is the
-        Gaussian-smoothed sum of fate probability × feature value in
-        each pseudotime bin.
+        Renders the lineage tree as a scaffold of horizontal segments
+        (one per ``tree_state``), then for each segment plots
+        feature(s) along pseudotime as either:
+
+        * ``style='stream'`` — savgol-smoothed, ``cumsum``-stacked
+          filled area; multiple features stack on top of one another
+          inside each segment.
+        * ``style='swarm'`` — categorical feature rendered as a
+          density-capped swarm (one dot per cell, ``y`` jittered
+          inside the segment, colour by feature value).
+
+        Accepts the same shape of API call as MIRA::
+
+            fate.plot_stream(data='true_cell', style='swarm', palette='Set3')
+            fate.plot_stream(data=['LGR5', 'LEF1', 'DSG4'], style='stream',
+                              clip=3, window_size=301, scale_features=True,
+                              split=True)
         """
         import matplotlib.pyplot as plt
-        from scipy.ndimage import gaussian_filter1d
-        if self.result is None or self.result.fate_probabilities is None:
+        from scipy.signal import savgol_filter
+        if self.result is None:
             raise RuntimeError("Call fit() first")
-        F = self.result.fate_probabilities
-        K = F.shape[1]
-        if ax is None:
-            _, ax = plt.subplots(figsize=figsize)
-        names = [str(self.adata.obs[self.groupby].iloc[c])
-                 if self.groupby else f"L{j}"
-                 for j, c in enumerate(self.result.terminal_cells)]
+        prefix = self.pseudotime_key.replace('_pseudotime', '')
+        if f'{prefix}_tree_states' not in self.adata.obs.columns:
+            self.compute_tree_structure()
+
+        # Resolve features
+        if isinstance(data, str):
+            data_list = [data]
+        else:
+            data_list = list(data)
+
+        # Feature matrix
+        cols = []
+        for name in data_list:
+            v = np.asarray(self.adata.obs_vector(name))
+            cols.append(v[:, None])
+        features = np.hstack(cols)
+        numeric = np.issubdtype(features.dtype, np.number)
+        if not numeric and style != 'swarm':
+            raise ValueError("Non-numeric features must be plotted with style='swarm'")
+
         pt = self._pt.copy()
         if log_pseudotime:
             pt = np.log1p(pt - pt.min())
-        bins = np.linspace(pt.min(), pt.max(), n_bins + 1)
-        centers = 0.5 * (bins[:-1] + bins[1:])
-        idx = np.clip(np.digitize(pt, bins) - 1, 0, n_bins - 1)
 
-        # Feature overlay (optional)
-        if feature is None:
-            v = np.ones(F.shape[0])
-            title = "Lineage cell density"
-        else:
-            v = np.asarray(self.adata.obs_vector(feature), dtype=float)
-            title = f"Lineage stream — {feature}"
+        tree_state = self.adata.obs[f'{prefix}_tree_states'].astype(str).values
+        tree_state_names = self._tree_state_names
+        tree_adj = self._tree_adj
+        centerlines = self._dendrogram_levels(tree_adj)
 
-        if palette is None:
-            cmap = plt.get_cmap("tab10")
-            palette = [cmap(j % 10) for j in range(K)]
+        # ----- single-axis layout: tree scaffold + per-segment fill -----
+        if split and numeric and features.shape[1] > 1:
+            n = features.shape[1]
+            nrow = (n + plots_per_row - 1) // plots_per_row
+            fig, axes = plt.subplots(nrow, min(n, plots_per_row),
+                                      figsize=(4 * min(n, plots_per_row), 3 * nrow),
+                                      squeeze=False)
+            for k, name in enumerate(data_list):
+                self.plot_stream(
+                    name, style=style, log_pseudotime=False, max_bar_height=max_bar_height,
+                    window_size=window_size, clip=clip, scale_features=scale_features,
+                    split=False, palette=palette, ax=axes.flat[k],
+                    scaffold_linecolor=scaffold_linecolor, scaffold_linewidth=scaffold_linewidth,
+                    linecolor=linecolor, linewidth=linewidth,
+                )
+                axes.flat[k].set_title(name)
+            for k in range(n, nrow * plots_per_row):
+                axes.flat[k].axis('off')
+            if title:
+                fig.suptitle(title, fontsize=14, y=1.02)
+            fig.tight_layout()
+            return fig
 
-        for j in range(K):
-            w = F[:, j] * v
-            stream = np.bincount(idx, weights=w, minlength=n_bins).astype(float)
-            if stream.max() > 0:
-                stream = gaussian_filter1d(stream, sigma=max(1, smooth_window / 3))
-                stream = stream / stream.max() * max_bar_height
-            y0 = j * (max_bar_height + 0.25)
-            ax.fill_between(centers, y0 - stream / 2, y0 + stream / 2,
-                             color=palette[j], alpha=0.85, linewidth=0)
-            ax.text(centers[-1] + 0.02 * (centers[-1] - centers[0]),
-                    y0, names[j], ha="left", va="center",
-                    fontsize=10, fontweight="bold")
+        if ax is None:
+            _, ax = plt.subplots(figsize=figsize)
 
+        # Normalise features (clip + scale)
+        if numeric and clip is not None:
+            mu = features.mean(0, keepdims=True)
+            sd = features.std(0, keepdims=True)
+            features = np.clip(features, mu - clip * sd, mu + clip * sd)
+        if numeric:
+            f_min = features.min(0, keepdims=True)
+            f_max = features.max(0, keepdims=True)
+            if scale_features:
+                rng = np.maximum(f_max - f_min, 1e-12)
+                features = (features - f_min) / rng
+            else:
+                features = features - f_min
+            features = np.maximum(features, 0)
+            normaliser = max(features.sum(-1).max() if style == 'stream' and not split
+                              else features.max(0).max(), 1e-12)
+            features = features / normaliser * max_bar_height
+
+        # Walk the tree (BFS from root) and plot each segment.
+        import networkx as nx
+        G = nx.from_numpy_array(tree_adj, create_using=nx.DiGraph)
+        root_idx = next(n for n, d in G.in_degree() if d == 0)
+        bfs = [(root_idx, root_idx), *list(nx.bfs_edges(G, root_idx))]
+
+        # Segment positions cache so we can draw scaffold connectors.
+        seg_pt_min, seg_pt_max = {}, {}
+        seg_pt_min[root_idx] = float(pt.min())
+        seg_pt_max[root_idx] = float(pt.min())
+
+        for parent, child in bfs:
+            name = tree_state_names[child]
+            mask = tree_state == name
+            if not mask.any():
+                seg_pt_max[child] = seg_pt_max.get(parent, pt.min())
+                seg_pt_min[child] = seg_pt_max[child]
+                continue
+            seg_pt = pt[mask]
+            order = np.argsort(seg_pt)
+            seg_pt = seg_pt[order]
+            seg_feats = features[mask][order] if numeric else features[mask][order]
+
+            seg_pt_min[child] = float(seg_pt.min())
+            seg_pt_max[child] = float(seg_pt.max())
+            cl = float(centerlines[child])
+
+            # Scaffold connector (vertical then horizontal)
+            if parent != child:
+                cl_p = float(centerlines[parent])
+                t_split = seg_pt_max.get(parent, seg_pt_min[child])
+                ax.vlines(t_split, ymin=min(cl, cl_p), ymax=max(cl, cl_p),
+                          color=scaffold_linecolor, linewidth=scaffold_linewidth)
+                ax.hlines(cl, xmin=t_split, xmax=seg_pt_max[child],
+                          color=scaffold_linecolor, linewidth=scaffold_linewidth)
+            else:
+                ax.hlines(cl, xmin=seg_pt_min[child], xmax=seg_pt_max[child],
+                          color=scaffold_linecolor, linewidth=scaffold_linewidth)
+
+            # ---- segment rendering ----
+            if style == 'stream' and numeric:
+                # Savgol smoothing
+                ws = min(window_size, max(3, len(seg_pt) // 2 * 2 - 1))
+                if ws > len(seg_pt):
+                    ws = len(seg_pt) - (1 - len(seg_pt) % 2)
+                ws = max(3, ws if ws % 2 == 1 else ws - 1)
+                smooth = savgol_filter(seg_feats, ws, 1, axis=0)
+                cum = np.cumsum(smooth, axis=-1)
+                base = cum[:, -1] / 2 if cum.shape[1] > 1 else cum[:, -1] * 0
+                bottom = cl - base
+                top_cum = cum - base[:, None] + cl
+                colors = plt.get_cmap(palette).colors if isinstance(palette, str) else palette
+                if len(data_list) == 1:
+                    ax.fill_between(seg_pt, bottom, top_cum[:, 0],
+                                     color=(colors[0] if isinstance(colors, (list, tuple))
+                                            else 'black'), alpha=0.9,
+                                     edgecolor=linecolor,
+                                     linewidth=linewidth or 0.1)
+                else:
+                    prev = bottom
+                    for k in range(top_cum.shape[1]):
+                        c = colors[k % len(colors)]
+                        ax.fill_between(seg_pt, prev, top_cum[:, k], color=c,
+                                         alpha=0.9, edgecolor=linecolor,
+                                         linewidth=linewidth or 0.1,
+                                         label=data_list[k] if parent == root_idx and bfs[0][1] == child else None)
+                        prev = top_cum[:, k]
+
+            elif style == 'swarm':
+                # Categorical feature swarm
+                col = features[mask][order, 0]
+                col_str = col.astype(str)
+                cats = sorted(set(col_str))
+                cmap_name = palette if isinstance(palette, str) else 'Set3'
+                cm = plt.get_cmap(cmap_name, max(3, len(cats)))
+                color_map = {c: cm(i) for i, c in enumerate(cats)}
+                rng = np.random.default_rng(0)
+                jitter = rng.uniform(-max_bar_height / 2, max_bar_height / 2,
+                                      size=len(seg_pt))
+                # Density cap: keep at most `max_swarm_density` cells per ~equal
+                # pseudotime slice.
+                if len(seg_pt) > max_swarm_density:
+                    keep = rng.choice(len(seg_pt), int(max_swarm_density), replace=False)
+                else:
+                    keep = np.arange(len(seg_pt))
+                cs = [color_map[c] for c in col_str[keep]]
+                ax.scatter(seg_pt[keep], cl + jitter[keep], c=cs, s=size,
+                            edgecolor='none')
+
+            # Leaf label
+            if G.out_degree(child) == 0:
+                ax.text(seg_pt_max[child] * 1.005, cl, name,
+                        fontsize=10, va='center', ha='left', fontweight='bold')
+
+        ax.set_xlabel('pseudotime')
         ax.set_yticks([])
-        ax.set_xlabel("pseudotime")
-        ax.set_title(title)
-        for s in ("top", "right", "left"): ax.spines[s].set_visible(False)
+        ax.set_title(title or ('Lineage stream' if style == 'stream' else 'Lineage swarm'))
+        for s in ('top', 'right', 'left'): ax.spines[s].set_visible(False)
         return ax
 
     # =========================================================== streamplot
