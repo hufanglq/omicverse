@@ -839,10 +839,19 @@ class PseudotimeFate:
         start_cells: list | int | None = None,
         start_lineage: str | None = None,
         num_start_cells: int = 50,
-        n_steps: int = 2000,
+        num_steps: int = 1500,
+        steps_per_frame: int = 1,
         direction: Literal["forward", "backward"] = "forward",
         log_prob: bool = False,
         sqrt_time: bool = False,
+        ka: int | None = None,
+        save_name: str | None = None,
+        figsize: tuple = (10, 7),
+        fps: int = 24,
+        palette: str = "BuPu",
+        vmax_quantile: float = 0.99,
+        num_preview_frames: int = 0,
+        basis: str = "X_umap",
     ) -> "np.ndarray":
         """Deterministic forward probability diffusion through the
         biased Markov chain — the **exact** equivalent of MIRA's
@@ -862,7 +871,7 @@ class PseudotimeFate:
 
         Returns
         -------
-        states : (n_steps, n_cells) ndarray
+        states : (num_steps, n_cells) ndarray
             Probability distribution over cells at each time step. Use
             :meth:`plot_trace_density` or :meth:`plot_trace_animation`
             to render. ``sqrt_time=True`` returns frames spaced
@@ -879,6 +888,9 @@ class PseudotimeFate:
         # forward chain. The two differ because the pt-biased kNN graph
         # is not reversible — taking P^T of the forward map is not the
         # same Markov chain a user would get with pt = max - pt.
+        # ``ka`` overrides the saved kernel-width neighbour rank, also
+        # matching MIRA's per-call ``ka`` argument.
+        ka_use = self.ka if ka is None else int(ka)
         if direction == "backward":
             pt_rev = float(pt.max()) - pt
             biased = (
@@ -886,7 +898,15 @@ class PseudotimeFate:
                 if self.scheme == "hard"
                 else _soft_threshold_bias(self._knn, pt_rev, self.soft_b, self.soft_nu)
             )
-            affinity = _adaptive_affinity(biased, self._dist, self.ka)
+            affinity = _adaptive_affinity(biased, self._dist, ka_use)
+            P = _row_normalise(affinity)
+        elif ka is not None:
+            biased = (
+                _hard_threshold_bias(self._knn, pt, self.frac_to_keep)
+                if self.scheme == "hard"
+                else _soft_threshold_bias(self._knn, pt, self.soft_b, self.soft_nu)
+            )
+            affinity = _adaptive_affinity(biased, self._dist, ka_use)
             P = _row_normalise(affinity)
         else:
             P = self.result.transition_matrix.tocsr()
@@ -933,7 +953,7 @@ class PseudotimeFate:
         # Allocate full trace tensor and propagate.
         if sqrt_time:
             frames = np.unique(np.square(
-                np.linspace(0, np.sqrt(n_steps - 1), n_steps)
+                np.linspace(0, np.sqrt(num_steps - 1), num_steps)
             ).astype(int))
             states = np.empty((len(frames), n), dtype=np.float64)
             cur = p
@@ -946,13 +966,51 @@ class PseudotimeFate:
                     keep_idx += 1
             states = states[:keep_idx]
         else:
-            states = np.empty((n_steps, n), dtype=np.float64)
+            states = np.empty((num_steps, n), dtype=np.float64)
             states[0] = p
-            for t in range(1, n_steps):
+            for t in range(1, num_steps):
                 states[t] = operator @ states[t - 1]
 
         if log_prob:
             states = np.log(states + 1e-12)
+
+        # ``steps_per_frame`` matches MIRA: subsample the trace before
+        # rendering / saving so the animation has ~num_steps/steps_per_frame
+        # frames. Keeps the returned `states` itself faithful to the full
+        # diffusion.
+        if save_name or num_preview_frames > 0:
+            frame_idx = np.arange(0, len(states), max(1, steps_per_frame))
+            sub = states[frame_idx]
+        else:
+            sub = None
+
+        # Preview a handful of frames at chosen indices — useful in
+        # notebooks before committing to the full animation render.
+        if num_preview_frames > 0 and sub is not None:
+            import matplotlib.pyplot as plt
+            picks = np.linspace(0, len(sub) - 1, num_preview_frames).astype(int)
+            fig, axes = plt.subplots(
+                1, num_preview_frames,
+                figsize=(figsize[0] * num_preview_frames / 3, figsize[1] / 2),
+                squeeze=False,
+            )
+            for ax, k in zip(axes.flat, picks):
+                self.plot_trace_density(states=sub[k:k + 1], ax=ax,
+                                          basis=basis, cmap=palette,
+                                          vmax_quantile=vmax_quantile,
+                                          frame=0, time_average=False)
+                ax.set_title(f"frame {frame_idx[k]}")
+            plt.show()
+
+        if save_name:
+            anim = self.plot_trace_animation(
+                states=sub, basis=basis, figsize=figsize, cmap=palette,
+                fps=fps, num_frames=len(sub), save_path=save_name,
+                vmax_quantile=vmax_quantile,
+            )
+            import matplotlib.pyplot as plt
+            plt.close(anim._fig)  # the PillowWriter has already written the file
+
         return states
 
     def plot_trace_density(
@@ -962,7 +1020,7 @@ class PseudotimeFate:
         ax=None,
         figsize=(5, 4),
         cmap: str = "BuPu",
-        n_steps: int = 2000,
+        num_steps: int = 2000,
         frame: int | None = None,
         vmax_quantile: float = 0.99,
         time_average: bool = True,
@@ -976,7 +1034,7 @@ class PseudotimeFate:
         """
         import matplotlib.pyplot as plt
         if states is None:
-            states = self.trace_differentiation(n_steps=n_steps)
+            states = self.trace_differentiation(num_steps=num_steps)
         if frame is not None:
             density = states[frame]
         elif time_average:
@@ -1011,7 +1069,7 @@ class PseudotimeFate:
         fps: int = 24,
         num_frames: int = 80,
         save_path: str | None = None,
-        n_steps: int = 2000,
+        num_steps: int = 2000,
         vmax_quantile: float = 0.99,
     ):
         """Build a MIRA-style ``trace_differentiation`` GIF animation.
@@ -1023,7 +1081,7 @@ class PseudotimeFate:
         import matplotlib.pyplot as plt
         from matplotlib.animation import FuncAnimation, PillowWriter
         if states is None:
-            states = self.trace_differentiation(n_steps=n_steps)
+            states = self.trace_differentiation(num_steps=num_steps)
         frame_idx = np.linspace(0, len(states) - 1, num_frames).astype(int)
         coords = self.adata.obsm[basis]
         fig, ax = plt.subplots(figsize=figsize)
