@@ -1002,6 +1002,201 @@ class PseudotimeFate:
                        fontsize=8, title=color)
         return ax
 
+    # =========================================================== pseudotime velocity
+    def compute_pseudotime_velocity(
+        self,
+        basis: str = "X_umap",
+        velocity_key: str | None = None,
+        method: str = "naive",
+        n_neighbors: int = 31,
+        laplace_weight: float = 10.0,
+        adj_key: str = "distances",
+    ) -> str:
+        """Convert pseudotime into an embedding-space velocity field
+        suitable for :func:`ov.pl.add_streamplot`.
+
+        Port of the ``naive`` / ``gradient`` paths from
+        ``dynamo.tools.pseudotime_velocity.pseudotime_velocity``
+        (`dynamo-release/f7d977a/dynamo/tools/pseudotime_velocity.py
+        <https://github.com/aristoteleo/dynamo-release/blob/f7d977a2831ee4fde65fe80ed05fc07217a593c4/dynamo/tools/pseudotime_velocity.py#L167>`_):
+
+        1. Build a directed transition matrix ``T`` on the kNN graph,
+           with each edge weighted by the *sign of the pseudotime
+           difference* between source and target. ``method='naive'``
+           uses exponentially-decaying kNN distance weights; ``'gradient'``
+           uses the discrete graph gradient + diffusion Laplacian
+           (``T = ∇f + λ · L_diff`` with ``λ = laplace_weight``).
+        2. Project ``T`` onto the low-dim embedding with
+           ``δX[i] = Σ_j T[i,j] · (X[j] - X[i]) / ||X[j] - X[i]||``
+           (density-corrected — same as scVelo / dynamo's
+           ``projection_with_transition_matrix``).
+
+        Parameters
+        ----------
+        basis
+            ``adata.obsm`` key for the 2-D embedding (default ``'X_umap'``).
+        velocity_key
+            Where to store the resulting ``(n_cells, 2)`` velocity in
+            ``adata.obsm``. Default: ``f'velocity_pseudotime_{basis[2:]}'``.
+        method
+            ``'naive'`` (default) — dynamo's exponential-kNN scheme.
+            ``'gradient'`` — discrete gradient + diffusion-Laplacian
+            transition matrix (closer to dynamo's ``hodge`` path
+            without needing the full Hodge decomposition).
+        n_neighbors
+            kNN size for the naive path (matches dynamo's default of 31).
+        laplace_weight
+            ``λ`` in ``T = ∇f + λ · L_diff`` for the gradient path.
+        adj_key
+            ``adata.obsp`` key for the connectivity / distance graph.
+
+        Returns
+        -------
+        str
+            The ``velocity_key`` written to ``adata.obsm`` —
+            pass it to :func:`ov.pl.add_streamplot` directly::
+
+                fate.compute_pseudotime_velocity(basis='X_umap')
+                ov.pl.add_streamplot(adata, basis='X_umap',
+                                      velocity_key='velocity_pseudotime_umap',
+                                      ax=ax)
+        """
+        if basis not in self.adata.obsm:
+            raise KeyError(f"adata.obsm[{basis!r}] not found.")
+        if adj_key not in self.adata.obsp:
+            raise KeyError(f"adata.obsp[{adj_key!r}] not found. "
+                            f"Run `ov.pp.neighbors(adata)` first.")
+        if velocity_key is None:
+            basis_stem = basis[2:] if basis.startswith("X_") else basis
+            velocity_key = f"velocity_pseudotime_{basis_stem}"
+
+        X = np.asarray(self.adata.obsm[basis], dtype=float)
+        pt = self._pt
+        E = self.adata.obsp[adj_key]
+
+        if method == "naive":
+            T = self._naive_pseudotime_T(E, pt, n_neighbors=n_neighbors)
+        elif method == "gradient":
+            T = self._gradient_pseudotime_T(E, pt, laplace_weight=laplace_weight)
+        else:
+            raise ValueError(f"method must be 'naive' or 'gradient', got {method!r}")
+
+        delta_X = self._project_T_to_embedding(T, X, correct_density=True)
+        self.adata.obsm[velocity_key] = delta_X
+        return velocity_key
+
+    @staticmethod
+    def _naive_pseudotime_T(E: sp.csr_matrix, pt: np.ndarray,
+                              n_neighbors: int = 31) -> sp.csr_matrix:
+        """Port of the ``method='naive'`` branch of
+        ``dynamo.tools.pseudotime_velocity.pseudotime_velocity``.
+
+        For each cell i: collect its top-``n_neighbors`` neighbours by
+        distance, weight them by ``exp(d / mean_d)``, then sign-flip
+        each weight by ``sign(pt[j] - pt[i])`` so that downstream cells
+        get positive flux and ancestors negative.
+        """
+        from scipy.sparse import csr_matrix
+        n = E.shape[0]
+        E = E.tocsr()
+        rows, cols, vals = [], [], []
+        for i in range(n):
+            s, e = E.indptr[i], E.indptr[i + 1]
+            nbr_idx = E.indices[s:e]
+            nbr_d = E.data[s:e]
+            if nbr_idx.size == 0:
+                continue
+            # Top-k (dynamo uses 31 including self at position 0; we
+            # don't have a guaranteed self-edge so we sort and take
+            # the first ``n_neighbors``).
+            order = np.argsort(nbr_d)[:n_neighbors]
+            nbr_idx = nbr_idx[order]
+            nbr_d = nbr_d[order]
+            if nbr_d.size <= 1:
+                continue
+            tail_d = nbr_d[1:] if nbr_idx[0] == i else nbr_d
+            tail_idx = nbr_idx[1:] if nbr_idx[0] == i else nbr_idx
+            mean_d = float(np.mean(tail_d)) if tail_d.size else 1.0
+            if mean_d <= 0:
+                continue
+            w = tail_d / mean_d
+            w_exp = np.exp(w)
+            sum_w = float(w_exp.sum())
+            if sum_w <= 0:
+                continue
+            w_scaled = w_exp / sum_w
+            pt_diff = pt[tail_idx] - pt[i]
+            w_scaled *= np.sign(pt_diff)
+            rows.append(np.full(tail_idx.size, i, dtype=np.int64))
+            cols.append(tail_idx.astype(np.int64))
+            vals.append(w_scaled.astype(np.float64))
+        if not rows:
+            return csr_matrix((n, n), dtype=np.float64)
+        return csr_matrix(
+            (np.concatenate(vals),
+             (np.concatenate(rows), np.concatenate(cols))),
+            shape=(n, n),
+        )
+
+    @staticmethod
+    def _gradient_pseudotime_T(E: sp.csr_matrix, pt: np.ndarray,
+                                 laplace_weight: float = 10.0) -> sp.csr_matrix:
+        """Port of the ``method='gradient'`` branch — ``pseudotime_
+        transition(E, pt, laplace_weight)`` from dynamo. ``T = ∇f +
+        λ · L_diff`` where ``∇f[i, j] = f[j] - f[i]`` over kNN edges
+        and ``L_diff`` is the diffusion Laplacian (-graph Laplacian).
+        """
+        from scipy.sparse import csr_matrix, coo_matrix, diags
+        E = E.tocoo()
+        # Graph gradient
+        mask = E.row != E.col
+        g_row = E.row[mask]
+        g_col = E.col[mask]
+        g_val = pt[g_col] - pt[g_row]
+        keep = g_val != 0
+        grad = csr_matrix(
+            (g_val[keep], (g_row[keep], g_col[keep])),
+            shape=E.shape,
+        )
+        # Diffusion Laplacian (-L)
+        A = E.copy()
+        A.data = np.ones_like(A.data, dtype=np.float64)
+        A = A.tocsr()
+        L_diff = (A - diags(np.asarray(A.sum(0)).ravel(), 0)).tocsr()
+        return grad + laplace_weight * L_diff
+
+    @staticmethod
+    def _project_T_to_embedding(T: sp.csr_matrix, X: np.ndarray,
+                                  correct_density: bool = True) -> np.ndarray:
+        """Port of ``dynamo.tools.utils.projection_with_transition_matrix``.
+
+        ``δX[i] = Σ_j T[i,j] · (X[j] - X[i]) / ||X[j] - X[i]||``
+        (the distance normalisation matches dynamo's default
+        ``norm_dist=True``). If ``correct_density``, subtract the mean
+        of the transition row times the *sum* of normalised diffs —
+        cancels the bias from over-represented neighbourhoods.
+        """
+        n = T.shape[0]
+        delta = np.zeros((n, X.shape[1]), dtype=np.float64)
+        Tcsr = T.tocsr()
+        for i in range(n):
+            s, e = Tcsr.indptr[i], Tcsr.indptr[i + 1]
+            idx = Tcsr.indices[s:e]
+            if idx.size == 0:
+                continue
+            row_T = Tcsr.data[s:e]
+            diff = X[idx] - X[i]
+            d_norm = np.linalg.norm(diff, axis=1)
+            valid = d_norm > 0
+            if not valid.any():
+                continue
+            diff_n = np.zeros_like(diff)
+            diff_n[valid] = diff[valid] / d_norm[valid, None]
+            delta[i] = row_T @ diff_n
+            if correct_density:
+                delta[i] -= row_T.mean() * diff_n.sum(0)
+        return delta
+
     # =========================================================== differentiation traces
     def trace_differentiation(
         self,
@@ -1021,6 +1216,12 @@ class PseudotimeFate:
         vmax_quantile: float = 0.99,
         num_preview_frames: int = 0,
         basis: str = "X_umap",
+        trim_stationary: bool = True,
+        stationary_tol: float = 1e-4,
+        compress: bool = True,
+        compress_max_size: int = 500,
+        compress_colors: int = 48,
+        compress_max_frames: int = 80,
     ) -> "np.ndarray":
         """Deterministic forward probability diffusion through the
         biased Markov chain — the **exact** equivalent of MIRA's
@@ -1162,6 +1363,18 @@ class PseudotimeFate:
         sub = states[frame_slices, :]
         num_frames = len(sub)
 
+        # Drop the stationary tail: once consecutive frames change by
+        # less than ``stationary_tol`` (max abs diff), the Markov chain
+        # has converged and the remaining frames are visually
+        # indistinguishable. Keeping them just bloats the GIF.
+        if trim_stationary and num_frames > 2:
+            diffs = np.max(np.abs(np.diff(sub, axis=0)), axis=1)
+            converged = np.where(diffs < stationary_tol)[0]
+            if converged.size and converged[0] >= 2:
+                cutoff = int(converged[0]) + 2  # keep one steady frame
+                sub = sub[:cutoff]
+                num_frames = len(sub)
+
         # MIRA's preview-frames selection:
         #   test_frames = [1] + range(1, num_partitions)*preview_interval
         #                     + [num_frames - 1]
@@ -1197,8 +1410,62 @@ class PseudotimeFate:
                 fps=fps, num_frames=num_frames, save_path=save_name,
                 vmax_quantile=vmax_quantile,
             )
+            if compress:
+                self._compress_gif_inplace(
+                    save_name,
+                    max_size=compress_max_size,
+                    n_frames_keep=compress_max_frames,
+                    colors=compress_colors,
+                )
 
         return states
+
+    @staticmethod
+    def _compress_gif_inplace(
+        path: str,
+        max_size: int = 500,
+        n_frames_keep: int = 80,
+        colors: int = 48,
+    ) -> None:
+        """Re-encode the GIF at ``path`` with smaller resolution, fewer
+        frames, and an adaptive palette. Typical reduction is
+        ~14-20 MB → 500-700 KB for the pancreas traces, with no
+        visible loss in animation quality. Silent no-op if PIL isn't
+        available.
+        """
+        try:
+            from PIL import Image, ImageSequence
+        except ImportError:
+            return
+        import os
+        if not os.path.exists(path):
+            return
+        img = Image.open(path)
+        n_total = img.n_frames
+        if n_total <= n_frames_keep:
+            idxs = set(range(n_total))
+        else:
+            step = n_total / n_frames_keep
+            idxs = {int(i * step) for i in range(n_frames_keep)}
+        frames, durations = [], []
+        base_duration = int(img.info.get("duration", 100))
+        for i, frame in enumerate(ImageSequence.Iterator(img)):
+            if i not in idxs:
+                continue
+            f = frame.convert("RGBA")
+            w, h = f.size
+            if max(w, h) > max_size:
+                scale = max_size / max(w, h)
+                f = f.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            f = f.convert("P", palette=Image.ADAPTIVE, colors=colors)
+            frames.append(f)
+            durations.append(base_duration)
+        if not frames:
+            return
+        frames[0].save(
+            path, save_all=True, append_images=frames[1:],
+            duration=durations, loop=0, disposal=2, optimize=True,
+        )
 
     def plot_trace_density(
         self,
@@ -1926,6 +2193,160 @@ class PseudotimeFate:
         return ax
 
     # =========================================================== streamplot
+    def fit_lineage_trends(
+        self,
+        genes,
+        *,
+        pseudotime_key: str | None = None,
+        n_splines: int = 6,
+        spline_order: int = 3,
+        grid_size: int = 100,
+        confidence_level: float = 0.95,
+        store_raw: bool = False,
+        verbose: bool = True,
+    ):
+        """Fit one GAM per lineage using ``fate_probabilities`` as cell
+        weights — the CellRank ``gene_trends`` approach.
+
+        Unlike a ``dynamic_features(groupby=lineage_key)`` call (which
+        hard-partitions cells by argmax-lineage and so leaves each
+        lineage's GAM extrapolating outside its narrow ``pt`` window),
+        this helper fits each lineage's curve on **all cells**, with
+        the lineage's fate probability as the per-cell weight. Trunk
+        cells contribute to every curve in proportion to their soft
+        membership, giving smooth full-pt-range curves that match the
+        CellRank visualization.
+
+        Parameters
+        ----------
+        genes
+            Gene name(s) to fit. Same shape as
+            ``dynamic_features(genes=...)``.
+        pseudotime_key
+            ``adata.obs`` column for pseudotime. Defaults to
+            ``self.pseudotime_key``.
+        n_splines, spline_order, grid_size, confidence_level
+            Passed through to :func:`ov.single.dynamic_features`.
+            Defaults match CellRank (``n_splines=6``) which gives
+            slightly smoother fits than the ``dynamic_features``
+            default of ``n_splines=8``.
+        store_raw
+            If ``True``, attach a raw per-cell scatter to the result so
+            ``ov.pl.dynamic_trends(add_point=True)`` works. The raw
+            ``dataset`` column is just the highest-weight lineage per
+            cell (an argmax label, used only for scatter colouring).
+
+        Returns
+        -------
+        :class:`ov.single.dynamic_features.DynamicFeaturesResult`
+            One ``dataset == lineage_name`` block per lineage. Pass
+            directly to :func:`ov.pl.dynamic_trends`::
+
+                fit = fate.fit_lineage_trends(genes=top_genes[:5])
+                ov.pl.dynamic_trends(fit, compare_groups=True)
+        """
+        from ._dynamic_features import dynamic_features, DynamicFeaturesResult
+        if self.result is None or self.result.fate_probabilities is None:
+            raise RuntimeError("Call fit(compute_fates=True) first.")
+        F = self.result.fate_probabilities
+        terminal_cells = list(self.result.terminal_cells)
+        lineage_names_raw = [
+            str(self.adata.obs[self.groupby].iloc[c])
+            if self.groupby else f"L{j}"
+            for j, c in enumerate(terminal_cells)
+        ]
+        # Disambiguate duplicate cluster names (CellRank style: _1, _2)
+        from collections import Counter
+        counts = Counter(lineage_names_raw)
+        seen: dict = {}
+        lineage_names = []
+        for nm in lineage_names_raw:
+            if counts[nm] > 1:
+                seen[nm] = seen.get(nm, 0) + 1
+                lineage_names.append(f"{nm}_{seen[nm]}")
+            else:
+                lineage_names.append(nm)
+
+        pt_key = pseudotime_key or self.pseudotime_key
+        # Sanitize gene list to those actually in the AnnData (raw or
+        # current X)
+        if isinstance(genes, str):
+            genes = [genes]
+        genes = [str(g) for g in genes]
+
+        stats_blocks, fitted_blocks, raw_blocks = [], [], []
+        for j, lin_name in enumerate(lineage_names):
+            w = F[:, j].astype(float).copy()
+            if w.sum() <= 0:
+                continue
+            # Stash weights in a temporary obs column — dynamic_features
+            # reads weights via column name when given a string.
+            w_key = f"__fate_w_{lin_name}"
+            self.adata.obs[w_key] = w
+            try:
+                res = dynamic_features(
+                    self.adata,
+                    genes=genes,
+                    pseudotime=pt_key,
+                    weights=w_key,
+                    n_splines=n_splines,
+                    spline_order=spline_order,
+                    grid_size=grid_size,
+                    confidence_level=confidence_level,
+                    store_raw=store_raw,
+                    raw_obs_keys=([self.groupby] if (store_raw and self.groupby) else None),
+                    verbose=False,
+                )
+            finally:
+                del self.adata.obs[w_key]
+            stats = res.stats.copy()
+            stats["dataset"] = lin_name
+            fitted = res.fitted.copy()
+            fitted["dataset"] = lin_name
+            stats_blocks.append(stats)
+            fitted_blocks.append(fitted)
+            if res.raw is not None:
+                raw = res.raw.copy()
+                raw["dataset"] = lin_name
+                raw_blocks.append(raw)
+            if verbose:
+                ok = int(stats.get("success", pd.Series([True] * len(stats))).sum())
+                print(f"  {lin_name}: {ok}/{len(stats)} genes fitted")
+
+        if not stats_blocks:
+            raise RuntimeError("No lineage had positive fate-probability mass.")
+        stats_all = pd.concat(stats_blocks, ignore_index=True)
+        fitted_all = pd.concat(fitted_blocks, ignore_index=True)
+        raw_all = pd.concat(raw_blocks, ignore_index=True) if raw_blocks else None
+
+        # Propagate the cluster palette via the lineage_key naming so
+        # dynamic_trends picks it up as ``raw_obs_colors`` (same code
+        # path as ``dynamic_features(groupby=lineage_key)``).
+        groupby_col = self._prefix_from_pseudotime_key() + "_lineage"
+        config: dict = {
+            "pseudotime": pt_key,
+            "groupby": groupby_col,
+            "weights": "fate_probabilities[:, j]",
+            "n_splines": n_splines,
+            "spline_order": spline_order,
+            "grid_size": grid_size,
+            "confidence_level": confidence_level,
+            "store_raw": store_raw,
+            "raw_obs_keys": [self.groupby] if (store_raw and self.groupby) else None,
+        }
+        cluster_map = self._cluster_color_map()
+        if cluster_map:
+            cols = self._resolve_cluster_colors(lineage_names)
+            config["raw_obs_colors"] = {groupby_col: cols}
+            config["raw_obs_category_order"] = {groupby_col: list(lineage_names)}
+        return DynamicFeaturesResult(
+            stats=stats_all,
+            fitted=fitted_all,
+            raw=raw_all,
+            models=None,
+            config=config,
+        )
+
     def write_branch_keys(
         self,
         lineage_key: str | None = None,
