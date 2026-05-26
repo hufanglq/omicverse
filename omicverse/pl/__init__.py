@@ -187,7 +187,19 @@ from ._metacell import (
     metacell_codebook_umap,
     metacell_soft_heatmap,
 )
-from ._perturbation import perturbation_shift_violin, perturbation_embedding_shift, perturbation_top_downstream_genes
+from ._perturbation import (
+    perturbation_shift_violin,
+    perturbation_embedding_shift,
+    perturbation_top_downstream_genes,
+    perturb_quiver,
+    perturb_cell_quiver,
+    perturb_sankey,
+    perturb_volcano,
+    perturb_inner_product_on_grid,
+    perturb_development_layout,
+    perturb_celloracle_layout,
+    perturb_markov_endpoints,
+)
 from ._density import add_density_contour, calculate_gene_density
 from ._plot1cell import plot1cell
 from ._cpdbviz import CellChatViz
@@ -445,4 +457,12 @@ __all__ = [
     "perturbation_shift_violin",
     "perturbation_embedding_shift",
     "perturbation_top_downstream_genes",
+    "perturb_quiver",
+    "perturb_cell_quiver",
+    "perturb_sankey",
+    "perturb_volcano",
+    "perturb_inner_product_on_grid",
+    "perturb_development_layout",
+    "perturb_celloracle_layout",
+    "perturb_markov_endpoints",
 ]
