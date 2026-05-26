@@ -1390,7 +1390,8 @@ class PseudotimeFate:
 
         # DFS-tree traversal mirrors MIRA's ``dfs_predecessors[::-1]``
         # order so leaf indexing matches a typical tree visualisation.
-        for node in reversed(list(nx.dfs_predecessors(G, root))) + [root]:
+        dfs_tree = list(nx.dfs_predecessors(G, root))[::-1] + [root]
+        for node in dfs_tree:
             _set(node)
         for node in G.nodes:
             if node not in positions:
@@ -1409,6 +1410,7 @@ class PseudotimeFate:
         scale_features: bool = False,
         split: bool = False,
         palette: str | list = 'Set3',
+        color: str = 'black',
         size: float = 5,
         max_swarm_density: float = 2000,
         title: str | None = None,
@@ -1607,14 +1609,15 @@ class PseudotimeFate:
                 top_cum = cum - base[:, None] + cl
                 colors = plt.get_cmap(palette).colors if isinstance(palette, str) else palette
                 prev = bottom
-                # Single-feature default colour matches MIRA's `color='black'`;
-                # multi-feature uses the palette.
+                # Match MIRA `_plot_stream_segment`: single feature → use
+                # the ``color`` parameter (default 'black'); multi-feature
+                # → cycle through ``palette``.
                 use_palette = len(data_list) > 1
                 for k in range(top_cum.shape[1]):
                     if use_palette:
                         c = colors[k % len(colors)]
                     else:
-                        c = colors[0] if isinstance(colors, (list, tuple)) else 'black'
+                        c = color
                     ax.fill_between(seg_pt, prev, top_cum[:, k], color=c,
                                      alpha=0.9, edgecolor=linecolor,
                                      linewidth=linewidth or 0.1,
