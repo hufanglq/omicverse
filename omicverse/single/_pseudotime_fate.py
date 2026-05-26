@@ -271,8 +271,18 @@ class _Beeswarm:
         return candidates[-1]
 
     def _gutter(self, points, center):
+        # Index-assign matches MIRA exactly — `np.clip(out=)` on a
+        # transposed-view target can silently no-op, leaving outliers
+        # outside the band.
         half = self.width / 2
-        np.clip(points, center - half, center + half, out=points)
+        low = center - half
+        high = center + half
+        off_low = points < low
+        if off_low.any():
+            points[off_low] = low
+        off_high = points > high
+        if off_high.any():
+            points[off_high] = high
 
 
 def _indexsearch(X: np.ndarray, K: int) -> np.ndarray:
