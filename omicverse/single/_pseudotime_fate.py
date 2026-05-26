@@ -174,6 +174,107 @@ def _top_schur_vectors(P: sp.csr_matrix, K: int) -> np.ndarray:
     return Q
 
 
+class _Beeswarm:
+    """Verbatim port of MIRA's ``mira.plots.swarmplot.Beeswarm`` (which is
+    in turn lifted from seaborn ≥ 0.12). Packs scatter points adjacent to
+    one another perpendicular to ``orient`` so they form the dense
+    rectangular strip MIRA's swarm plots are recognised by.
+    """
+
+    def __init__(self, orient="h", width=0.8):
+        self.orient = orient
+        self.width = width
+
+    def __call__(self, points, center):
+        ax = points.axes
+        dpi = ax.figure.dpi
+        orig_xy_data = points.get_offsets()
+        cat_idx = 1 if self.orient == "h" else 0
+        orig_xy_data[:, cat_idx] = center
+        orig_x_data, orig_y_data = orig_xy_data.T
+        orig_xy = ax.transData.transform(orig_xy_data)
+        if self.orient == "h":
+            orig_xy = orig_xy[:, [1, 0]]
+        sizes = points.get_sizes()
+        if sizes.size == 1:
+            sizes = np.repeat(sizes, orig_xy.shape[0])
+        edge = points.get_linewidth()
+        edge = edge if np.isscalar(edge) else float(np.asarray(edge).item())
+        radii = (np.sqrt(sizes) + edge) / 2 * (dpi / 72)
+        orig_xyr = np.c_[orig_xy, radii]
+        sorter = np.argsort(orig_xyr[:, 1])
+        orig_xyr = orig_xyr[sorter]
+        new_xyr = np.empty_like(orig_xyr)
+        new_xyr[sorter] = self._beeswarm(orig_xyr)
+        if self.orient == "h":
+            new_xy = new_xyr[:, [1, 0]]
+        else:
+            new_xy = new_xyr[:, :2]
+        new_x_data, new_y_data = ax.transData.inverted().transform(new_xy).T
+        if self.orient == "h":
+            self._gutter(new_y_data, center)
+            points.set_offsets(np.c_[orig_x_data, new_y_data])
+        else:
+            self._gutter(new_x_data, center)
+            points.set_offsets(np.c_[new_x_data, orig_y_data])
+
+    def _beeswarm(self, orig_xyr):
+        midline = orig_xyr[0, 0]
+        swarm = np.atleast_2d(orig_xyr[0])
+        for xyr_i in orig_xyr[1:]:
+            neighbors = self._could_overlap(xyr_i, swarm)
+            candidates = self._candidates(xyr_i, neighbors)
+            offsets = np.abs(candidates[:, 0] - midline)
+            candidates = candidates[np.argsort(offsets)]
+            new_xyr_i = self._first_ok(candidates, neighbors)
+            swarm = np.vstack([swarm, new_xyr_i])
+        return swarm
+
+    @staticmethod
+    def _could_overlap(xyr_i, swarm):
+        _, y_i, r_i = xyr_i
+        neighbors = []
+        for xyr_j in reversed(swarm):
+            _, y_j, r_j = xyr_j
+            if (y_i - y_j) < (r_i + r_j):
+                neighbors.append(xyr_j)
+            else:
+                break
+        return np.array(neighbors)[::-1]
+
+    @staticmethod
+    def _candidates(xyr_i, neighbors):
+        candidates = [xyr_i]
+        x_i, y_i, r_i = xyr_i
+        left_first = True
+        for x_j, y_j, r_j in neighbors:
+            dy = y_i - y_j
+            dx = np.sqrt(max((r_i + r_j) ** 2 - dy ** 2, 0)) * 1.05
+            cl, cr = (x_j - dx, y_i, r_i), (x_j + dx, y_i, r_i)
+            new_candidates = [cl, cr] if left_first else [cr, cl]
+            candidates.extend(new_candidates)
+            left_first = not left_first
+        return np.array(candidates)
+
+    @staticmethod
+    def _first_ok(candidates, neighbors):
+        if len(neighbors) == 0:
+            return candidates[0]
+        nx = neighbors[:, 0]; ny = neighbors[:, 1]; nr = neighbors[:, 2]
+        for xyr_i in candidates:
+            x_i, y_i, r_i = xyr_i
+            dx = nx - x_i; dy = ny - y_i
+            sq = dx * dx + dy * dy
+            need = (nr + r_i) ** 2
+            if np.all(sq >= need):
+                return xyr_i
+        return candidates[-1]
+
+    def _gutter(self, points, center):
+        half = self.width / 2
+        np.clip(points, center - half, center + half, out=points)
+
+
 def _indexsearch(X: np.ndarray, K: int) -> np.ndarray:
     """Vertex selection from a Schur basis — the PCCA+ inner simplex
     algorithm (Roeblitz & Weber 2013, Multiscale Model. Simul.).
@@ -1294,7 +1395,7 @@ class PseudotimeFate:
         split: bool = False,
         palette: str | list = 'Set3',
         size: float = 5,
-        max_swarm_density: float = 100,
+        max_swarm_density: float = 2000,
         title: str | None = None,
         figsize=(10, 5),
         plots_per_row: int = 4,
@@ -1470,32 +1571,78 @@ class PseudotimeFate:
                         prev = top_cum[:, k]
 
             elif style == 'swarm':
-                # Categorical feature swarm
+                # Categorical-feature swarm — port of MIRA
+                # ``mira.plots.swarmplot._plot_swarm_segment``: downsample
+                # by *density* (cells per unit pseudotime) instead of by
+                # absolute count, jitter on the centerline, draw without
+                # spines, and use the same colour map per segment so the
+                # legend below stays consistent.
                 col = features[mask][order, 0]
                 col_str = col.astype(str)
-                cats = sorted(set(col_str))
-                cmap_name = palette if isinstance(palette, str) else 'Set3'
-                cm = plt.get_cmap(cmap_name, max(3, len(cats)))
-                color_map = {c: cm(i) for i, c in enumerate(cats)}
+                # Build / reuse the global colour map (computed once across
+                # the whole tree so legend categories don't shift between
+                # segments).
+                if not hasattr(self, "_swarm_color_cache") or self._swarm_color_cache.get("ms_key") is not id(palette):
+                    all_cats = sorted(set(features[:, 0].astype(str)))
+                    cm_name = palette if isinstance(palette, str) else "Set3"
+                    cm = plt.get_cmap(cm_name, max(3, len(all_cats)))
+                    self._swarm_color_cache = {
+                        "ms_key": id(palette),
+                        "map": {c: cm(i % cm.N) for i, c in enumerate(all_cats)},
+                    }
+                color_map = self._swarm_color_cache["map"]
+
                 rng = np.random.default_rng(0)
-                jitter = rng.uniform(-max_bar_height / 2, max_bar_height / 2,
-                                      size=len(seg_pt))
-                # Density cap: keep at most `max_swarm_density` cells per ~equal
-                # pseudotime slice.
-                if len(seg_pt) > max_swarm_density:
-                    keep = rng.choice(len(seg_pt), int(max_swarm_density), replace=False)
+                pt_range = float(np.ptp(seg_pt)) if len(seg_pt) > 1 else 1.0
+                density = len(seg_pt) / max(pt_range, 1e-9)
+                if density > max_swarm_density:
+                    keep_rate = max_swarm_density / density
+                    mask_keep = rng.random(len(seg_pt)) < keep_rate
                 else:
-                    keep = np.arange(len(seg_pt))
-                cs = [color_map[c] for c in col_str[keep]]
-                ax.scatter(seg_pt[keep], cl + jitter[keep], c=cs, s=size,
-                            edgecolor='none')
+                    mask_keep = np.ones(len(seg_pt), dtype=bool)
+                kept_pt = seg_pt[mask_keep]
+                kept_lbl = col_str[mask_keep]
+                cs = [color_map[c] for c in kept_lbl]
+                # Initial scatter on the centerline; Beeswarm then displaces
+                # the dots perpendicular to pseudotime so they tile into a
+                # rectangular strip without overlap — exactly MIRA's look.
+                pts = ax.scatter(
+                    kept_pt, np.full(len(kept_pt), cl),
+                    c=cs, s=size, edgecolors='none', linewidths=0,
+                )
+                _Beeswarm(orient="h", width=max_bar_height)(pts, cl)
 
             # Leaf label
             if G.out_degree(child) == 0:
                 ax.text(seg_pt_max[child] * 1.005, cl, name,
                         fontsize=10, va='center', ha='left', fontweight='bold')
 
+        # MIRA-style pseudotime triangle at the bottom of the plot.
+        ylim_lo, ylim_hi = ax.get_ylim()
+        bar_h = 0.04 * (ylim_hi - ylim_lo)
+        base = ylim_lo - bar_h * 1.5
+        ax.fill_between([float(pt.min()), float(pt.max())],
+                         [base, base + bar_h], [base, base],
+                         color='lightgrey', linewidth=0)
+        ax.text(float(pt.max()) * 1.005 + 0.005 * float(np.ptp(pt)), base,
+                "Time", fontsize=11, ha='left', va='bottom')
+        ax.set_ylim(base - bar_h * 0.3, ylim_hi)
+
+        # Categorical swarm legend (only for swarm style with a finite set
+        # of labels — matches MIRA's behaviour on `style='swarm'`).
+        if style == 'swarm' and hasattr(self, "_swarm_color_cache"):
+            from matplotlib.lines import Line2D
+            handles = [
+                Line2D([0], [0], marker='o', linestyle='none', markersize=8,
+                        markerfacecolor=c, markeredgecolor='none', label=lbl)
+                for lbl, c in self._swarm_color_cache["map"].items()
+            ]
+            ax.legend(handles=handles, loc='center left',
+                       bbox_to_anchor=(1.02, 0.5), frameon=False,
+                       fontsize=9, title=data_list[0] if data_list else None)
+
         ax.set_xlabel('pseudotime')
+        ax.set_xticks(np.linspace(float(pt.min()), float(pt.max()), 6))
         ax.set_yticks([])
         ax.set_title(title or ('Lineage stream' if style == 'stream' else 'Lineage swarm'))
         for s in ('top', 'right', 'left'): ax.spines[s].set_visible(False)
