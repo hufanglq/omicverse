@@ -109,7 +109,6 @@ bind_optional_symbols(
 # Sub-package: ov.space.histo (lazy-loaded; see histo/__init__.py).
 from . import histo  # noqa: E402,F401
 
-
 __all__ = [
     'histo',
 

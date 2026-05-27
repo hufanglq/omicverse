@@ -154,6 +154,8 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "twas":                      ("._twas", "twas"),
     "load_twas_model":           ("._twas", "load_twas_model"),
     "make_twas_covariance":      ("._twas", "make_twas_covariance"),
+    # gsMap — spatial GWAS mapping
+    "gsmap":                     ("._gsmap", "gsmap"),
     # Plotting
     "manhattan":                 (".plotting", "manhattan"),
     "qqplot":                    (".plotting", "qqplot"),
@@ -185,6 +187,7 @@ _REGISTRY_SUBMODULES = (
     "._scdrs",
     "._ldsc",
     "._twas",
+    "._gsmap",
     ".plotting",
 )
 

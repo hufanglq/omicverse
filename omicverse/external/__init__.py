@@ -126,6 +126,7 @@ __all__ = [
     ,
     'cellcharter',
     'monocle2_py',
+    'gsmap',
 ]
 
 
