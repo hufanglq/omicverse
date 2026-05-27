@@ -7,7 +7,11 @@ import random
 
 import numpy as np
 import scanpy as sc
-import torch
+try:
+    import torch
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import LabelEncoder
 
@@ -22,6 +26,11 @@ logger = logging.getLogger(__name__)
 def set_seed(seed_value: int) -> None:
     """Set random seeds for reproducible latent-representation training."""
 
+    if not _TORCH_AVAILABLE:
+        raise ImportError(
+            "torch is required for gsMap. "
+            "Install with: pip install omicverse[gsmap]"
+        )
     torch.manual_seed(seed_value)
     np.random.seed(seed_value)
     random.seed(seed_value)

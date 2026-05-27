@@ -5,8 +5,12 @@ from __future__ import annotations
 import logging
 import time
 
-import torch
-import torch.nn.functional as F
+try:
+    import torch
+    import torch.nn.functional as F
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
 from tqdm.auto import tqdm
 
 from .._style import Colors, EMOJI
@@ -31,6 +35,11 @@ class model_trainer:
     """Train the vendored gsMap graph attention autoencoder."""
 
     def __init__(self, node_x, graph_dict, params, label=None) -> None:
+        if not _TORCH_AVAILABLE:
+            raise ImportError(
+                "torch and torch-geometric are required for gsMap. "
+                "Install with: pip install omicverse[gsmap]"
+            )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.params = params
         self.epochs = params.epochs

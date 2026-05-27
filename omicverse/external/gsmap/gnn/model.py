@@ -2,10 +2,29 @@ from __future__ import annotations
 
 """GAT model used by the vendored gsMap latent-representation workflow."""
 
-import torch
-from torch import nn
-import torch.nn.functional as F
-from torch_geometric.nn import GATConv
+try:
+    import torch
+    from torch import nn
+    import torch.nn.functional as F
+    from torch_geometric.nn import GATConv
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
+
+    class _DummyModule:
+        """Placeholder so class definitions stay syntactically valid when torch is absent."""
+        pass
+
+    nn = type("DummyNN", (), {
+        "Module": _DummyModule,
+        "Sequential": _DummyModule,
+        "Linear": _DummyModule,
+        "BatchNorm1d": _DummyModule,
+        "ELU": _DummyModule,
+        "Dropout": _DummyModule,
+    })()
+    F = None
+    GATConv = _DummyModule
 
 
 def full_block(in_features: int, out_features: int, p_drop: float) -> nn.Sequential:
@@ -23,6 +42,11 @@ class gat_model(nn.Module):
     """Graph attention autoencoder used by gsMap latent learning."""
 
     def __init__(self, input_dim: int, params, num_classes: int = 1) -> None:
+        if not _TORCH_AVAILABLE:
+            raise ImportError(
+                "torch and torch-geometric are required for gsMap. "
+                "Install with: pip install omicverse[gsmap]"
+            )
         super().__init__()
         self.var = params.var
         self.num_classes = num_classes

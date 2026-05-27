@@ -5,7 +5,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
-import torch
+try:
+    import torch
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
 from sklearn.neighbors import NearestNeighbors
 
 from .._style import Colors, EMOJI
@@ -36,9 +40,14 @@ def cal_spatial_net(adata, n_neighbors: int = 5, verbose: bool = True) -> pd.Dat
     return knn_df
 
 
-def sparse_mx_to_torch_sparse_tensor(sparse_mx) -> torch.Tensor:
+def sparse_mx_to_torch_sparse_tensor(sparse_mx):
     """Convert a scipy sparse matrix into a torch sparse COO tensor."""
 
+    if not _TORCH_AVAILABLE:
+        raise ImportError(
+            "torch is required for gsMap. "
+            "Install with: pip install omicverse[gsmap]"
+        )
     sparse_mx = sparse_mx.tocoo().astype(np.float32)
     indices = torch.from_numpy(np.vstack((sparse_mx.row, sparse_mx.col)).astype(np.int64))
     values = torch.from_numpy(sparse_mx.data)
