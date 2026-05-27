@@ -11,7 +11,8 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
-from tqdm.contrib.concurrent import thread_map
+from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
 
 from ._config import SpatialLdscConfig
 from ._style import Colors, EMOJI
@@ -293,6 +294,8 @@ def run_spatial_ldsc(config: SpatialLdscConfig) -> Path:
     running_chunk_number = end_chunk - start_chunk + 1
 
     output_dict = defaultdict(list)
+    total_chunks = running_chunk_number * len(sumstats_cleaned_dict)
+    pbar = tqdm(total=total_chunks, desc="Running spatial_ldsc")
     for chunk_index in range(start_chunk, end_chunk + 1):
         ref_ld_spatial, spatial_annotation_cnames = s_ldsc.fetch_ldscore_by_chunk(chunk_index - 1)
         ref_ld_baseline_column_sum = ref_ld_baseline.sum(axis=1).values
@@ -321,13 +324,8 @@ def run_spatial_ldsc(config: SpatialLdscConfig) -> Path:
                 n_blocks=config.n_blocks,
             )
 
-            out_chunk = thread_map(
-                jackknife_func,
-                range(chunk_size),
-                max_workers=config.num_processes,
-                chunksize=10,
-                desc=f"Chunk-{chunk_index}/Total-chunk-{running_chunk_number} for {trait_name}",
-            )
+            with ThreadPoolExecutor(max_workers=config.num_processes) as executor:
+                out_chunk = list(executor.map(jackknife_func, range(chunk_size), chunksize=10))
 
             out_chunk = pd.DataFrame.from_records(
                 out_chunk, columns=["beta", "se"], index=spatial_annotation_cnames
@@ -339,6 +337,8 @@ def run_spatial_ldsc(config: SpatialLdscConfig) -> Path:
 
             del spatial_annotation, baseline_annotation, w_ld_common_snp
             gc.collect()
+            pbar.update(1)
+    pbar.close()
 
     save_results(output_dict, config, running_chunk_number, start_chunk, end_chunk)
     return config.ldsc_save_dir
