@@ -125,6 +125,7 @@ from ._timecourse import (
 from ._airr import (
     # Real immune-repertoire (AIRR) datasets for the ov.airr tutorials
     airr_singlecell,
+    airr_singlecell_bcr,
     airr_bcr,
     airr_tcr_antigen,
     vdjdb_reference,

@@ -520,3 +520,150 @@ def simulate_airr(
         ["s1", "s2", "s3", "s4"], size=adata.n_obs
     )
     return adata
+
+
+# ---------------------------------------------------------------------------
+# Per-cell heavy-chain extraction — bridges sc-BCR AnnData → AIRR DataFrame
+# ---------------------------------------------------------------------------
+@register_function(
+    aliases=[
+        "extract_heavy_chains", "heavy_chain_table", "bcr_heavy_chain_table",
+        "igh_table", "重链表", "BCR重链提取",
+    ],
+    category="airr",
+    description=(
+        "Extract the dominant productive IgH (or, for TCR, VDJ-arm) contig "
+        "per cell from a single-cell AIRR AnnData (``obsm['airr']`` awkward "
+        "array) into a flat AIRR-format ``pandas.DataFrame``. This is the "
+        "bridge between the AnnData-native single-cell side and the "
+        "DataFrame-native B-cell / Immcantation side of ``ov.airr`` — feed "
+        "the result into ``mutation_analysis``, ``clonal_clustering``, "
+        "``lineage_trees`` etc."
+    ),
+    examples=[
+        "db = ov.airr.extract_heavy_chains(adata)",
+        "db = ov.airr.extract_heavy_chains(adata, locus='IGH', fields=['sequence_alignment','germline_alignment_d_mask','mu_freq'])",
+    ],
+    related=["airr.from_airr_array", "airr.mutation_analysis",
+             "airr.clonal_clustering"],
+)
+def extract_heavy_chains(
+    adata,
+    *,
+    airr_key: str = "airr",
+    locus: str = "IGH",
+    fields: Optional[list] = None,
+    obs_cols: Optional[list] = None,
+):
+    """Extract the dominant productive heavy-chain contig per cell.
+
+    Single-cell AIRR data stores per-cell contigs as a ragged awkward array
+    in ``adata.obsm[airr_key]`` — convenient for storage, awkward for the
+    Immcantation backends (which expect a flat AIRR-format
+    ``pandas.DataFrame``). This helper:
+
+    * Iterates over each cell;
+    * Keeps only **productive** contigs at the requested ``locus`` (``IGH``
+      by default for BCR; pass e.g. ``'TRB'`` for TCR beta);
+    * Picks the **dominant** contig per cell, ranked by
+      ``duplicate_count`` (UMI support);
+    * Emits one row per cell into an AIRR-format ``DataFrame`` carrying
+      the standard sequence / germline / mutation columns plus any extra
+      ``obs`` columns requested.
+
+    Parameters
+    ----------
+    adata
+        Single-cell AIRR AnnData with ``obsm[airr_key]`` (e.g. as returned
+        by :func:`ov.datasets.airr_singlecell_bcr` or any scirpy-style
+        loader).
+    airr_key
+        ``obsm`` key holding the awkward contig array (default ``'airr'``).
+    locus
+        Locus to extract: ``'IGH'`` (default — heavy chain) for BCR,
+        ``'TRB'`` for TCR beta, etc.
+    fields
+        AIRR fields to pull from each contig. If ``None``, a useful default
+        is used: ``v_call`` / ``d_call`` / ``j_call`` / ``c_call`` /
+        ``junction`` / ``junction_aa`` / ``sequence_alignment`` /
+        ``germline_alignment_d_mask`` / ``mu_freq`` / ``duplicate_count`` /
+        ``sample_id``. Missing fields are silently skipped.
+    obs_cols
+        ``adata.obs`` columns to attach to each row (default: none).
+
+    Returns
+    -------
+    :class:`pandas.DataFrame`
+        One row per cell with the requested fields and a ``cell_id`` column
+        matching ``adata.obs_names``. Cells without a productive heavy
+        chain are dropped.
+    """
+    if airr_key not in adata.obsm:
+        raise KeyError(
+            f"obsm[{airr_key!r}] not found — expected per-cell receptor "
+            "contigs (e.g. from ov.datasets.airr_singlecell_bcr)."
+        )
+    arr = adata.obsm[airr_key]
+    default_fields = [
+        "v_call", "d_call", "j_call", "c_call",
+        "junction", "junction_aa",
+        "sequence_alignment", "germline_alignment_d_mask",
+        "mu_freq", "duplicate_count", "sample_id", "productive",
+    ]
+    wanted = list(fields) if fields is not None else default_fields
+    avail_fields = set(getattr(arr, "fields", []) or [])
+    if len(arr) > 0:
+        avail_fields |= set(getattr(arr[0], "fields", []) or [])
+    wanted = [f for f in wanted if f in avail_fields]
+
+    def _str_or_none(v):
+        if v is None:
+            return None
+        s = str(v)
+        return None if s in ("None", "nan", "") else s
+
+    def _to_float(v):
+        if v is None:
+            return float("nan")
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return float("nan")
+
+    rows = []
+    for i in range(len(arr)):
+        cell_id = str(adata.obs_names[i])
+        best = None
+        for chain in arr[i]:
+            loc = _str_or_none(chain["locus"]) if "locus" in avail_fields else None
+            if loc != locus:
+                continue
+            prod = (
+                _str_or_none(chain["productive"])
+                if "productive" in avail_fields else "True"
+            )
+            if prod not in ("T", "True", "true", "TRUE"):
+                continue
+            dc_v = (
+                _to_float(chain["duplicate_count"])
+                if "duplicate_count" in avail_fields else 0.0
+            )
+            if not (best and dc_v <= best[0]):
+                rec = {}
+                for f in wanted:
+                    val = chain[f]
+                    if f in ("duplicate_count", "mu_freq", "junction_length"):
+                        rec[f] = _to_float(val)
+                    else:
+                        rec[f] = _str_or_none(val)
+                rec["cell_id"] = cell_id
+                best = (dc_v, rec)
+        if best is not None:
+            rows.append(best[1])
+
+    db = pd.DataFrame(rows)
+    if obs_cols:
+        meta = adata.obs[list(obs_cols)].copy()
+        meta.index = meta.index.astype(str)
+        db = db.merge(meta, left_on="cell_id", right_index=True, how="left")
+    return db
