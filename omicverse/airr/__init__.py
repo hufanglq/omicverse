@@ -111,6 +111,7 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "read_airr":                 (".io", "read_airr"),
     "read_tracer":               (".io", "read_tracer"),
     "from_airr_array":           (".io", "from_airr_array"),
+    "extract_heavy_chains":      (".io", "extract_heavy_chains"),
     "simulate_airr":             (".io", "simulate_airr"),
     "airr_obs_columns":          (".io", "airr_obs_columns"),
     # --- single-cell QC ---

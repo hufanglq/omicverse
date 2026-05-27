@@ -10,6 +10,7 @@ The AIRR tutorial chapter spans several modalities, one real dataset each:
 | Loader | Returns | Modality | Source |
 |---|---|---|---|
 | :func:`airr_singlecell` | AnnData (cells x genes) | single-cell TCR + GEX | Wu et al., Nature 2020 |
+| :func:`airr_singlecell_bcr` | AnnData (cells x genes) | single-cell BCR + GEX | Stephenson et al., Nat Med 2021 |
 | :func:`airr_bcr` | DataFrame (AIRR rearrangement) | B-cell BCR (SHM / lineage) | Laserson et al., PNAS 2014 |
 | :func:`airr_tcr_antigen` | AnnData (cells x genes) | antigen-labelled scTCR + GEX | 10x Genomics dCODE dextramer |
 | :func:`vdjdb_reference` | DataFrame (TCR-epitope) | antigen-specificity reference | VDJdb (antigenomics) |
@@ -79,6 +80,68 @@ def airr_singlecell(dir: str = "./data") -> "AnnData":
     """Load the real Wu 2020 single-cell TCR + GEX dataset (5k cells)."""
     import anndata as ad
     return ad.read_h5ad(_fetch("wu2020_sctcr.h5ad", dir))
+
+
+@register_function(
+    aliases=[
+        "airr_singlecell_bcr", "airr_scbcr", "stephenson2021", "stephenson2021_bcr",
+        "single_cell_bcr", "covid_bcr", "单细胞BCR", "新冠BCR",
+    ],
+    category="datasets",
+    description=(
+        "Real single-cell BCR + gene-expression dataset for the single-cell "
+        "BCR arm of the AIRR tutorial — Stephenson et al. (Nature Medicine "
+        "2021, 27:904-916; PMID 33879890) 10x 5' scBCR-seq + GEX of "
+        "PBMC B cells from COVID-19 patients spanning the full severity "
+        "spectrum (Ward / Ward-O2 / Ward-NIV / ITU-O2 / ITU-NIV / "
+        "ITU-intubated). Obtained via scirpy.datasets.stephenson2021_5k() "
+        "and curated to a balanced 5,000-cell x 24,929-gene tutorial "
+        "subset (29 patients, 9 published B-cell states from naive through "
+        "memory to plasmablast and IgG/IgA/IgM plasma cells). The BCR "
+        "library was IgBLAST/Change-O processed upstream so per-contig "
+        "``sequence_alignment`` / ``germline_alignment_d_mask`` / ``mu_freq`` "
+        "are already populated. Returned as an AnnData: ``.X`` holds "
+        "log-normalised expression (raw UMIs kept in ``.layers['raw']``), "
+        "``.obsm['airr']`` holds the per-cell IgH/IgK/IgL contigs in "
+        "scirpy's awkward-array format, ``.obsm['X_umap']`` the published "
+        "GEX UMAP, and ``.obs`` carries ``sample_id`` / ``patient_id`` / "
+        "``full_clustering`` (B_naive / B_immature / B_switched_memory / "
+        "Plasmablast / Plasma_cell_Ig*) / ``Status_on_day_collection`` "
+        "(severity at sampling). Feed straight into the ``ov.airr`` "
+        "single-cell BCR clonotype + SHM workflow "
+        "(``from_airr_array`` → ``chain_qc`` → ``define_clonotypes`` → "
+        "``clonal_expansion`` → ``isotype_class`` → ``mutation_analysis``)."
+    ),
+    examples=[
+        "adata = ov.datasets.airr_singlecell_bcr()",
+        "adata = ov.airr.from_airr_array(adata)",
+    ],
+)
+def airr_singlecell_bcr(dir: str = "./data") -> "AnnData":
+    """Load the real Stephenson 2021 single-cell BCR + GEX dataset (5k cells).
+
+    Wraps ``scirpy.datasets.stephenson2021_5k()`` — which fetches the
+    pre-processed MuData from the scirpy figshare DOI (10.6084/m9.figshare.
+    22249894) — and merges its ``gex`` + ``airr`` modalities back into a
+    single AnnData with the per-cell BCR contigs in ``obsm['airr']`` (the
+    on-disk layout ``ov.airr.from_airr_array`` expects).
+
+    Parameters
+    ----------
+    dir
+        Ignored; kept for API symmetry with the other AIRR loaders.
+        Caching uses the scirpy / pooch default location.
+
+    Returns
+    -------
+    :class:`~anndata.AnnData`
+        5,000 B-cells x 24,929 genes with BCR contigs in ``obsm['airr']``.
+    """
+    import scirpy as ir
+    mdata = ir.datasets.stephenson2021_5k()
+    gex = mdata.mod["gex"].copy()
+    gex.obsm["airr"] = mdata.mod["airr"].obsm["airr"]
+    return gex
 
 
 @register_function(
