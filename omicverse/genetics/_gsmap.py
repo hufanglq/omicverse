@@ -120,15 +120,60 @@ class _gsmap_runner:
     def latent_to_gene(self, **overrides) -> Path:
         """Run the gsMap latent-to-gene step and return its feather output path.
 
+        This step maps the latent representation back to gene-level specificity
+        scores (GSS) and writes a ``.feather`` file consumed by
+        :meth:`generate_ldscore`.
+
         Parameters
         ----------
-        **overrides
-            Keyword arguments forwarded to :meth:`build_latent_to_gene_config`.
+        input_hdf5_path : str, optional
+            Path to the latent-augmented h5ad file. Defaults to the output of
+            :meth:`find_latent_representation`.
+        latent_representation : str, optional
+            Key in ``adata.obsm`` that stores the latent embedding
+            (e.g. ``'latent_GVAE'``).
+        num_neighbour : int, default 51
+            Number of nearest neighbours in the latent space for smoothing.
+        num_neighbour_spatial : int, default 201
+            Number of nearest neighbours in the spatial coordinate space.
+        species : str, optional
+            Species identifier for homolog transformation.
+            **Required for non-human ST data** (e.g. ``'MOUSE_GENE_SYM'``).
+            **Omit for human ST data** — gene symbols are already human.
+        homolog_file : str, optional
+            Path to a two-column TSV mapping ``species`` gene symbols to human
+            gene symbols (``HUMAN_GENE_SYM``).
+            **Required when ``species`` is provided.**
+            **Omit for human ST data.**
+        annotation : str, optional
+            ``adata.obs`` column used for cell-type aware aggregation.
+        no_expression_fraction : bool, default False
+            If ``True``, skip expression-fraction filtering.
+        gM_slices : str, optional
+            Spatial slice identifier for multi-slice datasets.
 
         Returns
         -------
         pathlib.Path
-            Path to the marker-score feather file.
+            Path to the marker-score feather file
+            (``{sample_name}_gene_marker_score.feather``).
+
+        Examples
+        --------
+        >>> # Human ST — no homolog conversion needed
+        >>> marker_path = runner.latent_to_gene(
+        ...     latent_representation='latent_GVAE',
+        ...     num_neighbour=51,
+        ...     num_neighbour_spatial=201,
+        ... )
+        >>> # Mouse ST — must provide homolog mapping
+        >>> marker_path = runner.latent_to_gene(
+        ...     latent_representation='latent_GVAE',
+        ...     num_neighbour=51,
+        ...     num_neighbour_spatial=201,
+        ...     species='MOUSE_GENE_SYM',
+        ...     homolog_file='/path/to/mouse_human_homologs.txt',
+        ... )
         """
 
         from ..external.gsmap import run_latent_to_gene
