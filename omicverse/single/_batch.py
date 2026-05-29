@@ -131,6 +131,12 @@ _BATCH_OBSM = {
     "combat":    "X_combat",
     "scanorama": "X_scanorama",
     "scVI":      "X_scVI",
+    "scANVI":    "X_scANVI",
+    "SCANVI":    "X_scANVI",
+    "totalVI":   "X_totalVI",
+    "TOTALVI":   "X_totalVI",
+    "scPoli":    "X_scPoli",
+    "SCPOLI":    "X_scPoli",
     "CellANOVA": "X_cellanova",
     "Concord":   "X_concord",
     "cca":       "X_cca",
@@ -191,10 +197,14 @@ def batch_correction(adata:anndata.AnnData,batch_key:str,
         Embedding key used by embedding-based methods (for example Harmony).
     methods : str, default='harmony'
         Integration backend. Supported values include ``'harmony'``,
-        ``'combat'``, ``'scanorama'``, ``'scVI'``, ``'CellANOVA'``,
-        ``'Concord'``, and ``'cca'`` / ``'seurat_cca'`` — the pure-Python
-        port of ``Seurat::RunCCA`` (via the `pyccasc` package, no R /
-        rpy2 required).
+        ``'combat'``, ``'scanorama'``, ``'scVI'``, ``'scANVI'``
+        (semi-supervised VAE; requires ``labels_key=``),
+        ``'totalVI'`` (joint RNA+protein; requires
+        ``protein_expression_obsm_key=``), ``'scPoli'`` (scArches
+        conditional VAE; supports ``cell_type_keys=`` for prototype
+        learning), ``'CellANOVA'``, ``'Concord'``, and ``'cca'`` /
+        ``'seurat_cca'`` — the pure-Python port of ``Seurat::RunCCA``
+        (via the `pyccasc` package, no R / rpy2 required).
     n_pcs : int, default=50
         Number of principal components / canonical components used by the
         selected backend. For ``'cca'`` this is the number of canonical
@@ -359,6 +369,112 @@ def batch_correction(adata:anndata.AnnData,batch_key:str,
         SCVI_LATENT_KEY = "X_scVI"
         adata.obsm[SCVI_LATENT_KEY] = model.get_latent_representation()
         add_reference(adata,'scVI','batch correction with scVI')
+        return model
+    elif methods in ('scANVI', 'SCANVI'):
+        try:
+            import scvi
+        except ImportError:
+            raise ImportError(
+                'Please install scvi-tools: `pip install scvi-tools` '
+                'or `conda install scvi-tools -c conda-forge`'
+            )
+        # scANVI is semi-supervised — it needs a cell-type column with an
+        # explicit "unknown" marker for cells without a confident label.
+        labels_key = kwargs.pop('labels_key', None)
+        unlabeled_category = kwargs.pop('unlabeled_category', 'Unknown')
+        if labels_key is None:
+            raise ValueError(
+                "methods='scANVI' requires labels_key= naming a column in "
+                "adata.obs with cell-type labels (use the value passed as "
+                "unlabeled_category= for cells you want the model to predict "
+                "labels for). See scvi-tools docs: "
+                "https://docs.scvi-tools.org/en/stable/user_guide/models/scanvi.html"
+            )
+        scvi.model.SCANVI.setup_anndata(
+            adata, layer="counts", batch_key=batch_key,
+            labels_key=labels_key, unlabeled_category=unlabeled_category,
+        )
+        init_kwargs, train_kwargs = _split_kwargs_by_signature(
+            kwargs,
+            ("scvi.model.SCANVI.__init__", scvi.model.SCANVI.__init__),
+            ("scvi.model.SCANVI.train", scvi.model.SCANVI.train),
+        )
+        model = scvi.model.SCANVI(adata, **init_kwargs)
+        model.train(**train_kwargs)
+        adata.obsm["X_scANVI"] = model.get_latent_representation()
+        # scANVI also predicts labels for unlabeled cells — surface them.
+        try:
+            adata.obs["scANVI_predicted_labels"] = model.predict()
+        except Exception:
+            pass
+        add_reference(adata, 'scANVI', 'batch correction with scANVI (semi-supervised)')
+        return model
+    elif methods in ('totalVI', 'TOTALVI'):
+        try:
+            import scvi
+        except ImportError:
+            raise ImportError(
+                'Please install scvi-tools: `pip install scvi-tools` '
+                'or `conda install scvi-tools -c conda-forge`'
+            )
+        # totalVI is a JOINT RNA + protein (CITE-seq / Total-seq) model. It
+        # needs the protein matrix attached to adata.obsm[<key>] BEFORE call.
+        protein_expression_obsm_key = kwargs.pop('protein_expression_obsm_key', None)
+        if protein_expression_obsm_key is None:
+            raise ValueError(
+                "methods='totalVI' requires protein_expression_obsm_key= naming "
+                "an obsm slot with the (cell × protein) ADT count matrix. "
+                "If you only have RNA, use methods='scVI' (or 'scANVI' with "
+                "labels). See scvi-tools docs: "
+                "https://docs.scvi-tools.org/en/stable/user_guide/models/totalvi.html"
+            )
+        scvi.model.TOTALVI.setup_anndata(
+            adata, batch_key=batch_key, layer="counts",
+            protein_expression_obsm_key=protein_expression_obsm_key,
+        )
+        init_kwargs, train_kwargs = _split_kwargs_by_signature(
+            kwargs,
+            ("scvi.model.TOTALVI.__init__", scvi.model.TOTALVI.__init__),
+            ("scvi.model.TOTALVI.train", scvi.model.TOTALVI.train),
+        )
+        model = scvi.model.TOTALVI(adata, **init_kwargs)
+        model.train(**train_kwargs)
+        adata.obsm["X_totalVI"] = model.get_latent_representation()
+        add_reference(adata, 'totalVI', 'batch correction with totalVI (joint RNA+protein)')
+        return model
+    elif methods in ('scPoli', 'SCPOLI'):
+        try:
+            from scarches.models.scpoli import scPoli
+        except ImportError:
+            raise ImportError(
+                'Please install scArches: `pip install scarches`'
+            )
+        # scPoli is a conditional VAE that learns per-condition prototypes
+        # (optionally per cell type, if cell_type_keys is supplied). It takes
+        # condition_keys instead of batch_key; we forward batch_key there.
+        cell_type_keys = kwargs.pop('cell_type_keys', None)
+        init_kwargs, train_kwargs = _split_kwargs_by_signature(
+            kwargs,
+            ("scarches.models.scpoli.scPoli.__init__", scPoli.__init__),
+            ("scarches.models.scpoli.scPoli.train", scPoli.train),
+        )
+        scpoli_init = {
+            "adata": adata,
+            "condition_keys": batch_key,
+            **init_kwargs,
+        }
+        if cell_type_keys is not None:
+            scpoli_init["cell_type_keys"] = cell_type_keys
+        model = scPoli(**scpoli_init)
+        model.train(**train_kwargs)
+        # scPoli's canonical embedding accessor is get_latent(adata, mean=True);
+        # fall back to get_latent() with no kwargs for older releases.
+        try:
+            latent = model.get_latent(adata, mean=True)
+        except TypeError:
+            latent = model.get_latent(adata)
+        adata.obsm["X_scPoli"] = latent
+        add_reference(adata, 'scPoli', 'batch correction with scPoli (conditional VAE)')
         return model
     elif methods=='CellANOVA':
         from ..external.cellanova.model import calc_ME,calc_BE,calc_TE
