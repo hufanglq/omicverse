@@ -454,11 +454,19 @@ class TestDefaultSummary:
 
 class TestRunningTask:
     def test_dataclass_fields(self) -> None:
-        task = asyncio.Future()
-        rt = RunningTask(task=task, request="test", started_at=1.0)
-        assert rt.task is task
-        assert rt.request == "test"
-        assert rt.started_at == 1.0
+        # asyncio.Future() called bare in MainThread relies on the
+        # deprecated implicit-loop fallback, which raises RuntimeError on
+        # Python 3.12+. Allocate the future against an explicit loop so
+        # the test works on every supported interpreter.
+        loop = asyncio.new_event_loop()
+        try:
+            task = loop.create_future()
+            rt = RunningTask(task=task, request="test", started_at=1.0)
+            assert rt.task is task
+            assert rt.request == "test"
+            assert rt.started_at == 1.0
+        finally:
+            loop.close()
 
 
 # ── Channel imports use shared code ──────────────────────────────────────────
