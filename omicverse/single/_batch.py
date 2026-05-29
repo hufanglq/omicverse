@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Optional
+import inspect
+import warnings
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from ..pp import scale,pca
 import scanpy as sc
@@ -10,6 +12,115 @@ from .._settings import add_reference,settings
 from .._registry import register_function
 from .._monitor import monitor
 from ..report._provenance import tracked, note
+
+
+def _split_kwargs_by_signature(
+    kwargs: Dict[str, Any],
+    *destinations: Tuple[str, Callable[..., Any]],
+) -> Tuple[Dict[str, Any], ...]:
+    """Partition ``kwargs`` across multiple callables by inspecting each
+    callable's signature.
+
+    The historical ``ov.single.batch_correction(..., **kwargs)`` API forwarded
+    every keyword to ``scvi.model.SCVI(**kwargs)``, leaving ``.train()``
+    un-parameterisable. Modern scvi-tools splits user-tunable parameters
+    between ``Model.__init__`` (architecture: ``n_hidden`` / ``n_latent`` / …)
+    and ``Model.train`` (optimisation: ``max_epochs`` / ``batch_size`` /
+    ``accelerator`` / …). This helper makes that split automatic.
+
+    Parameters
+    ----------
+    kwargs
+        The full keyword dict supplied by the user.
+    destinations
+        One ``(label, callable)`` pair per target, in priority order. The
+        ``label`` is used in warnings; the ``callable`` is introspected via
+        ``inspect.signature``.
+
+    Returns
+    -------
+    tuple of dict
+        One dict per destination, in the same order as ``destinations``.
+
+    Routing rules
+    -------------
+    1. A kwarg whose name is a named parameter of exactly ONE destination
+       routes there (precise match).
+    2. A kwarg whose name is a named parameter of MULTIPLE destinations
+       routes to the first match in ``destinations`` order, with a warning
+       naming the others.
+    3. A kwarg whose name is in NO destination's named params is sent to the
+       first destination that has ``**kwargs`` (``VAR_KEYWORD``) — this
+       preserves the legacy "send everything to init" behaviour for unknown
+       names without silently mis-routing the ones we now recognise.
+    4. A kwarg that no destination would accept (no named match, no
+       ``VAR_KEYWORD`` anywhere) is dropped with a warning listing the
+       accepted names.
+
+    Notes
+    -----
+    Only ``POSITIONAL_OR_KEYWORD`` and ``KEYWORD_ONLY`` parameters count as
+    "named". ``self`` is filtered out automatically. Signature introspection
+    failures (C-extension callables, decorator obfuscation) collapse to "no
+    named params, no VAR_KEYWORD" — those destinations effectively become
+    inert.
+    """
+    sigs = []
+    for label, fn in destinations:
+        try:
+            params = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            params = {}
+        named = {
+            n for n, p in params.items()
+            if n != "self" and p.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        }
+        has_var_kw = any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+        sigs.append((label, named, has_var_kw))
+
+    buckets: list[Dict[str, Any]] = [dict() for _ in destinations]
+    unrecognised: list[str] = []
+
+    for key, val in kwargs.items():
+        matches = [i for i, (_, named, _) in enumerate(sigs) if key in named]
+
+        if len(matches) == 1:
+            buckets[matches[0]][key] = val
+        elif len(matches) > 1:
+            winner = sigs[matches[0]][0]
+            losers = ", ".join(sigs[i][0] for i in matches[1:])
+            warnings.warn(
+                f"kwarg {key!r} is a named parameter of both {winner} and "
+                f"{losers}; routed to {winner}. Rename or pass positionally "
+                f"to disambiguate.",
+                UserWarning, stacklevel=3,
+            )
+            buckets[matches[0]][key] = val
+        else:
+            var_kw_dests = [i for i, (_, _, has) in enumerate(sigs) if has]
+            if var_kw_dests:
+                buckets[var_kw_dests[0]][key] = val
+            else:
+                unrecognised.append(key)
+
+    if unrecognised:
+        accepted = sorted({n for _, named, _ in sigs for n in named})
+        preview = ", ".join(accepted[:20])
+        if len(accepted) > 20:
+            preview += ", …"
+        warnings.warn(
+            f"Dropped unrecognised kwarg(s) {sorted(unrecognised)!r} — none "
+            f"of {[d[0] for d in destinations]} accept them. Accepted "
+            f"names include: {preview}.",
+            UserWarning, stacklevel=3,
+        )
+
+    return tuple(buckets)
 
 
 # Per-method obsm key the integrated embedding lands in. Used by the
@@ -232,8 +343,19 @@ def batch_correction(adata:anndata.AnnData,batch_key:str,
             )
         import scvi
         scvi.model.SCVI.setup_anndata(adata, layer="counts", batch_key=batch_key)
-        model = scvi.model.SCVI(adata, **kwargs)
-        model.train()
+        # The user's **kwargs may target either SCVI.__init__ (architecture:
+        # n_hidden / n_latent / dropout_rate / dispersion / gene_likelihood /
+        # latent_distribution / …) or SCVI.train (optimisation: max_epochs /
+        # batch_size / accelerator / devices / early_stopping / …). Route by
+        # signature so train-side parameters are no longer silently swallowed
+        # by SCVI.__init__'s **kwargs catch-all.
+        init_kwargs, train_kwargs = _split_kwargs_by_signature(
+            kwargs,
+            ("scvi.model.SCVI.__init__", scvi.model.SCVI.__init__),
+            ("scvi.model.SCVI.train", scvi.model.SCVI.train),
+        )
+        model = scvi.model.SCVI(adata, **init_kwargs)
+        model.train(**train_kwargs)
         SCVI_LATENT_KEY = "X_scVI"
         adata.obsm[SCVI_LATENT_KEY] = model.get_latent_representation()
         add_reference(adata,'scVI','batch correction with scVI')
