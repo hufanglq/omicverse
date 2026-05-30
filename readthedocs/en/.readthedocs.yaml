@@ -6,26 +6,24 @@
 version: 2
 
 # Set the version of Python and other tools you might need
+#
+# We fully override the build via `build.commands` so we can pass
+# `-j auto` to Sphinx — the single biggest build-time win. The default
+# RTD `sphinx:` builder runs single-threaded; the read phase (parsing
+# ~470 notebooks + ~380 autodoc API pages) parallelises cleanly
+# (conf.py declares parallel_read_safe / parallel_write_safe), so on a
+# multi-core RTD builder this cuts the dominant Sphinx phase several-fold.
+#
+# Because `build.commands` replaces the default flow, the submodule
+# checkout, dependency install and Sphinx invocation are all spelled out
+# here (mirroring what RTD logged for the default build, plus `-j auto`).
 build:
   os: ubuntu-22.04
   tools:
     python: "3.10"
-  jobs:
-    # Downscale oversized embedded notebook figures on the ephemeral
-    # checkout before Sphinx reads them. Shrinks the HTML output (and the
-    # myst-nb render/write cost) without touching the notebooks in git.
-    pre_build:
-      - python omicverse_guide/docs/_scripts/downscale_notebook_images.py omicverse_guide/docs --max-px 900 --workers 4
-
-submodules:
-  include: all
-  recursive: true
-
-sphinx:
-  configuration: omicverse_guide/docs/conf.py
-  fail_on_warning: false
-
-python:
-  install:
-  - requirements: requirements.txt
-  - requirements: omicverse_guide/requirements.txt
+  commands:
+    - git submodule update --init --force --recursive
+    - python -m pip install --upgrade --no-cache-dir pip setuptools
+    - python -m pip install --exists-action=w --no-cache-dir -r requirements.txt
+    - python -m pip install --exists-action=w --no-cache-dir -r omicverse_guide/requirements.txt
+    - python -m sphinx -j auto -T -b html -d _build/doctrees -D language=en omicverse_guide/docs "$READTHEDOCS_OUTPUT/html"
