@@ -10,6 +10,12 @@ build:
   os: ubuntu-22.04
   tools:
     python: "3.10"
+  jobs:
+    # Downscale oversized embedded notebook figures on the ephemeral
+    # checkout before Sphinx reads them. Shrinks the HTML output (and the
+    # myst-nb render/write cost) without touching the notebooks in git.
+    pre_build:
+      - python omicverse_guide/docs/_scripts/downscale_notebook_images.py omicverse_guide/docs --max-px 900 --workers 4
 
 submodules:
   include: all
