@@ -1189,7 +1189,13 @@ def regress(adata, *, keys=None, layer=None, n_jobs=8, **kwargs):
     if missing:
         raise KeyError(
             f"Columns {missing} not found in adata.obs. "
-            f"Available columns: {list(adata.obs.columns)}"
+            f"Available columns (first 10): "
+            f"{list(adata.obs.columns)[:10]}"
+            + (
+                " ..."
+                if len(adata.obs.columns) > 10
+                else ""
+            )
         )
     if layer is not None:
         kwargs.setdefault("layer", layer)
@@ -1201,6 +1207,9 @@ def regress(adata, *, keys=None, layer=None, n_jobs=8, **kwargs):
         del adata_mock
     else:
         import rapids_singlecell as rsc
+        # NOTE: GPU path only forwards ``keys`` and ``inplace=False``;
+        # ``layer``, ``n_jobs``, and other ``**kwargs`` are silently
+        # ignored by the rapids_singlecell backend.
         adata.layers['regressed'] = rsc.pp.regress_out(adata, keys, inplace=False)
     add_reference(adata,'scanpy','regressing out covariates with scanpy')
 
