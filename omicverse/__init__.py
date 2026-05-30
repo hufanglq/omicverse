@@ -91,6 +91,7 @@ _LAZY_MODULES = {
     'genetics',
     'airr',
     'report',
+    'epi',
 }
 
 # Lazy attribute mappings: {attribute_name: (module_path, attr_name)}
