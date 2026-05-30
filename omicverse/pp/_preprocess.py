@@ -1138,7 +1138,7 @@ def scale(adata, max_value=10, layers_add='scaled', to_sparse=False, **kwargs):
 @register_function(
     aliases=["回归校正", "regress", "regress_out", "去除技术效应", "协变量回归"],
     category="preprocessing",
-    description="Regress out technical covariates (mitochondrial ratio and UMI counts)",
+    description="Regress out technical covariates (e.g. mitochondrial ratio, UMI counts, or custom variables)",
     prerequisites={
         "optional_functions": ["qc", "normalize_pearson_residuals"]
     },
@@ -1152,18 +1152,23 @@ def scale(adata, max_value=10, layers_add='scaled', to_sparse=False, **kwargs):
     examples=[
         "ov.pp.regress(adata)",
         "ov.pp.regress(adata, n_jobs=4)",
+        "ov.pp.regress(adata, keys=['mito_perc', 'nUMIs', 'S_score', 'G2M_score'])",
     ],
     related=["scale", "regress_and_scale", "pca"],
 )
-def regress(adata, *, layer=None, n_jobs=8, **kwargs):
-    """Regress out technical covariates (``mito_perc``, ``nUMIs``) from
-    each gene.
+def regress(adata, *, keys=None, layer=None, n_jobs=8, **kwargs):
+    """Regress out technical covariates from each gene.
 
     Parameters
     ----------
     adata : anndata.AnnData
-        AnnData object with ``adata.obs['mito_perc']`` and
-        ``adata.obs['nUMIs']`` already computed (by ``ov.pp.qc``).
+        AnnData object. The columns specified in ``keys`` must exist
+        in ``adata.obs``.
+    keys : list of str, optional
+        Column names in ``adata.obs`` to regress out. Defaults to
+        ``['mito_perc', 'nUMIs']``, which are computed by ``ov.pp.qc``.
+        Common additions include cell-cycle scores (``S_score``,
+        ``G2M_score``) and ribosomal gene percentage.
     layer
         Expression layer to regress. ``None`` uses ``adata.X``.
     n_jobs
@@ -1175,19 +1180,28 @@ def regress(adata, *, layer=None, n_jobs=8, **kwargs):
     Returns
     -------
     None
-        Writes the residualised expression to ``adata.layers['regressed']``.
+        Writes the residualised expression to
+        ``adata.layers['regressed']``.
     """
+    if keys is None:
+        keys = ['mito_perc', 'nUMIs']
+    missing = [k for k in keys if k not in adata.obs.columns]
+    if missing:
+        raise KeyError(
+            f"Columns {missing} not found in adata.obs. "
+            f"Available columns: {list(adata.obs.columns)}"
+        )
     if layer is not None:
         kwargs.setdefault("layer", layer)
     kwargs.setdefault("n_jobs", n_jobs)
     if settings.mode == 'cpu' or settings.mode == 'cpu-gpu-mixed':
         kwargs.setdefault("copy", True)
-        adata_mock = sc.pp.regress_out(adata, ['mito_perc', 'nUMIs'], **kwargs)
+        adata_mock = sc.pp.regress_out(adata, keys, **kwargs)
         adata.layers['regressed'] = adata_mock.X.copy()
         del adata_mock
     else:
         import rapids_singlecell as rsc
-        adata.layers['regressed']=rsc.pp.regress_out(adata, ['mito_perc', 'nUMIs'], inplace=False)
+        adata.layers['regressed'] = rsc.pp.regress_out(adata, keys, inplace=False)
     add_reference(adata,'scanpy','regressing out covariates with scanpy')
 
 @monitor
