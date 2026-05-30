@@ -7,23 +7,28 @@ version: 2
 
 # Set the version of Python and other tools you might need
 #
-# We fully override the build via `build.commands` so we can pass
-# `-j auto` to Sphinx — the single biggest build-time win. The default
-# RTD `sphinx:` builder runs single-threaded; the read phase (parsing
-# ~470 notebooks + ~380 autodoc API pages) parallelises cleanly
-# (conf.py declares parallel_read_safe / parallel_write_safe), so on a
-# multi-core RTD builder this cuts the dominant Sphinx phase several-fold.
-#
-# Because `build.commands` replaces the default flow, the submodule
-# checkout, dependency install and Sphinx invocation are all spelled out
-# here (mirroring what RTD logged for the default build, plus `-j auto`).
+# NOTE on build speed: the Sphinx phase (~620s) dominates this build and
+# is CPU-bound on RTD's 1–2-core builders. `-j auto` was tested and gave
+# no speedup (655s vs 626s — slightly worse from worker oversubscription),
+# and a build-time figure downscaler cost more than it saved. The durable
+# levers are (a) an RTD build-time-limit increase, (b) trimming the
+# autodoc API page count, or (c) the GitHub Actions docs build. Keeping
+# the standard single-threaded builder here — it is the fastest and most
+# maintainable option on RTD's hardware.
 build:
   os: ubuntu-22.04
   tools:
     python: "3.10"
-  commands:
-    - git submodule update --init --force --recursive
-    - python -m pip install --upgrade --no-cache-dir pip setuptools
-    - python -m pip install --exists-action=w --no-cache-dir -r requirements.txt
-    - python -m pip install --exists-action=w --no-cache-dir -r omicverse_guide/requirements.txt
-    - python -m sphinx -j auto -T -b html -d _build/doctrees -D language=en omicverse_guide/docs "$READTHEDOCS_OUTPUT/html"
+
+submodules:
+  include: all
+  recursive: true
+
+sphinx:
+  configuration: omicverse_guide/docs/conf.py
+  fail_on_warning: false
+
+python:
+  install:
+  - requirements: requirements.txt
+  - requirements: omicverse_guide/requirements.txt
