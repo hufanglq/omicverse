@@ -12,6 +12,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from anndata import AnnData
+import omicverse as ov
 
 
 def _small_adata(n_cells: int = 50, n_genes: int = 100, seed: int = 42) -> AnnData:
@@ -39,8 +40,6 @@ def test_regress_default_keys_writes_regressed_layer():
     ``mito_perc`` and ``nUMIs`` and store the result in
     ``adata.layers['regressed']``, preserving the original shape.
     """
-    import omicverse as ov
-
     adata = _small_adata()
     original_shape = adata.shape
 
@@ -62,8 +61,6 @@ def test_regress_custom_keys_with_cell_cycle():
     must accept and regress additional ``adata.obs`` columns beyond the
     default ``mito_perc`` / ``nUMIs`` pair.
     """
-    import omicverse as ov
-
     adata = _small_adata()
     ov.pp.regress(
         adata,
@@ -74,8 +71,6 @@ def test_regress_custom_keys_with_cell_cycle():
 
 def test_regress_single_custom_key():
     """Regression with only a single custom column must succeed."""
-    import omicverse as ov
-
     adata = _small_adata()
     ov.pp.regress(adata, keys=["S_score"])
     assert "regressed" in adata.layers
@@ -89,8 +84,6 @@ def test_regress_missing_key_raises_keyerror_with_available_columns():
     ``regress()`` must raise ``KeyError`` and include the list of
     available column names in the message.
     """
-    import omicverse as ov
-
     adata = _small_adata()
     with pytest.raises(KeyError, match="not found in adata.obs"):
         ov.pp.regress(adata, keys=["mito_perc", "nonexistent_column"])
@@ -100,8 +93,6 @@ def test_regress_nonexistent_key_message_lists_columns():
     """The error message must include 'Available columns' so users can
     see what columns actually exist.
     """
-    import omicverse as ov
-
     adata = _small_adata()
     with pytest.raises(KeyError, match="Available columns"):
         ov.pp.regress(adata, keys=["nUMIs", "bad_key"])
@@ -115,8 +106,6 @@ def test_regress_and_scale_works_after_custom_keys_regress():
     custom-keys ``regress()`` call, producing a
     ``regressed_and_scaled`` layer.
     """
-    import omicverse as ov
-
     adata = _small_adata()
     ov.pp.regress(adata, keys=["mito_perc", "nUMIs", "S_score"])
     ov.pp.regress_and_scale(adata)
@@ -128,8 +117,6 @@ def test_regress_and_scale_works_after_custom_keys_regress():
 
 def test_regress_preserves_obs_columns():
     """``regress()`` must not mutate or drop existing ``.obs`` columns."""
-    import omicverse as ov
-
     adata = _small_adata()
     original_obs_cols = set(adata.obs.columns)
     ov.pp.regress(adata)
@@ -138,9 +125,17 @@ def test_regress_preserves_obs_columns():
 
 def test_regress_idempotent_with_same_keys():
     """Calling ``regress()`` twice with the same keys must not raise."""
-    import omicverse as ov
-
     adata = _small_adata()
     ov.pp.regress(adata)
-    ov.pp.regress(adata)  # second call overwrites 'regressed' layer
+    ov.pp.regress(adata)  # second call re-computes from adata.X, overwriting 'regressed'
     assert "regressed" in adata.layers
+
+
+# ── empty keys guard ──────────────────────────────────────────────────────
+
+
+def test_regress_empty_keys_raises_valueerror():
+    """``ov.pp.regress(adata, keys=[])`` must raise ``ValueError``."""
+    adata = _small_adata()
+    with pytest.raises(ValueError, match="non-empty list"):
+        ov.pp.regress(adata, keys=[])

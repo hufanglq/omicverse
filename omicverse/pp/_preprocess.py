@@ -1156,7 +1156,7 @@ def scale(adata, max_value=10, layers_add='scaled', to_sparse=False, **kwargs):
     ],
     related=["scale", "regress_and_scale", "pca"],
 )
-def regress(adata, *, keys=None, layer=None, n_jobs=8, **kwargs):
+def regress(adata, *, keys: list[str] | None = None, layer=None, n_jobs=8, **kwargs):
     """Regress out technical covariates from each gene.
 
     Parameters
@@ -1185,6 +1185,9 @@ def regress(adata, *, keys=None, layer=None, n_jobs=8, **kwargs):
     """
     if keys is None:
         keys = ['mito_perc', 'nUMIs']
+    if not keys:
+        raise ValueError(
+            "keys must be a non-empty list of adata.obs column names.")
     missing = [k for k in keys if k not in adata.obs.columns]
     if missing:
         raise KeyError(
@@ -1210,6 +1213,16 @@ def regress(adata, *, keys=None, layer=None, n_jobs=8, **kwargs):
         # NOTE: GPU path only forwards ``keys`` and ``inplace=False``;
         # ``layer``, ``n_jobs``, and other ``**kwargs`` are silently
         # ignored by the rapids_singlecell backend.
+        if layer is not None:
+            import warnings
+
+            warnings.warn(
+                "The GPU (rapids_singlecell) backend ignores the `layer` "
+                "argument and always reads from adata.X. "
+                "The current call specified layer=%r." % layer,
+                UserWarning,
+                stacklevel=2,
+            )
         adata.layers['regressed'] = rsc.pp.regress_out(adata, keys, inplace=False)
     add_reference(adata,'scanpy','regressing out covariates with scanpy')
 
