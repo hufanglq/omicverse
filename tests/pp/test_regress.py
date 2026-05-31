@@ -4,7 +4,7 @@ Verifies:
 - Default call (``keys=None``) regresses ``mito_perc`` and ``nUMIs``
   and writes ``adata.layers['regressed']``.
 - Custom ``keys`` with cell-cycle scores regress additional covariates.
-- Missing columns raise ``KeyError`` with the available column list.
+- Missing columns raise ``ValueError`` with the available column list.
 - Compatibility with ``regress_and_scale`` downstream.
 """
 from __future__ import annotations
