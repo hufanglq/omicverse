@@ -10,6 +10,7 @@ import pandas as pd
 import skmisc.loess as sl
 import scanpy as sc
 import time 
+import warnings
 
 from scipy.sparse import issparse, csr_matrix
 
@@ -1192,7 +1193,7 @@ def scale(adata, max_value=10, layers_add='scaled', to_sparse=False,
 @register_function(
     aliases=["回归校正", "regress", "regress_out", "去除技术效应", "协变量回归"],
     category="preprocessing",
-    description="Regress out technical covariates (mitochondrial ratio and UMI counts)",
+    description="Regress out technical covariates (e.g. mitochondrial ratio, UMI counts, or custom variables)",
     prerequisites={
         "optional_functions": ["qc", "normalize_pearson_residuals"]
     },
@@ -1206,42 +1207,84 @@ def scale(adata, max_value=10, layers_add='scaled', to_sparse=False,
     examples=[
         "ov.pp.regress(adata)",
         "ov.pp.regress(adata, n_jobs=4)",
+        "ov.pp.regress(adata, keys=['mito_perc', 'nUMIs', 'S_score', 'G2M_score'])",
     ],
     related=["scale", "regress_and_scale", "pca"],
 )
-def regress(adata, *, layer=None, n_jobs=8, **kwargs):
-    """Regress out technical covariates (``mito_perc``, ``nUMIs``) from
-    each gene.
+def regress(adata, *, keys: Optional[List[str]] = None, layer=None, n_jobs=8, **kwargs):
+    """Regress out technical covariates from each gene.
 
     Parameters
     ----------
     adata : anndata.AnnData
-        AnnData object with ``adata.obs['mito_perc']`` and
-        ``adata.obs['nUMIs']`` already computed (by ``ov.pp.qc``).
+        AnnData object. The columns specified in ``keys`` must exist
+        in ``adata.obs``.
+    keys : list of str, optional
+        Column names in ``adata.obs`` to regress out. Defaults to
+        ``['mito_perc', 'nUMIs']``, which are computed by ``ov.pp.qc``.
+        Common additions include cell-cycle scores (``S_score``,
+        ``G2M_score``) and ribosomal gene percentage.
     layer
         Expression layer to regress. ``None`` uses ``adata.X``.
     n_jobs
         Parallel jobs for the CPU regressor. Default ``8``.
     **kwargs
-        Extra options forwarded to the backend
-        (``scanpy.pp.regress_out`` or ``rapids_singlecell.pp.regress_out``).
+        Extra options forwarded to ``scanpy.pp.regress_out`` on CPU
+        (e.g. ``copy``). Ignored when the GPU backend
+        (``rapids_singlecell``) is active.
 
     Returns
     -------
     None
-        Writes the residualised expression to ``adata.layers['regressed']``.
+        Writes the residualised expression to
+        ``adata.layers['regressed']``.
     """
+    if keys is None:
+        keys = ['mito_perc', 'nUMIs']
+    if not keys:
+        raise ValueError(
+            "keys must be a non-empty list of adata.obs column names.")
+    missing = [k for k in keys if k not in adata.obs.columns]
+    if missing:
+        raise ValueError(
+            f"Columns {missing} not found in adata.obs. "
+            f"Available columns (first 10): "
+            f"{list(adata.obs.columns)[:10]}"
+            + (
+                " ..."
+                if len(adata.obs.columns) > 10
+                else ""
+            )
+        )
     if layer is not None:
         kwargs.setdefault("layer", layer)
     kwargs.setdefault("n_jobs", n_jobs)
     if settings.mode == 'cpu' or settings.mode == 'cpu-gpu-mixed':
         kwargs.setdefault("copy", True)
-        adata_mock = sc.pp.regress_out(adata, ['mito_perc', 'nUMIs'], **kwargs)
+        adata_mock = sc.pp.regress_out(adata, keys, **kwargs)
         adata.layers['regressed'] = adata_mock.X.copy()
         del adata_mock
     else:
         import rapids_singlecell as rsc
-        adata.layers['regressed']=rsc.pp.regress_out(adata, ['mito_perc', 'nUMIs'], inplace=False)
+        # NOTE: GPU path only forwards ``keys`` and ``inplace=False``;
+        # ``layer``, ``n_jobs``, and other ``**kwargs`` are silently
+        # ignored by the rapids_singlecell backend.
+        if layer is not None:
+            warnings.warn(
+                "The GPU (rapids_singlecell) backend ignores the `layer` "
+                "argument and always reads from adata.X. "
+                "The current call specified layer=%r." % layer,
+                UserWarning,
+                stacklevel=2,
+            )
+        if n_jobs != 8:
+            warnings.warn(
+                "The GPU (rapids_singlecell) backend ignores `n_jobs`. "
+                "The current call specified n_jobs=%r." % n_jobs,
+                UserWarning,
+                stacklevel=2,
+            )
+        adata.layers['regressed'] = rsc.pp.regress_out(adata, keys, inplace=False)
     add_reference(adata,'scanpy','regressing out covariates with scanpy')
 
 @monitor
