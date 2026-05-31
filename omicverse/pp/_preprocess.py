@@ -10,6 +10,7 @@ import pandas as pd
 import skmisc.loess as sl
 import scanpy as sc
 import time 
+import warnings
 
 from scipy.sparse import issparse, csr_matrix
 
@@ -1156,7 +1157,7 @@ def scale(adata, max_value=10, layers_add='scaled', to_sparse=False, **kwargs):
     ],
     related=["scale", "regress_and_scale", "pca"],
 )
-def regress(adata, *, keys: list[str] | None = None, layer=None, n_jobs=8, **kwargs):
+def regress(adata, *, keys: Optional[List[str]] = None, layer=None, n_jobs=8, **kwargs):
     """Regress out technical covariates from each gene.
 
     Parameters
@@ -1190,7 +1191,7 @@ def regress(adata, *, keys: list[str] | None = None, layer=None, n_jobs=8, **kwa
             "keys must be a non-empty list of adata.obs column names.")
     missing = [k for k in keys if k not in adata.obs.columns]
     if missing:
-        raise KeyError(
+        raise ValueError(
             f"Columns {missing} not found in adata.obs. "
             f"Available columns (first 10): "
             f"{list(adata.obs.columns)[:10]}"
@@ -1214,8 +1215,6 @@ def regress(adata, *, keys: list[str] | None = None, layer=None, n_jobs=8, **kwa
         # ``layer``, ``n_jobs``, and other ``**kwargs`` are silently
         # ignored by the rapids_singlecell backend.
         if layer is not None:
-            import warnings
-
             warnings.warn(
                 "The GPU (rapids_singlecell) backend ignores the `layer` "
                 "argument and always reads from adata.X. "

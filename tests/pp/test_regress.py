@@ -79,13 +79,13 @@ def test_regress_single_custom_key():
 # ── error handling ────────────────────────────────────────────────────────
 
 
-def test_regress_missing_key_raises_keyerror_with_available_columns():
+def test_regress_missing_key_raises_valueerror_with_available_columns():
     """When a requested column does not exist in ``adata.obs``,
-    ``regress()`` must raise ``KeyError`` and include the list of
+    ``regress()`` must raise ``ValueError`` and include the list of
     available column names in the message.
     """
     adata = _small_adata()
-    with pytest.raises(KeyError, match="not found in adata.obs"):
+    with pytest.raises(ValueError, match="not found in adata.obs"):
         ov.pp.regress(adata, keys=["mito_perc", "nonexistent_column"])
 
 
@@ -94,7 +94,7 @@ def test_regress_nonexistent_key_message_lists_columns():
     see what columns actually exist.
     """
     adata = _small_adata()
-    with pytest.raises(KeyError, match="Available columns"):
+    with pytest.raises(ValueError, match="Available columns"):
         ov.pp.regress(adata, keys=["nUMIs", "bad_key"])
 
 
