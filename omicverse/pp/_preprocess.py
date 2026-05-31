@@ -1175,8 +1175,9 @@ def regress(adata, *, keys: Optional[List[str]] = None, layer=None, n_jobs=8, **
     n_jobs
         Parallel jobs for the CPU regressor. Default ``8``.
     **kwargs
-        Extra options forwarded to the backend
-        (``scanpy.pp.regress_out`` or ``rapids_singlecell.pp.regress_out``).
+        Extra options forwarded to ``scanpy.pp.regress_out`` on CPU
+        (e.g. ``copy``). Ignored when the GPU backend
+        (``rapids_singlecell``) is active.
 
     Returns
     -------
@@ -1219,6 +1220,13 @@ def regress(adata, *, keys: Optional[List[str]] = None, layer=None, n_jobs=8, **
                 "The GPU (rapids_singlecell) backend ignores the `layer` "
                 "argument and always reads from adata.X. "
                 "The current call specified layer=%r." % layer,
+                UserWarning,
+                stacklevel=2,
+            )
+        if n_jobs != 8:
+            warnings.warn(
+                "The GPU (rapids_singlecell) backend ignores `n_jobs`. "
+                "The current call specified n_jobs=%r." % n_jobs,
                 UserWarning,
                 stacklevel=2,
             )
