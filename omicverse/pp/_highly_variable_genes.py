@@ -782,6 +782,24 @@ def highly_variable_genes(  # noqa: PLR0913
     if batch_key is not None:
         print(f"   {Colors.CYAN}Batch key: {Colors.BOLD}{batch_key}{Colors.ENDC}")
 
+    from .._oom_compat import is_oom as _is_oom
+    if _is_oom(adata):
+        # Out-of-core HVG: reuse the chunked Pearson-residual selection that
+        # ov.pp.preprocess already runs on AnnDataOOM — fully chunked, no
+        # materialisation. (Dispersion-based seurat/cell_ranger flavours are
+        # not yet chunked; Pearson residuals are the out-of-core default.)
+        from anndataoom import chunked_highly_variable_genes_pearson
+        chunked_highly_variable_genes_pearson(
+            adata, n_top_genes=(n_top_genes or 2000),
+            batch_key=batch_key, layer=layer,
+        )
+        if ("highly_variable" not in adata.var
+                and "highly_variable_features" in adata.var):
+            adata.var["highly_variable"] = adata.var["highly_variable_features"].values
+        print(f"   {Colors.GREEN}{EMOJI['done']} {int(adata.var['highly_variable'].sum())} "
+              f"HVGs (chunked Pearson residuals, out-of-core){Colors.ENDC}")
+        return None if inplace else adata.var
+
     if not isinstance(adata, AnnData):
         msg = (
             "`pp.highly_variable_genes` expects an `AnnData` argument, "
