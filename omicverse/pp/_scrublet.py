@@ -165,6 +165,73 @@ def scrublet(
     print(f"\n{Colors.HEADER}{Colors.BOLD}{EMOJI['start']} Running Scrublet Doublet Detection:{Colors.ENDC}")
     print(f"   {Colors.CYAN}Mode: {Colors.BOLD}{settings.mode}{Colors.ENDC}")
     print(f"   {Colors.CYAN}Computing doublet prediction using Scrublet algorithm{Colors.ENDC}")
+
+    # --- Out-of-core / bounded-memory path for AnnDataOOM backends ---------
+    # Scrublet's doublet simulation + KNN need an in-memory matrix, but only
+    # the HVG-subset of raw counts (n_obs x n_HVG), never the full gene
+    # matrix. The default code path below would call adata.to_memory(), which
+    # densifies the WHOLE matrix; intercept first and materialise only the
+    # bounded HVG subset out-of-core.
+    from .._oom_compat import is_oom as _is_oom
+    if _is_oom(adata) and adata_sim is None and batch_key is None:
+        from anndataoom import chunked_scrublet_prepare
+        print(f"   {Colors.GREEN}{EMOJI['start']} Out-of-core scrublet: chunked HVG selection + bounded materialisation...{Colors.ENDC}")
+        ad_obs, hvg_mask, n_hvg = chunked_scrublet_prepare(adata, min_cells=3, min_genes=3)
+        print(f"   {Colors.CYAN}Bounded subset: {Colors.BOLD}{ad_obs.n_obs:,} cells x {n_hvg:,} HVGs{Colors.ENDC}")
+
+        # Mirror the in-memory _run_scrublet tail, but HVG is ALREADY selected
+        # out-of-core, so do NOT re-run highly_variable_genes (that would
+        # double-select genes and degrade the scores).
+        ad_obs.layers["raw"] = ad_obs.X.copy()
+        normalize_total(ad_obs)
+        ad_sim = scrublet_simulate_doublets(
+            ad_obs,
+            layer="raw",
+            sim_doublet_ratio=sim_doublet_ratio,
+            synthetic_doublet_umi_subsampling=synthetic_doublet_umi_subsampling,
+            random_seed=random_state,
+        )
+        del ad_obs.layers["raw"]
+        if log_transform:
+            log1p(ad_obs)
+            log1p(ad_sim)
+        normalize_total(ad_obs, target_sum=1e6)
+        normalize_total(ad_sim, target_sum=1e6)
+        ad_obs = _scrublet_call_doublets(
+            adata_obs=ad_obs,
+            adata_sim=ad_sim,
+            n_neighbors=n_neighbors,
+            expected_doublet_rate=expected_doublet_rate,
+            stdev_doublet_rate=stdev_doublet_rate,
+            mean_center=mean_center,
+            normalize_variance=normalize_variance,
+            n_prin_comps=n_prin_comps,
+            use_approx_neighbors=use_approx_neighbors,
+            knn_dist_metric=knn_dist_metric,
+            get_doublet_neighbor_parents=get_doublet_neighbor_parents,
+            threshold=threshold,
+            random_state=random_state,
+            verbose=verbose,
+            use_gpu=use_gpu,
+        )
+        # Write results back to the (possibly cell-filtered) original adata,
+        # aligned by obs name; cells dropped by the gene/cell filter get NaN /
+        # False so downstream predicted_doublet==False filtering is safe.
+        score = np.full(adata.n_obs, np.nan)
+        pred = np.zeros(adata.n_obs, dtype=bool)
+        _pos = {n: i for i, n in enumerate(np.asarray(adata.obs_names))}
+        _idx = np.array([_pos[n] for n in ad_obs.obs_names], dtype=int)
+        score[_idx] = np.asarray(ad_obs.obs["doublet_score"].values)
+        pred[_idx] = np.asarray(ad_obs.obs["predicted_doublet"].values, dtype=bool)
+        adata.obs["doublet_score"] = score
+        adata.obs["predicted_doublet"] = pred
+        adata.uns["scrublet"] = ad_obs.uns["scrublet"]
+        print(f"\n{Colors.GREEN}{EMOJI['done']} Scrublet Analysis Completed Successfully! (out-of-core, bounded to {n_hvg:,} HVGs){Colors.ENDC}")
+        note(backend=f"scrublet-oom{'(gpu)' if use_gpu else ''}",
+             viz=([{"function": "ov.pl.doublet_score_histogram", "kwargs": {}}]
+                   if "doublet_score" in adata.obs.columns else []))
+        return adata if copy else None
+
     from ._qc import _is_rust_backend
     is_rust = _is_rust_backend(adata)
     if is_rust:

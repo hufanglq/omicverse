@@ -403,6 +403,27 @@ def highly_variable_features(
         Updates ``data.var['highly_variable_features']`` and ranking fields.
     """
 
+    from ._qc import _is_oom
+    if _is_oom(data):
+        if flavor != "pegasus":
+            raise NotImplementedError(
+                f"highly_variable_features flavor {flavor!r} is not supported "
+                "for the OOM backend; use flavor='pegasus' or switch to "
+                "mode='cpu'."
+            )
+        if batch is not None:
+            raise NotImplementedError(
+                "Batch-aware pegasus HVF selection is not supported for the "
+                "OOM backend; pass batch=None or switch to mode='cpu'."
+            )
+        from anndataoom import chunked_highly_variable_features_pegasus
+        chunked_highly_variable_features_pegasus(data, n_top=n_top, span=span)
+        print(
+            f"{int(data.var['highly_variable_features'].sum())} "
+            "highly variable features have been selected."
+        )
+        return
+
     if flavor == "pegasus":
         select_hvf_pegasus(data, batch, n_top=n_top, span=span)
     else:
@@ -942,6 +963,23 @@ def normalize_pearson_residuals(
     None
         Updates ``adata.X`` in place with Pearson residuals.
     """
+    from ._qc import _is_oom
+    if _is_oom(adata):
+        # Out-of-core: never materialise the dense residual matrix. Wrap X
+        # (or `layer`) in a lazy PearsonResidualBackedArray that stores only
+        # the per-cell/per-gene count sums and computes residuals per chunk
+        # on read. Peak RAM is bounded by chunk_size, not cell count.
+        if copy:
+            raise NotImplementedError(
+                "normalize_pearson_residuals(copy=True) is not available for "
+                "the OOM backend; use inplace=True (the lazy residual array "
+                "is assigned to adata.X / the given layer)."
+            )
+        from anndataoom import chunked_normalize_pearson_residuals
+        chunked_normalize_pearson_residuals(
+            adata, theta=theta, clip=clip, layer=layer, inplace=inplace,
+        )
+        return None
     sc.experimental.pp.normalize_pearson_residuals(
         adata, theta=theta, clip=clip, check_values=check_values,
         layer=layer, inplace=inplace, copy=copy, **kwargs,
@@ -1259,6 +1297,18 @@ def regress(adata, *, keys: Optional[List[str]] = None, layer=None, n_jobs=8, **
     if layer is not None:
         kwargs.setdefault("layer", layer)
     kwargs.setdefault("n_jobs", n_jobs)
+    from ._qc import _is_oom
+    if _is_oom(adata):
+        # Out-of-core regress-out: fit per-gene OLS of expression on the
+        # covariate design [ones, *keys] in ONE chunked pass, then install a
+        # lazy RegressedBackedArray (stores only betas + the tiny design
+        # matrix) in layers['regressed']. Never materialises the full residual
+        # matrix. Uses the same `keys` (resolved + validated above) as the
+        # in-memory branch, so custom covariates are honoured.
+        from anndataoom import chunked_regress
+        chunked_regress(adata, keys=tuple(keys))
+        add_reference(adata, 'scanpy', 'regressing out covariates with scanpy')
+        return
     if settings.mode == 'cpu' or settings.mode == 'cpu-gpu-mixed':
         kwargs.setdefault("copy", True)
         adata_mock = sc.pp.regress_out(adata, keys, **kwargs)

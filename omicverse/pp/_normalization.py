@@ -11,6 +11,10 @@ import numpy as np
 
 from .._settings import settings, EMOJI, Colors
 from .._registry import register_function
+# Out-of-core (AnnDataOOM) dispatch: lazy chunked building blocks are imported
+# inside the function bodies so omicverse imports cleanly without anndataoom
+# (the shim's is_oom is always False then).
+from .._oom_compat import is_oom as _is_oom
 from ._compat import CSBase, CSCBase, CSRBase, DaskArray, old_positionals
 
 # Import local implementations from _scale.py
@@ -524,9 +528,25 @@ def log1p(
     adata = adata.copy() if copy else adata
     view_to_actual(adata)
 
+    # ── Out-of-core path: wrap X in a lazy TransformedBackedArray ─────
+    # Files are read-only, so we never write log values back to disk; the
+    # log1p is applied on-the-fly during chunked reads. Composes with a
+    # prior chunked_normalize_total into a single lazy wrapper.
+    if _is_oom(adata):
+        if layer is not None or obsm is not None:
+            raise NotImplementedError(
+                "Out-of-core log1p only supports adata.X (layer/obsm not supported)."
+            )
+        from anndataoom import chunked_log1p as _chunked_log1p
+        _chunked_log1p(adata)
+        adata.uns["log1p"] = {"base": float(np.e) if base is None else base}
+        if copy:
+            return adata
+        return None
+
     from ._qc import _is_rust_backend
     is_rust = _is_rust_backend(adata)
-    
+
     if chunked:
         if (layer is not None) or (obsm is not None):
             msg = (
@@ -734,6 +754,34 @@ def normalize_total(
     if max_fraction < 0 or max_fraction > 1:
         msg = "Choose max_fraction between 0 and 1."
         raise ValueError(msg)
+
+    # ── Out-of-core path: lazy per-cell normalization over X ──────────
+    # Wraps adata.X in a TransformedBackedArray (norm applied on chunked
+    # reads); stashes raw counts in layers['counts'] and the per-cell
+    # divisor in obs['_norm_factor'] without materialising the matrix.
+    if _is_oom(adata):
+        if layer is not None or layers is not None or layer_norm is not None:
+            raise NotImplementedError(
+                "Out-of-core normalize_total only supports adata.X "
+                "(layer/layers/layer_norm not supported)."
+            )
+        if not inplace:
+            raise NotImplementedError(
+                "Out-of-core normalize_total only supports inplace=True."
+            )
+        from anndataoom import chunked_normalize_total as _chunked_normalize_total
+        _ts = float(target_sum) if target_sum is not None else None
+        _chunked_normalize_total(
+            adata,
+            target_sum=_ts,
+            exclude_highly_expressed=exclude_highly_expressed,
+            max_fraction=max_fraction,
+        )
+        if key_added is not None:
+            adata.obs[key_added] = adata.obs["_norm_factor"]
+        if copy:
+            return adata
+        return None
 
     # Deprecated features
     if layers is not None:
