@@ -26,6 +26,32 @@ from ..report._provenance import tracked, note
 
 
 # Local implementations to replace scanpy filtering functions
+def _oom_axis_stats(X, axis):
+    """Per-row (axis=1) or per-column (axis=0) sum and nnz of a backed
+    matrix in ONE chunked pass — no densification, no materialisation.
+    Used by the out-of-core filter paths so AnnDataOOM never loads X."""
+    from scipy.sparse import issparse
+    n_obs, n_vars = X.shape
+    n = n_obs if axis == 1 else n_vars
+    s = np.zeros(n, dtype=np.float64)
+    nnz = np.zeros(n, dtype=np.int64)
+    for start, end, chunk in X.chunked():
+        if issparse(chunk):
+            if axis == 1:
+                s[start:end] = np.asarray(chunk.sum(axis=1)).ravel()
+                nnz[start:end] = chunk.getnnz(axis=1)
+            else:
+                s += np.asarray(chunk.sum(axis=0)).ravel()
+                nnz += chunk.getnnz(axis=0)
+        else:
+            chunk = np.asarray(chunk)
+            if axis == 1:
+                s[start:end] = chunk.sum(axis=1); nnz[start:end] = (chunk > 0).sum(axis=1)
+            else:
+                s += chunk.sum(axis=0); nnz += (chunk > 0).sum(axis=0)
+    return s, nnz
+
+
 def _filter_cells_impl(
     adata,
     min_counts=None,
@@ -36,11 +62,14 @@ def _filter_cells_impl(
 ):
     """Internal implementation of cell filtering."""
     X = adata.X
-    n_counts = np.asarray(X.sum(axis=1)).flatten() if sparse.issparse(X) else X.sum(axis=1)
-
-    if sparse.issparse(X):
+    if _is_oom(adata):
+        # out-of-core: one chunked pass over X, never densify/materialise.
+        n_counts, n_genes = _oom_axis_stats(X, axis=1)
+    elif sparse.issparse(X):
+        n_counts = np.asarray(X.sum(axis=1)).flatten()
         n_genes = np.asarray((X > 0).sum(axis=1)).flatten()
     else:
+        n_counts = X.sum(axis=1)
         n_genes = (X > 0).sum(axis=1)
 
     cell_subset = np.ones(adata.n_obs, dtype=bool)
@@ -71,11 +100,13 @@ def _filter_genes_impl(
 ):
     """Internal implementation of gene filtering."""
     X = adata.X
-    n_counts = np.asarray(X.sum(axis=0)).flatten() if sparse.issparse(X) else X.sum(axis=0)
-
-    if sparse.issparse(X):
+    if _is_oom(adata):
+        n_counts, n_cells = _oom_axis_stats(X, axis=0)
+    elif sparse.issparse(X):
+        n_counts = np.asarray(X.sum(axis=0)).flatten()
         n_cells = np.asarray((X > 0).sum(axis=0)).flatten()
     else:
+        n_counts = X.sum(axis=0)
         n_cells = (X > 0).sum(axis=0)
 
     gene_subset = np.ones(adata.n_vars, dtype=bool)
