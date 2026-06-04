@@ -3,16 +3,31 @@
 Mirrors :func:`._sgd.optimize_layout_torch` but runs the gradient
 computation on Apple's MLX (metal) backend — the same Apple path
 omicverse already uses for PCA (``_pca_mlx.MLXPCA``) and Harmony, rather
-than torch-MPS (MLX has the float64/sparse coverage MPS lacks here).
+than torch-MPS (MLX has the float64/sparse coverage MPS lacks here, and
+metal's launch/sync overhead makes a literal torch-MPS port of this
+many-small-kernel loop slower than CPU).
 
-Design: the cheap O(edges) schedule bookkeeping and the RNG stay in NumPy
-on the host; only the per-epoch gather → gradient → scatter-add runs on
-MLX. On Apple Silicon's unified memory the host↔device handoff of the
-(small) index arrays is nearly free, so this keeps the embedding resident
-on metal while sidestepping MLX's gaps around boolean-index / argwhere.
+Design: the cheap O(edges) active-edge selection and the per-edge schedule
+stay in NumPy on the host (host ``np.nonzero`` over the schedule is only a
+few % of the runtime); the *expensive* per-epoch work — the gather →
+gradient → scatter-add **and the negative-sample draw** — runs on metal.
 
-Negative sampling uses the same schedule-based per-edge count as the torch
-path (``(n - epoch_of_next_negative_sample) / epochs_per_negative_sample``).
+The original version drew negatives on the host (``np.repeat`` of the
+catch-up counts + ``np.random`` of millions of vertices, then transferred
+to metal every epoch); profiling showed that single step was ~31% of the
+runtime. Here each active edge instead draws a *fixed*
+``round(negative_sample_rate)`` negatives directly on-device with
+``mx.random`` — the standard GPU/cuML simplification (umap-learn's
+catch-up schedule averages to the same rate). That removes the host RNG
+and the per-epoch index transfer, the bulk of the speedup.
+
+Why not process *all* edges every epoch under ``mx.compile``? On a real
+fuzzy graph only ~30% of edges are active in a typical epoch, so an
+all-edges static-shape loop does ~3× the necessary work — and ``mx.compile``
+with ``shapeless=True`` can't trace the dynamic scatter anyway
+(``Scatter Sum cannot infer output shapes``). Active-only + on-device
+negatives, run eagerly, is the faster choice on real data.
+
 Bit-equality with umap-learn is not the goal (different RNG + parallel
 updates); the embedding is validated by trustworthiness. Spectral init is
 done on the CPU (scipy) by the caller.
@@ -53,21 +68,56 @@ def optimize_layout_mlx(
     """Optimise ``embedding`` with the MLX (metal) edge-SGD.
 
     Same gradient formulas / clip(±4) / linear alpha decay as the torch and
-    umap-learn paths. Returns the optimised ``(n, dim)`` float32 array.
+    umap-learn paths. Active-edge selection stays on the host; the gradient
+    and the (fixed-count, on-device) negative sampling run on metal. Returns
+    the optimised ``(n, dim)`` float32 array.
     """
     import mlx.core as mx
 
-    head = np.asarray(head)
-    tail = np.asarray(tail)
+    head = np.ascontiguousarray(np.asarray(head), dtype=np.int32)
+    tail = np.ascontiguousarray(np.asarray(tail), dtype=np.int32)
     eps_sample = np.asarray(epochs_per_sample, dtype=np.float64)
-    eps_neg = eps_sample / negative_sample_rate
     next_sample = eps_sample.copy()
-    next_neg = eps_neg.copy()
-    sampleable = eps_sample > 0
+    sampleable = eps_sample > 0  # epochs_per_sample <= 0 -> never sampled
 
-    rng = np.random.default_rng(int(seed) & 0x7FFFFFFF)
-    n_vertices = embedding.shape[0]
+    n_vertices = int(embedding.shape[0])
+    n_neg = int(round(float(negative_sample_rate)))
+    a_f, b_f, gamma_f = float(a), float(b), float(gamma)
+
     emb = mx.array(np.ascontiguousarray(embedding, dtype=np.float32))
+    key = mx.random.key(int(seed) & 0x7FFFFFFF)
+
+    def gradient_step(emb, jx, kx, negk, alpha):
+        """One epoch's metal work for the active edges ``(jx, kx)`` with
+        pre-drawn on-device negatives ``negk`` of shape ``(A, n_neg)``."""
+        # ---- attractive (positive edges) ----
+        diff = emb[jx] - emb[kx]
+        d2 = mx.sum(diff * diff, axis=1)
+        d2c = mx.maximum(d2, 1e-12)
+        # pow(d2c, b) = pow(d2c, b-1) * d2c -> one fractional pow instead of two
+        pb1 = mx.power(d2c, b_f - 1.0)
+        gc = (-2.0 * a_f * b_f * pb1) / (a_f * pb1 * d2c + 1.0)
+        gc = mx.where(d2 > 0.0, gc, 0.0)
+        grad = mx.clip(mx.expand_dims(gc, 1) * diff, -CLIP, CLIP) * alpha
+        emb = emb.at[jx].add(grad)
+        if move_other:
+            emb = emb.at[kx].add(-grad)
+
+        # ---- repulsion: fixed n_neg negatives per active edge ----
+        if negk is not None:
+            dn = mx.expand_dims(emb[jx], 1) - emb[negk]      # (A, n_neg, 2)
+            d2n = mx.sum(dn * dn, axis=2)
+            d2nc = mx.maximum(d2n, 1e-12)
+            gcn = (2.0 * gamma_f * b_f) / ((0.001 + d2nc) * (a_f * mx.power(d2nc, b_f) + 1.0))
+            gcn = mx.where(d2n > 0.0, gcn, 0.0)
+            gradn = mx.clip(mx.expand_dims(gcn, 2) * dn, -CLIP, CLIP) * alpha
+            # All n_neg negatives of an anchor land on the *same* vertex, so
+            # sum them first and scatter once per active edge -- n_neg-fold
+            # fewer atomic scatter ops than expanding to (A*n_neg,) anchors,
+            # the dominant cost when n_neg=5. (The negative vertices don't
+            # move; only the anchor repels.)
+            emb = emb.at[jx].add(mx.sum(gradn, axis=1))
+        return emb
 
     rng_iter = range(n_epochs)
     if verbose:
@@ -79,51 +129,18 @@ def optimize_layout_mlx(
             pass
 
     for n in rng_iter:
-        alpha = initial_alpha * (1.0 - (float(n) / float(n_epochs)))
+        alpha = mx.array(initial_alpha * (1.0 - (float(n) / float(n_epochs))))
         active = np.nonzero(sampleable & (next_sample <= n))[0]
         if active.size == 0:
             continue
-        j = head[active]
-        k = tail[active]
-
-        # ---- attractive ----
-        jx = mx.array(j)
-        kx = mx.array(k)
-        yj = emb[jx]
-        yk = emb[kx]
-        diff = yj - yk
-        d2 = mx.sum(diff * diff, axis=1)
-        posm = d2 > 0.0
-        d2c = mx.maximum(d2, 1e-12)
-        gc = (-2.0 * a * b * mx.power(d2c, b - 1.0)) / (a * mx.power(d2c, b) + 1.0)
-        gc = mx.where(posm, gc, mx.zeros_like(gc))
-        grad = mx.clip(mx.expand_dims(gc, 1) * diff, -CLIP, CLIP) * alpha
-        emb = emb.at[jx].add(grad)
-        if move_other:
-            emb = emb.at[kx].add(-grad)
-
-        # ---- negative sampling (fixed rate per active edge) ----
-        n_neg = ((n - next_neg[active]) / eps_neg[active]).astype(np.int64)
-        n_neg = np.clip(n_neg, 0, None)
-        total = int(n_neg.sum())
-        if total > 0:
-            anchors = np.repeat(j, n_neg)
-            neg_k = rng.integers(0, n_vertices, size=total)
-            ax = mx.array(anchors)
-            nx = mx.array(neg_k)
-            ya = emb[ax]
-            yn = emb[nx]
-            dn = ya - yn
-            d2n = mx.sum(dn * dn, axis=1)
-            posn = d2n > 0.0
-            d2nc = mx.maximum(d2n, 1e-12)
-            gcn = (2.0 * gamma * b) / ((0.001 + d2nc) * (a * mx.power(d2nc, b) + 1.0))
-            gcn = mx.where(posn, gcn, mx.zeros_like(gcn))
-            gradn = mx.clip(mx.expand_dims(gcn, 1) * dn, -CLIP, CLIP) * alpha
-            emb = emb.at[ax].add(gradn)
-            next_neg[active] += n_neg * eps_neg[active]
-
+        jx = mx.array(head[active])
+        kx = mx.array(tail[active])
+        negk = None
+        if n_neg > 0:
+            key, sub = mx.random.split(key)
+            negk = mx.random.randint(0, n_vertices, (active.size, n_neg), key=sub)
+        emb = gradient_step(emb, jx, kx, negk, alpha)
         next_sample[active] += eps_sample[active]
-        mx.eval(emb)  # materialise; keeps the lazy graph from growing per epoch
+        mx.eval(emb)  # materialise; bounds the lazy graph per epoch
 
     return np.array(emb).astype(np.float32)
