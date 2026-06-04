@@ -52,7 +52,7 @@ def umap(  # noqa: PLR0913, PLR0915
     random_state: _LegacyRandom = 0,
     a: float | None = None,
     b: float | None = None,
-    method: Literal["umap", "rapids","torchdr","mde","pumap"] = "umap",
+    method: Literal["umap", "umap-gpu", "rapids", "torchdr", "mde", "pumap"] = "umap",
     key_added: str | None = None,
     neighbors_key: str = "neighbors",
     copy: bool = False,
@@ -159,6 +159,36 @@ def umap(  # noqa: PLR0913, PLR0915
             negative_sample_rate=negative_sample_rate,
             n_epochs=n_epochs,
             init=init_coords,
+            random_state=random_state_processed,
+            metric=neigh_params.get("metric", "euclidean"),
+            metric_kwds=neigh_params.get("metric_kwds", {}),
+            densmap=False,
+            densmap_kwds={},
+            output_dens=False,
+            verbose=settings.verbosity > 3,
+        )
+    elif method == "umap-gpu":
+        # Non-parametric UMAP on the GPU (omicverse.utils.gpuex.umap). Same
+        # fuzzy graph, spectral init (torch.lobpcg), a/b curve and edge-SGD
+        # update rule as the CPU 'umap' branch — only the optimisation runs on
+        # CUDA. Produces a structurally-equivalent embedding to CPU (unlike the
+        # parametric 'pumap'). n_epochs falls back to scanpy's 500/200 default
+        # inside the backend when maxiter is None (the parallel GPU SGD needs
+        # enough epochs to converge — the CPU branch's 10/20 would collapse it).
+        print(f"   {Colors.GREEN}{EMOJI['start']} Computing UMAP embedding (GPU non-parametric)...{Colors.ENDC}")
+        from ..utils.gpuex.umap import simplicial_set_embedding_torch
+
+        X_umap, _ = simplicial_set_embedding_torch(
+            data=X,
+            graph=neighbors["connectivities"].tocoo(),
+            n_components=n_components,
+            initial_alpha=alpha,
+            a=a,
+            b=b,
+            gamma=gamma,
+            negative_sample_rate=negative_sample_rate,
+            n_epochs=maxiter,  # None -> backend uses 500 (n<=10k) / 200
+            init=init_coords if init_coords is not None else "spectral",
             random_state=random_state_processed,
             metric=neigh_params.get("metric", "euclidean"),
             metric_kwds=neigh_params.get("metric_kwds", {}),

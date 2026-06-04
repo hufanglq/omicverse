@@ -1,0 +1,52 @@
+name: gpuex UMAP (Apple Silicon / MLX)
+
+# Validates the MLX (metal) edge-SGD backend of omicverse.utils.gpuex.umap
+# on a real Apple-Silicon runner — the only place the metal path can run.
+# The torch CPU path is covered by the main python-package workflow; here we
+# specifically exercise the MLX backend (skipped elsewhere).
+
+on:
+  push:
+    paths:
+      - "omicverse/utils/gpuex/umap/**"
+      - "tests/pp/test_gpuex_umap.py"
+      - ".github/workflows/gpuex-umap-mac.yml"
+  pull_request:
+    paths:
+      - "omicverse/utils/gpuex/umap/**"
+      - "tests/pp/test_gpuex_umap.py"
+      - ".github/workflows/gpuex-umap-mac.yml"
+  workflow_dispatch:
+
+jobs:
+  mlx-umap:
+    # macos-14 / macos-latest are Apple Silicon (M-series) with metal.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install minimal deps + MLX
+        run: |
+          python -m pip install --upgrade pip
+          # Only what the gpuex.umap test needs — no full omicverse install.
+          python -m pip install numpy scipy "scanpy>=1.9" scikit-learn anndata \
+            torch pytest mlx
+
+      - name: Confirm metal is available
+        run: |
+          python -c "import mlx.core as mx; assert mx.metal.is_available(); print('metal OK')"
+
+      - name: Run gpuex UMAP MLX test
+        run: |
+          # Import the package straight from the checkout (avoid the heavy
+          # full install); the gpuex.umap module is dependency-light.
+          PYTHONPATH="$PWD" python -m pytest tests/pp/test_gpuex_umap.py -v
+
+      - name: Speed benchmark — MLX (metal) vs CPU (30k cells)
+        run: |
+          PYTHONPATH="$PWD" python tests/pp/bench_gpuex_umap.py 30000

@@ -1839,7 +1839,11 @@ def umap(
     Behaviour by ``ov.settings.mode``:
 
     * ``'cpu'``                    — scanpy / umap-learn (CPU).
-    * ``'cpu-gpu-mixed'``          — parametric UMAP on GPU (pumap).
+    * ``'cpu-gpu-mixed'``          — GPU non-parametric UMAP (gpuex), which
+                                     mirrors the CPU algorithm (same fuzzy
+                                     graph, lobpcg spectral init, a/b curve,
+                                     edge-SGD) so the embedding is consistent
+                                     with cpu mode — unlike the old ``pumap``.
     * anything else (``'gpu'``)    — RAPIDS if available, falls back to
                                      pumap on import error.
     """
@@ -1868,12 +1872,12 @@ def umap(
             add_reference(adata, 'umap', 'UMAP with scanpy')
             note(backend=f"omicverse({settings.mode}) · scanpy")
         elif settings.mode == 'cpu-gpu-mixed':
-            print(f"{EMOJI['gpu']} Using torch GPU to calculate UMAP...")
+            print(f"{EMOJI['gpu']} Using torch GPU to calculate UMAP (non-parametric)...")
             print_gpu_usage_color()
             from ._umap import umap as _umap
-            _umap(adata, method='pumap', **kwargs)
-            add_reference(adata, 'umap', 'UMAP with pumap')
-            note(backend=f"omicverse({settings.mode}) · pumap")
+            _umap(adata, method='umap-gpu', **kwargs)
+            add_reference(adata, 'umap', 'UMAP with gpuex (non-parametric)')
+            note(backend=f"omicverse({settings.mode}) · umap-gpu")
         else:
             try:
                 print(f"{EMOJI['gpu']} Using RAPIDS GPU UMAP...")
@@ -1883,10 +1887,10 @@ def umap(
                 note(backend=f"omicverse({settings.mode}) · rapids")
             except Exception as e:
                 print(f"{EMOJI['error']} RAPIDS GPU UMAP failed: {e}")
-                print(f"{EMOJI['error']} Using pumap instead...")
+                print(f"{EMOJI['error']} Using GPU non-parametric UMAP instead...")
                 from ._umap import umap as _umap
-                _umap(adata, method='pumap', **kwargs)
-                note(backend=f"omicverse({settings.mode}) · pumap")
+                _umap(adata, method='umap-gpu', **kwargs)
+                note(backend=f"omicverse({settings.mode}) · umap-gpu")
         note(viz=[{"function": "ov.pl.embedding",
                     "kwargs": {"basis": "X_umap",
                                "color": pick_color_key(adata),
