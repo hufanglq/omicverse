@@ -46,3 +46,7 @@ jobs:
           # Import the package straight from the checkout (avoid the heavy
           # full install); the gpuex.umap module is dependency-light.
           PYTHONPATH="$PWD" python -m pytest tests/pp/test_gpuex_umap.py -v
+
+      - name: Speed benchmark — MLX (metal) vs CPU (30k cells)
+        run: |
+          PYTHONPATH="$PWD" python tests/pp/bench_gpuex_umap.py 30000
