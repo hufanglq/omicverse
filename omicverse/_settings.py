@@ -4,10 +4,21 @@ class omicverseConfig:
 
     def __init__(self,mode='cpu'):
         self.mode = mode
+        self.seed = None
         from .utils._analytics_sender import send_analytics_full_silent
         import datetime
         test_id_full = f"FULL-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
         send_analytics_full_silent(test_id_full)
+
+    def set_seed(self, seed: int = 0, *, deterministic: bool = False,
+                 verbose: bool = True) -> int:
+        """Set the global random seed for reproducible results.
+
+        Seeds Python / NumPy / PyTorch (CPU+CUDA) / MLX and stores the value
+        in ``self.seed``. See :func:`omicverse.set_seed` for details.
+        """
+        from .utils._seed import set_seed as _set_seed
+        return _set_seed(seed, deterministic=deterministic, verbose=verbose)
 
     @register_function(
         aliases=["GPU初始化", "gpu_init", "gpu_mode", "GPU模式", "rapids_init"],

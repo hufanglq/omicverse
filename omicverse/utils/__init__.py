@@ -120,6 +120,7 @@ from ._sample_metadata_alignment import (
     align_samples,
 )
 from ._metabolights import load_metabolights
+from ._seed import set_seed
 from ._ovagent_lookup import (
     RegistryScanner,
     initialize_skill_registry,
@@ -198,6 +199,8 @@ verifier = _verifier_module
 
 # Explicit public exports for stable, non-wildcard imports
 __all__ = [
+    # @ _seed
+    "set_seed",
     # @ _metabolights
     "load_metabolights",
     # @ _data
