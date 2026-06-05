@@ -213,6 +213,7 @@ from ._spatialseg import (
 )
 from ._nanostring import nanostring, nanostringseg
 from ._violin import violin
+from ._qc import qc
 from ._report import (
     auto_resolution_curve,
     champ_landscape,
@@ -331,6 +332,7 @@ __all__ = [
     "embedding_adjust",
     "embedding_celltype",
     "embedding_density",
+    "qc",
     "half_violin_boxplot",
     "mde",
     "pca",
