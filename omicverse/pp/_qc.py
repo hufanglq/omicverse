@@ -538,6 +538,89 @@ def _mt_mask(var_names, mt_startswith):
     return var_names.str.startswith(mt_startswith)
 
 
+@register_function(
+    aliases=["qc_metrics", "calculate_qc_metrics", "质控指标", "质量指标"],
+    category="preprocessing",
+    description=(
+        "Compute per-cell QC metrics WITHOUT filtering: flags mt/ribo/hb "
+        "genes, runs scanpy calculate_qc_metrics, and adds omicverse aliases "
+        "nUMIs / detected_genes / mito_perc. Inspect with ov.pl.qc, then "
+        "filter with ov.pp.qc(tresh=...)."
+    ),
+    requires={},
+    produces={"obs": ["nUMIs", "detected_genes", "mito_perc",
+                       "pct_counts_mt", "pct_counts_ribo", "pct_counts_hb"],
+              "var": ["mt", "ribo", "hb"]},
+    examples=[
+        "ov.pp.qc_metrics(adata)",
+        "ov.pp.qc_metrics(adata, mt_startswith='mt-')  # mouse",
+    ],
+    related=["pp.qc", "pl.qc"],
+)
+def qc_metrics(
+    adata,
+    *,
+    mt_startswith: str = "auto",
+    mt_genes=None,
+    ribo_startswith=("RPS", "RPL"),
+    ribo_genes=None,
+    hb_startswith="^HB[^(P)]",
+    hb_genes=None,
+):
+    r"""Compute per-cell QC metrics without filtering.
+
+    Flags mitochondrial / ribosomal / haemoglobin genes, runs scanpy's
+    ``calculate_qc_metrics`` (``total_counts``, ``n_genes_by_counts``,
+    ``pct_counts_{mt,ribo,hb}``), and adds the omicverse aliases ``nUMIs``,
+    ``detected_genes`` and ``mito_perc`` so both naming conventions are
+    available. Nothing is removed — this is the "look before you cut" step:
+    inspect the distributions with :func:`omicverse.pl.qc` (optionally per
+    sample), then filter with :func:`omicverse.pp.qc` using ``tresh``.
+
+    Parameters
+    ----------
+    adata
+        AnnData with raw counts in ``adata.X``.
+    mt_startswith, mt_genes
+        Mitochondrial gene prefix (``'auto'`` detects ``MT-``/``mt-``) or an
+        explicit gene list (overrides the prefix).
+    ribo_startswith, ribo_genes, hb_startswith, hb_genes
+        Ribosomal / haemoglobin gene prefixes or explicit lists.
+
+    Returns
+    -------
+    AnnData
+        ``adata`` with QC metrics added to ``obs``/``var`` (in place).
+    """
+    import scanpy as sc
+
+    var_names = adata.var_names
+    if mt_startswith == "auto" and mt_genes is None:
+        mt_startswith = _detect_mt_prefix(var_names)
+    if mt_genes is not None:
+        adata.var["mt"] = adata.var_names.isin(list(mt_genes))
+    else:
+        adata.var["mt"] = _mt_mask(var_names, mt_startswith)
+    if ribo_genes is not None:
+        adata.var["ribo"] = adata.var_names.isin(list(ribo_genes))
+    else:
+        adata.var["ribo"] = var_names.str.startswith(tuple(ribo_startswith))
+    if hb_genes is not None:
+        adata.var["hb"] = adata.var_names.isin(list(hb_genes))
+    else:
+        adata.var["hb"] = var_names.str.contains(hb_startswith)
+
+    sc.pp.calculate_qc_metrics(
+        adata, qc_vars=["mt", "ribo", "hb"], inplace=True, log1p=False,
+        percent_top=None,
+    )
+    # omicverse aliases (same definitions ov.pp.qc filters on)
+    adata.obs["nUMIs"] = adata.obs["total_counts"]
+    adata.obs["detected_genes"] = adata.obs["n_genes_by_counts"]
+    adata.obs["mito_perc"] = adata.obs["pct_counts_mt"] / 100.0
+    return adata
+
+
 @monitor
 @register_function(
     aliases=["质控", "qc", "quality_control", "质量控制"],
