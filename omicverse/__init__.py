@@ -113,6 +113,9 @@ _LAZY_ATTRS = {
     'export_registry': ('._registry', 'export_registry'),
     'import_registry': ('._registry', 'import_registry'),
 
+    # From utils._seed - global reproducibility
+    'set_seed': ('.utils._seed', 'set_seed'),
+
     # From utils.smart_agent
     'Agent': ('.utils.smart_agent', 'Agent'),
     'list_supported_models': ('.utils.smart_agent', 'list_supported_models'),
