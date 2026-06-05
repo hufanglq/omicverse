@@ -15,8 +15,8 @@ machinery:
 """
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import Optional
+from collections import abc, defaultdict
+from typing import Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -322,12 +322,60 @@ def define_clonotype_clusters(
     return adata
 
 
+def _expansion_bins(bins: Sequence[int]):
+    """Build (bucket_fn, ordered_categories) for custom clone-size bins.
+
+    ``bins`` are sorted, positive, upper-inclusive edges, e.g.
+    ``[1, 5, 10, 50, 100]`` →
+    ``1 (single)``, ``2-5``, ``6-10``, ``11-50``, ``51-100``, ``>100``.
+    """
+    edges = [int(b) for b in bins]
+    if len(edges) == 0:
+        raise ValueError("clip_at as a sequence must contain at least one edge.")
+    if any(e <= 0 for e in edges):
+        raise ValueError(f"clip_at bin edges must be positive, got {edges}.")
+    if any(b <= a for a, b in zip(edges, edges[1:])):
+        raise ValueError(
+            f"clip_at bin edges must be strictly increasing, got {edges}."
+        )
+
+    # Build the (lo, hi, label) ranges from consecutive edges.
+    ranges = []  # (lo, hi-or-None, label); hi=None is the open ">last" bucket
+    prev = 0
+    for e in edges:
+        lo, hi = prev + 1, e
+        if lo == hi == 1:
+            label = "1 (single)"
+        elif lo == hi:
+            label = str(lo)
+        else:
+            label = f"{lo}-{hi}"
+        ranges.append((lo, hi, label))
+        prev = e
+    last = edges[-1]
+    over_label = f">{last}"
+    cats = [r[2] for r in ranges] + [over_label]
+
+    def _bucket(s):
+        if s != s:  # NaN
+            return np.nan
+        s = int(s)
+        for lo, hi, label in ranges:
+            if lo <= s <= hi:
+                return label
+        return over_label
+
+    return _bucket, cats
+
+
 @register_function(
     aliases=["clonal_expansion", "airr_clonal_expansion", "克隆扩增", "扩增分析"],
     category="airr",
     description=(
-        "Categorise every cell by the size of the clonotype it belongs to "
-        "('1 (single)', '2', '3', '>= 4' by default). Writes "
+        "Categorise every cell by the size of the clonotype it belongs to. "
+        "With an int clip_at: '1 (single)', '2', '3', '>= 4' (default). With a "
+        "sequence of edges, e.g. clip_at=[1,5,10,50,100]: custom bins like "
+        "'1 (single)', '2-5', '6-10', '11-50', '51-100', '>100'. Writes "
         "obs['clonal_expansion']."
     ),
     requires={"obs": ["clone_id"]},
@@ -335,6 +383,7 @@ def define_clonotype_clusters(
     examples=[
         "ov.airr.clonal_expansion(adata)",
         "ov.airr.clonal_expansion(adata, clip_at=10)",
+        "ov.airr.clonal_expansion(adata, clip_at=[1, 5, 10, 50, 100])",
     ],
     related=["airr.define_clonotypes", "airr.plotting.clonal_expansion_plot"],
 )
@@ -342,7 +391,7 @@ def clonal_expansion(
     adata,
     *,
     target_col: str = "clone_id",
-    clip_at: int = 4,
+    clip_at: Union[int, Sequence[int]] = 4,
     key_added: str = "clonal_expansion",
 ):
     """Categorise cells by clonal-expansion level.
@@ -354,15 +403,23 @@ def clonal_expansion(
     target_col
         Clonotype id column (default ``'clone_id'``).
     clip_at
-        Clone sizes ``>= clip_at`` are pooled into one ``'>= N'`` bucket.
+        Either an ``int`` (default ``4``) or a sequence of bin edges.
+
+        * **int** — clone sizes ``>= clip_at`` are pooled into one ``'>= N'``
+          bucket, giving ``'1 (single)'``, ``'2'``, …, ``'>= clip_at'``.
+        * **sequence of ints** — user-defined, upper-inclusive, strictly
+          increasing positive edges. For ``clip_at=[1, 5, 10, 50, 100]`` clone
+          sizes map to ``'1 (single)'`` (==1), ``'2-5'``, ``'6-10'``,
+          ``'11-50'``, ``'51-100'`` and ``'>100'`` (> last edge). This keeps
+          large clonal expansions interpretable instead of producing one
+          category per size.
     key_added
         ``obs`` column for the category (default ``'clonal_expansion'``).
 
     Returns
     -------
     AnnData
-        ``obs[key_added]`` — an ordered categorical:
-        ``'1 (single)'``, ``'2'``, …, ``'>= clip_at'``.
+        ``obs[key_added]`` — an ordered categorical of expansion bins.
     """
     if target_col not in adata.obs:
         raise KeyError(
@@ -372,17 +429,29 @@ def clonal_expansion(
         adata.obs[target_col].value_counts()
     )
 
-    def _bucket(s):
-        if s != s:
-            return np.nan
-        s = int(s)
-        if s == 1:
-            return "1 (single)"
-        if s >= clip_at:
-            return f">= {clip_at}"
-        return str(s)
+    if isinstance(clip_at, abc.Sequence) and not isinstance(clip_at, (str, bytes)):
+        _bucket, cats = _expansion_bins(clip_at)
+    else:
+        clip_at = int(clip_at)
+        if clip_at < 2:
+            raise ValueError(f"int clip_at must be >= 2, got {clip_at}.")
 
-    cats = ["1 (single)"] + [str(i) for i in range(2, clip_at)] + [f">= {clip_at}"]
+        def _bucket(s):
+            if s != s:
+                return np.nan
+            s = int(s)
+            if s == 1:
+                return "1 (single)"
+            if s >= clip_at:
+                return f">= {clip_at}"
+            return str(s)
+
+        cats = (
+            ["1 (single)"]
+            + [str(i) for i in range(2, clip_at)]
+            + [f">= {clip_at}"]
+        )
+
     vals = sizes.map(_bucket)
     adata.obs[key_added] = pd.Categorical(
         vals, categories=cats, ordered=True
