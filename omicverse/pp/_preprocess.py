@@ -15,6 +15,7 @@ import warnings
 from scipy.sparse import issparse, csr_matrix
 
 from ..utils import load_signatures_from_file,predefined_signatures
+from ..utils._seed import SEED_DEFAULT, resolve_random_state
 from .._registry import register_function
 from .._settings import settings,print_gpu_usage_color,EMOJI,Colors,add_reference
 from .._oom_compat import oom_guard as _oom_guard
@@ -1434,24 +1435,28 @@ class my_PCA:
     related=["umap", "tsne", "mde"]
 )
 @tracked("pca", "ov.pp.pca")
-def pca(adata, n_pcs=50, layer='scaled',inplace=True,**kwargs):
+def pca(adata, n_pcs=50, layer='scaled',inplace=True,random_state=SEED_DEFAULT,**kwargs):
     """
     Performs Principal Component Analysis (PCA) on the data stored in a scanpy AnnData object.
 
     Arguments:
-        adata : Annotated data matrix with rows representing cells 
+        adata : Annotated data matrix with rows representing cells
         and columns representing features.
         n_pcs : Number of principal components to calculate.
-        layer : The name of the layer in `adata` where the data to be analyzed is stored. 
+        layer : The name of the layer in `adata` where the data to be analyzed is stored.
         Defaults to the 'scaled' layer,
-            and falls back to 'lognorm' if that layer does not exist. 
+            and falls back to 'lognorm' if that layer does not exist.
         Raises a KeyError if the specified layer is not present.
+        random_state : Random seed for reproducibility. Defaults to the global
+            seed set by ``ov.set_seed`` (else 0).
 
     Returns:
-        adata : The original AnnData object with the calculated PCA embeddings 
+        adata : The original AnnData object with the calculated PCA embeddings
         and other information stored in its `obsm`, `varm`,
             and `uns` fields.
     """
+    random_state = resolve_random_state(random_state)
+    kwargs['random_state'] = random_state
     #if 'lognorm' not in adata.layers:
     #    adata.layers['lognorm'] = adata.X
     # Implicit-centered scale: ov.pp.scale(use_implicit_centering=True) stores
@@ -1475,7 +1480,7 @@ def pca(adata, n_pcs=50, layer='scaled',inplace=True,**kwargs):
     if settings.mode == 'cpu':
         if sc.__version__ <'1.10':
             adata_mock=sc.AnnData(adata.layers[layer],obs=adata.obs,var=adata.var)
-            sc.pp.pca(adata_mock, n_comps=n_pcs)
+            sc.pp.pca(adata_mock, n_comps=n_pcs, random_state=random_state)
             adata.obsm[key + '|X_pca'] = adata_mock.obsm['X_pca']
             adata.varm[key + '|pca_loadings'] = adata_mock.varm['PCs']
             adata.uns[key + '|pca_var_ratios'] = adata_mock.uns['pca']['variance_ratio']
@@ -1643,7 +1648,7 @@ def neighbors(
     n_pcs: Optional[int] = None,
     use_rep: Optional[str] = None,
     knn: bool = True,
-    random_state: int= 0,
+    random_state= SEED_DEFAULT,
     n_jobs: Optional[int] = None,
     method: Optional[_Method] = 'umap',
     transformer: Optional[str] = None,
@@ -1714,6 +1719,7 @@ def neighbors(
     and in later versions it will become a hard dependency.
     
     """
+    random_state = resolve_random_state(random_state)
     # Ensure PCA exists; compute a default if missing so downstream code can proceed
     if settings.mode =='cpu':
         print(f"{EMOJI['cpu']} Using Scanpy CPU to calculate neighbors...")
@@ -1777,7 +1783,7 @@ def umap(
     gamma: float = 1.0,
     negative_sample_rate: int = 5,
     init_pos=None,
-    random_state=0,
+    random_state=SEED_DEFAULT,
     a: float | None = None,
     b: float | None = None,
     method: str | None = None,
@@ -1847,6 +1853,7 @@ def umap(
     * anything else (``'gpu'``)    — RAPIDS if available, falls back to
                                      pumap on import error.
     """
+    random_state = resolve_random_state(random_state)
     # Build the kwargs dict that downstream dispatchers expect. Keep
     # `method` and `init_pos` optional so each branch can pick its default.
     forward = dict(
@@ -2053,11 +2060,12 @@ def louvain(
 )
 @tracked("leiden", "ov.pp.leiden")
 def leiden(
-    adata, resolution=1.0, random_state=0,
+    adata, resolution=1.0, random_state=SEED_DEFAULT,
     key_added='leiden', local_iterations=100, max_levels=10, device=None, symmetrize=None, **kwargs):
     '''
     leiden clustering
     '''
+    random_state = resolve_random_state(random_state)
     if settings.mode == 'cpu':
         print(f"{EMOJI['cpu']} Using Scanpy CPU Leiden...")
         from ._leiden import leiden as _leiden
@@ -2228,7 +2236,7 @@ def tsne(
     metric: str = "euclidean",
     early_exaggeration: float = 12,
     learning_rate: float = 1000,
-    random_state=0,
+    random_state=SEED_DEFAULT,
     key_added: str | None = None,
     copy: bool = False,
     n_iter: int | None = None,
@@ -2276,6 +2284,7 @@ def tsne(
     ``cpu-gpu-mixed`` mode uses our KL-loss native torch t-SNE
     (see ``omicverse/external/torch_tsne.py``) — no ``torchdr`` dependency.
     """
+    random_state = resolve_random_state(random_state)
     kwargs.setdefault("n_pcs", n_pcs)
     kwargs.setdefault("n_components", n_components)
     if use_rep is not None:

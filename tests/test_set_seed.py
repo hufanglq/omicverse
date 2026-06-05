@@ -55,3 +55,24 @@ def test_deterministic_flag_runs():
     # should not raise even when requesting deterministic algorithms
     seed = ov.set_seed(0, deterministic=True, verbose=False)
     assert seed == 0
+
+
+def test_seed_propagates_to_pp_random_state():
+    """ov.set_seed should drive the default random_state of pp functions."""
+    import omicverse as ov
+    from omicverse.utils._seed import SEED_DEFAULT, resolve_random_state
+
+    ov.settings.seed = None
+    assert resolve_random_state(SEED_DEFAULT) == 0          # no seed -> 0
+    ov.set_seed(42, verbose=False)
+    assert resolve_random_state(SEED_DEFAULT) == 42         # follows global seed
+    assert resolve_random_state(7) == 7                     # explicit wins
+    ov.settings.seed = None
+
+
+def test_pca_exposes_random_state():
+    import inspect
+
+    import omicverse as ov
+
+    assert "random_state" in inspect.signature(ov.pp.pca).parameters

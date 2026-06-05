@@ -13,6 +13,38 @@ import os
 import random as _random
 
 
+class _SeedDefault:
+    """Sentinel default for ``random_state`` args that should follow the
+    global seed (``ov.settings.seed``) when one has been set, else 0."""
+
+    def __repr__(self):  # pragma: no cover - cosmetic
+        return "<ov.seed-default>"
+
+
+SEED_DEFAULT = _SeedDefault()
+
+
+def resolve_random_state(random_state=SEED_DEFAULT, fallback: int = 0):
+    """Resolve a ``random_state`` argument against the global seed.
+
+    * An explicit value (int / ``RandomState`` / ``None``) is returned as-is.
+    * The :data:`SEED_DEFAULT` sentinel resolves to ``ov.settings.seed`` if
+      :func:`set_seed` has set one, otherwise ``fallback`` (0). This lets
+      ``ov.set_seed(s)`` drive every ``ov.pp`` function's default seed without
+      passing ``random_state`` to each call, while keeping any explicit value.
+    """
+    if isinstance(random_state, _SeedDefault):
+        try:
+            from .._settings import settings
+
+            if getattr(settings, "seed", None) is not None:
+                return settings.seed
+        except Exception:  # noqa: BLE001
+            pass
+        return fallback
+    return random_state
+
+
 def set_seed(seed: int = 0, *, deterministic: bool = False,
              verbose: bool = True) -> int:
     """Seed all RNGs used by omicverse for reproducible results.
