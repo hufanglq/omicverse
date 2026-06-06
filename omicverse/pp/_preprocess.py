@@ -1871,8 +1871,18 @@ def umap(
     forward.update(kwargs)
     kwargs = forward
     print(f"{EMOJI['start']} [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Running UMAP in '{settings.mode}' mode...")
+    _pumap_model = None
     try:
-        if settings.mode == 'cpu':
+        # Honour an explicit method='pumap' in ANY mode: parametric UMAP is the
+        # atlas/projection use case. Returns the fitted model so new data can be
+        # projected with model.transform(new_X).
+        if kwargs.get('method') == 'pumap':
+            print(f"{EMOJI['gpu']} Using Parametric UMAP (pumap)...")
+            from ._umap import umap as _umap
+            _pumap_model = _umap(adata, **kwargs)
+            add_reference(adata, 'umap', 'UMAP with pumap (parametric)')
+            note(backend=f"omicverse({settings.mode}) · pumap")
+        elif settings.mode == 'cpu':
             print(f"{EMOJI['cpu']} Using Scanpy CPU UMAP...")
             from ._umap import umap as _umap
             _umap(adata, **kwargs)
@@ -1906,6 +1916,9 @@ def umap(
     except Exception as e:
         print(f"{EMOJI['error']} UMAP failed: {e}")
         raise
+    # Parametric UMAP returns the fitted model (project new data with
+    # model.transform(new_X)); other backends write to adata in place.
+    return _pumap_model
 
 @monitor
 @register_function(

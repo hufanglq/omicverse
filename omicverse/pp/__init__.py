@@ -70,6 +70,7 @@ from ._preprocess import (identify_robust_genes,
 from ._sude import sude
 
 from ._qc import qc,qc_metrics,filter_cells,filter_genes
+from ..external.umap_pytorch import load_pumap
 from ._recover import recover_counts,binary_search
 from ._normalization import log1p,normalize_total
 from ._scrublet import scrublet, scrublet_simulate_doublets
@@ -111,6 +112,7 @@ __all__ = [
     'quantity_control',
     'qc',
     'qc_metrics',
+    'load_pumap',
     'filter_cells',
     'filter_genes',
 

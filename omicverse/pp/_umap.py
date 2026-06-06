@@ -431,12 +431,16 @@ def umap(  # noqa: PLR0913, PLR0915
 
         print(f"   {Colors.CYAN}💡 Using Parametric UMAP (PyTorch) on {device}{Colors.ENDC}")
 
-        # Clean up
-        del pumap, X_tensor
+        # Keep the fitted model so the caller can project NEW data through the
+        # same learned mapping: model.transform(new_X). Only free the input.
+        _pumap_model = pumap
+        del X_tensor
         import gc
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
+        print(f"   {Colors.CYAN}💡 Returning the fitted parametric model — "
+              f"project new data with model.transform(new_X){Colors.ENDC}")
 
     elif method == "rapids":
         msg = (
@@ -479,6 +483,10 @@ def umap(  # noqa: PLR0913, PLR0915
     print(f"   {Colors.GREEN}✓ Results added to AnnData object:{Colors.ENDC}")
     print(f"     {Colors.CYAN}• '{key_obsm}': {Colors.BOLD}UMAP coordinates{Colors.ENDC}{Colors.CYAN} (adata.obsm){Colors.ENDC}")
     print(f"     {Colors.CYAN}• '{key_uns}': {Colors.BOLD}UMAP parameters{Colors.ENDC}{Colors.CYAN} (adata.uns){Colors.ENDC}")
+    # Parametric UMAP returns the fitted model (for projecting new data);
+    # all other backends keep the classic copy/in-place return contract.
+    if method == "pumap":
+        return _pumap_model
     return adata if copy else None
 
 
