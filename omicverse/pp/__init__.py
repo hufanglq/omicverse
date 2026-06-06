@@ -70,6 +70,17 @@ from ._preprocess import (identify_robust_genes,
 from ._sude import sude
 
 from ._qc import qc,qc_metrics,filter_cells,filter_genes
+
+
+def load_pumap(path):
+    """Load a parametric-UMAP model saved with ``model.save(path)``.
+
+    Companion to ``ov.pp.umap(adata, method='pumap')`` which returns the
+    fitted model. The heavy backend (``omicverse.external.umap_pytorch``) is
+    imported lazily here so it isn't pulled in on ``import omicverse.pp``.
+    """
+    from ..external.umap_pytorch import load_pumap as _load_pumap
+    return _load_pumap(path)
 from ._recover import recover_counts,binary_search
 from ._normalization import log1p,normalize_total
 from ._scrublet import scrublet, scrublet_simulate_doublets
@@ -111,6 +122,7 @@ __all__ = [
     'quantity_control',
     'qc',
     'qc_metrics',
+    'load_pumap',
     'filter_cells',
     'filter_genes',
 
