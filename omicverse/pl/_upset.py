@@ -38,6 +38,9 @@ def _coerce_upset_sets(data, keys=None, axis="obs"):
     if isinstance(data, dict):
         if keys is None:
             return data
+        missing = [key for key in keys if key not in data]
+        if missing:
+            raise KeyError(f"Keys not found in dictionary input: {', '.join(map(str, missing))}")
         return {key: data[key] for key in keys}
 
     if not _is_adata_like(data):
@@ -112,10 +115,6 @@ def _upset_colors(empty_color, line_color):
         "empty_color": empty_color or "#d9dde1",
         "line_color": line_color or "#9aa1a8",
     }
-
-
-def _format_intersection_key(names):
-    return "&".join(map(str, names))
 
 
 def _canonical_intersection_key(key):
@@ -419,7 +418,8 @@ def upset(
     ax_intersections.set_ylabel("Intersection size")
     ax_intersections.set_xticks([])
     ax_intersections.tick_params(axis="x", bottom=False, labelbottom=False)
-    ax_intersections.spines[["top", "right"]].set_visible(False)
+    for spine in ("top", "right"):
+        ax_intersections.spines[spine].set_visible(False)
     if title:
         ax_intersections.set_title(title)
     if show_counts:
@@ -453,7 +453,8 @@ def upset(
     ax_set_sizes.invert_xaxis()
     ax_set_sizes.invert_yaxis()
     ax_set_sizes.set_xlabel("Set size")
-    ax_set_sizes.spines[["top", "right"]].set_visible(False)
+    for spine in ("top", "right"):
+        ax_set_sizes.spines[spine].set_visible(False)
     if grid:
         ax_set_sizes.xaxis.grid(True, color=grid_color, linewidth=grid_linewidth)
         ax_set_sizes.set_axisbelow(True)
@@ -483,7 +484,8 @@ def upset(
     ax_matrix.set_ylim(len(set_names) - 0.5, -0.5)
     ax_matrix.set_xlim(-0.6, len(intersections) - 0.4)
     ax_matrix.set_xlabel("Intersections")
-    ax_matrix.spines[["top", "right", "left"]].set_visible(False)
+    for spine in ("top", "right", "left"):
+        ax_matrix.spines[spine].set_visible(False)
 
     axes = {
         "intersections": ax_intersections,

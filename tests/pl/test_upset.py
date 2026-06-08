@@ -44,6 +44,11 @@ def test_upset_validates_empty_sets():
         ov.pl.upset({"A": {"g1"}, "B": set()})
 
 
+def test_upset_validates_missing_dict_keys():
+    with pytest.raises(KeyError, match="Keys not found in dictionary input: missing"):
+        ov.pl.upset({"A": {"g1"}, "B": {"g2"}}, keys=["A", "missing"])
+
+
 def test_upset_accepts_adata_obs_boolean_sets(tmp_path):
     obs = pd.DataFrame(
         {
