@@ -520,6 +520,15 @@ def rank_genes_groups_df(
         lengths = {k: len(v) for k, v in cols.items()}
         if "names" in lengths:
             names_len = lengths["names"]
+            shorter = {k: v for k, v in lengths.items() if v < names_len}
+            if shorter:
+                raise ValueError(
+                    f"Inconsistent rank_genes_groups result lengths for group {group!r}: "
+                    f"{lengths}"
+                )
+            # Longer columns may come from a different full-gene result table (for
+            # example COSG markers paired with Scanpy p-values). Keep only columns
+            # that are safely aligned to the marker names.
             cols = {k: v for k, v in cols.items() if len(v) == names_len}
         elif len(set(lengths.values())) != 1:
             raise ValueError(
