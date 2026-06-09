@@ -54,8 +54,9 @@ def diptst(dat, is_hist=False, numt=1000):
 
     Parameters
     ----------
-    dat : ndarray
-        Input data.
+    dat : array-like
+        One-dimensional sample values, or histogram bin counts when
+        ``is_hist=True``.
     is_hist : bool
         Whether ``dat`` is a histogram (equidistant bins).
     numt : int
