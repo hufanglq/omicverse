@@ -303,12 +303,10 @@ def umap_gpu_optimized(
     torch port shipped in ``omicverse.external.umap_pytorch.fuzzy_gpu``.
     """
     import torch
+    from .._optional import normalize_torch_device
     from ..external.umap_pytorch.fuzzy_gpu import fuzzy_simplicial_set_gpu
 
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    if not isinstance(device, torch.device):
-        device = torch.device(device)
+    device = normalize_torch_device(device)
     knn_i = torch.as_tensor(knn_indices, dtype=torch.long, device=device)
     knn_d = torch.as_tensor(knn_dists, dtype=torch.float32, device=device)
 

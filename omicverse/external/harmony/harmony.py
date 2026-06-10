@@ -28,12 +28,28 @@ logger.addHandler(logging.NullHandler())
 
 try:
     from ..._settings import EMOJI, Colors
+    from ..._optional import normalize_torch_device
 except ImportError:
     EMOJI = {'start': '🚀', 'done': '✅', 'warning': '⚠️', 'cpu': '🖥️', 'gpu': '🚀'}
     Colors = type('Colors', (), {
         'CYAN': '\033[96m', 'BOLD': '\033[1m', 'ENDC': '\033[0m',
         'GREEN': '\033[92m', 'WARNING': '\033[93m',
     })()
+
+    def normalize_torch_device(device=None, *, prefer_cuda=True, fallback_to_cpu=False):
+        if device is None:
+            device = "cuda" if prefer_cuda and torch.cuda.is_available() else "cpu"
+        if isinstance(device, int):
+            if not torch.cuda.is_available() and fallback_to_cpu:
+                return torch.device("cpu")
+            return torch.device("cuda", device)
+        device = torch.device(device)
+        if device.type == "cuda":
+            if not torch.cuda.is_available():
+                return torch.device("cpu") if fallback_to_cpu else device
+            if device.index is None:
+                return torch.device("cuda", torch.cuda.current_device())
+        return device
 
 
 def _mlx_available() -> bool:
@@ -53,10 +69,12 @@ def get_device(device=None):
     the standard CUDA > CPU fallback.
     """
     if device is not None:
-        return device if device == "mlx" else torch.device(device)
+        if device == "mlx":
+            return device
+        return normalize_torch_device(device)
 
     if torch.cuda.is_available():
-        return torch.device('cuda')
+        return normalize_torch_device("cuda")
     elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         if _mlx_available():
             return "mlx"
