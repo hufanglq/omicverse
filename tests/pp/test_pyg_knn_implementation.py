@@ -70,26 +70,20 @@ def test_autotune_chunk_receives_indexed_cuda_device(monkeypatch):
     assert seen["device"] == torch.device("cuda:0")
 
 
-def test_chunked_knn_normalizes_device_before_autotune(monkeypatch):
-    seen = {}
-
-    def fake_autotune(n_samples, n_features, device, headroom_gb=1.0):
-        seen["device"] = device
-        return n_samples
-
+def test_torch_knn_transformer_auto_resolves_indexed_cuda_device(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
-    monkeypatch.setattr(pyg_knn, "_autotune_chunk", fake_autotune)
-    monkeypatch.setattr(
-        torch.Tensor,
-        "to",
-        lambda self, *args, **kwargs: self,
-    )
+    transformer = pyg_knn.TorchKNNTransformer(device="auto")
 
-    X = torch.zeros((2, 2), dtype=torch.float32)
-    pyg_knn._chunked_knn_l2(X, k=1, device=torch.device("cuda"))
+    assert transformer.device == torch.device("cuda:0")
 
-    assert seen["device"] == torch.device("cuda:0")
+
+def test_torch_knn_transformer_auto_falls_back_to_cpu_if_no_cuda(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    transformer = pyg_knn.TorchKNNTransformer(device="auto")
+
+    assert transformer.device == torch.device("cpu")
 
 
 def test_normalize_torch_device_falls_back_when_cuda_unavailable(monkeypatch):

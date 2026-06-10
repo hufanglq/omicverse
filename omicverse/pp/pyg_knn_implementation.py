@@ -232,10 +232,8 @@ class TorchKNNTransformer:
             )
         self.n_neighbors = n_neighbors
         self.metric = metric
-        if device == "auto":
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        else:
-            self.device = device
+        normalized_device = None if device == "auto" else device
+        self.device = normalize_torch_device(normalized_device, fallback_to_cpu=True)
 
     def fit(self, X, y=None):
         return self
