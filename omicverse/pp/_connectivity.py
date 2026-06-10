@@ -6,6 +6,7 @@ from typing import TypeVar
 import numpy as np
 from numpy.typing import NDArray
 from scipy import sparse
+from .._optional import normalize_torch_device
 
 SpBase = sparse.spmatrix | sparse.sparray  # noqa: TID251
 """Only use when you directly convert it to a known subclass."""
@@ -303,7 +304,6 @@ def umap_gpu_optimized(
     torch port shipped in ``omicverse.external.umap_pytorch.fuzzy_gpu``.
     """
     import torch
-    from .._optional import normalize_torch_device
     from ..external.umap_pytorch.fuzzy_gpu import fuzzy_simplicial_set_gpu
 
     device = normalize_torch_device(device)
