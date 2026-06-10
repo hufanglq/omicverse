@@ -12,6 +12,7 @@ from omicverse.external.flowsig.preprocessing._flow_preprocessing import (
 
 
 def test_flowsig_pkg_resources_compat(monkeypatch):
+    pkg_resources_was_absent = "pkg_resources" not in sys.modules
     monkeypatch.delitem(sys.modules, "pkg_resources", raising=False)
     monkeypatch.delitem(sys.modules, "squidpy", raising=False)
     observed = {}
@@ -39,6 +40,9 @@ def test_flowsig_pkg_resources_compat(monkeypatch):
             import pkg_resources
 
             observed["pkg_resources_ready"] = "pkg_resources" in sys.modules
+            observed["require"] = pkg_resources.require("setuptools")
+            observed["working_set"] = list(pkg_resources.working_set)
+            observed["entry_points"] = list(pkg_resources.iter_entry_points("console_scripts"))
             observed["setuptools_version"] = pkg_resources.get_distribution(
                 "setuptools"
             ).version
@@ -50,23 +54,30 @@ def test_flowsig_pkg_resources_compat(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    adata = ad.AnnData(np.ones((4, 2)))
-    adata.obsm["spatial"] = np.arange(8).reshape(4, 2)
-    adata.obsm["X_flow"] = np.ones((4, 3))
-    adata.uns["flowsig_network"] = {
-        "flow_var_info": pd.DataFrame(
-            {"Type": ["inflow", "module", "outflow"]},
-            index=["inflow_a", "GEM-1", "outflow_a"],
-        )
-    }
+    try:
+        adata = ad.AnnData(np.ones((4, 2)))
+        adata.obsm["spatial"] = np.arange(8).reshape(4, 2)
+        adata.obsm["X_flow"] = np.ones((4, 3))
+        adata.uns["flowsig_network"] = {
+            "flow_var_info": pd.DataFrame(
+                {"Type": ["inflow", "module", "outflow"]},
+                index=["inflow_a", "GEM-1", "outflow_a"],
+            )
+        }
 
-    determine_spatially_flowing_vars(adata, moran_threshold=0.1)
+        determine_spatially_flowing_vars(adata, moran_threshold=0.1)
 
-    assert observed["pkg_resources_ready"]
-    assert observed["setuptools_version"]
-    assert observed["omicverse_init"].endswith("omicverse/__init__.py")
-    assert list(adata.uns["flowsig_network"]["flow_var_info"].index) == [
-        "inflow_a",
-        "GEM-1",
-        "outflow_a",
-    ]
+        assert observed["pkg_resources_ready"]
+        assert observed["require"] == []
+        assert observed["working_set"] == []
+        assert observed["entry_points"] == []
+        assert observed["setuptools_version"].split(".")[0].isdigit()
+        assert observed["omicverse_init"].endswith("omicverse/__init__.py")
+        assert list(adata.uns["flowsig_network"]["flow_var_info"].index) == [
+            "inflow_a",
+            "GEM-1",
+            "outflow_a",
+        ]
+    finally:
+        if pkg_resources_was_absent:
+            sys.modules.pop("pkg_resources", None)

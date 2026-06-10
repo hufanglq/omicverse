@@ -153,9 +153,18 @@ def determine_spatially_flowing_vars(adata: sc.AnnData,
         def declare_namespace(_package_name: str) -> None:
             return None
 
+        def require(*_requirements):
+            return []
+
+        def iter_entry_points(*_args, **_kwargs):
+            return iter(())
+
         module.get_distribution = get_distribution
         module.resource_filename = resource_filename
         module.declare_namespace = declare_namespace
+        module.require = require
+        module.working_set = []
+        module.iter_entry_points = iter_entry_points
         sys.modules["pkg_resources"] = module
 
     import squidpy as sq
