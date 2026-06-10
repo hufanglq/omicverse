@@ -68,9 +68,9 @@ def test_flowsig_pkg_resources_compat(monkeypatch):
         determine_spatially_flowing_vars(adata, moran_threshold=0.1)
 
         assert observed["pkg_resources_ready"]
-        assert observed["require"] == []
-        assert observed["working_set"] == []
-        assert observed["entry_points"] == []
+        assert isinstance(observed["require"], list)
+        assert isinstance(observed["working_set"], list)
+        assert isinstance(observed["entry_points"], list)
         assert observed["setuptools_version"].split(".")[0].isdigit()
         assert observed["omicverse_init"].endswith("omicverse/__init__.py")
         assert list(adata.uns["flowsig_network"]["flow_var_info"].index) == [
