@@ -107,6 +107,24 @@ class Deconvolution(object):
         if log1p_50_warning:   
             print(f"{Colors.WARNING}⚠️ 50*1e4 is the standardized target sum for `omicverse`{Colors.ENDC}")
 
+    @staticmethod
+    def _default_cell2location_device_kwargs():
+        try:
+            import torch
+        except ImportError:
+            return {}
+
+        if torch.cuda.is_available():
+            return {"accelerator": "gpu", "device": 1}
+        return {}
+
+    def _with_cell2location_device_defaults(self, train_kwargs):
+        train_kwargs = {} if train_kwargs is None else dict(train_kwargs)
+        device_keys = {"accelerator", "device", "devices", "use_gpu"}
+        if not any(key in train_kwargs for key in device_keys):
+            train_kwargs.update(self._default_cell2location_device_kwargs())
+        return train_kwargs
+
     def preprocess_sc(self,mode='shiftlog|pearson',n_HVGs=3000,target_sum=1e4,**kwargs):
         """
         Preprocess the scRNA-seq reference before spatial mapping.
@@ -313,6 +331,7 @@ class Deconvolution(object):
             # Use all data for training (validation not implemented yet, train_size=1)
             if cell2location_scrna_kwargs is None:
                 cell2location_scrna_kwargs={'max_epochs':250,'batch_size':2500,'train_size':1,'lr':0.002}
+            cell2location_scrna_kwargs = self._with_cell2location_device_defaults(cell2location_scrna_kwargs)
             self.mod_sc.train(
                 **cell2location_scrna_kwargs
             )
@@ -361,6 +380,7 @@ class Deconvolution(object):
 
             if cell2location_spatial_kwargs is None:
                 cell2location_spatial_kwargs={'max_epochs':30000,'batch_size':None,'train_size':1}
+            cell2location_spatial_kwargs = self._with_cell2location_device_defaults(cell2location_spatial_kwargs)
 
             self.mod_sp.train(
                 **cell2location_spatial_kwargs
