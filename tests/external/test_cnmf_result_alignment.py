@@ -54,7 +54,7 @@ def test_cnmf_get_results_rejects_missing_obs_names_instead_of_silent_nan():
     cnmf = _cnmf_instance()
     adata = _adata(["cell_a", "missing_cell"])
 
-    with pytest.raises(ValueError, match="Missing 1 cells"):
+    with pytest.raises(ValueError, match="Missing 1 cell"):
         cnmf.get_results(adata, _result_dict())
 
     assert "cNMF_cluster" not in adata.obs
@@ -75,3 +75,22 @@ def test_cnmf_get_results_can_be_called_repeatedly_on_same_adata():
     assert list(adata.obs["cNMF_note"]) == ["keep", "keep", "keep"]
     assert list(adata.obs["cNMF_cluster"]) == ["cNMF_1", "cNMF_2", "cNMF_2"]
     assert list(adata.var.columns) == [1, 2]
+
+
+def test_cnmf_get_results_rfc_uses_alignment_validation():
+    cnmf = _cnmf_instance()
+    adata = _adata(["cell_a", "missing_cell"])
+
+    with pytest.raises(ValueError, match="Missing 1 cell"):
+        cnmf.get_results_rfc(adata, _result_dict(), use_rep="X_test")
+
+    assert "cNMF_cluster_rfc" not in adata.obs
+
+
+def test_cnmf_get_results_rfc_rejects_threshold_without_two_classes():
+    cnmf = _cnmf_instance()
+    adata = _adata(["cell_a", "cell_b", "cell_c"])
+    adata.obsm["X_test"] = np.ones((3, 2))
+
+    with pytest.raises(ValueError, match="At least two cNMF factors"):
+        cnmf.get_results_rfc(adata, _result_dict(), use_rep="X_test", cNMF_threshold=1.0)
