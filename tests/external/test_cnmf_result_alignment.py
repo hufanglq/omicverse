@@ -65,6 +65,8 @@ def test_cnmf_get_results_can_be_called_repeatedly_on_same_adata():
     adata = _adata(["cell_a", "cell_b", "cell_c"])
     adata.obs["cNMF_note"] = ["keep", "keep", "keep"]
     adata.obs["cNMF_3"] = [1.0, 1.0, 1.0]
+    adata.var[3] = [3.0, 3.0]
+    adata.var["gene_note"] = ["keep", "keep"]
 
     cnmf.get_results(adata, _result_dict())
     cnmf.get_results(adata, _result_dict())
@@ -74,7 +76,9 @@ def test_cnmf_get_results_can_be_called_repeatedly_on_same_adata():
     assert "cNMF_3" not in adata.obs
     assert list(adata.obs["cNMF_note"]) == ["keep", "keep", "keep"]
     assert list(adata.obs["cNMF_cluster"]) == ["cNMF_1", "cNMF_2", "cNMF_2"]
-    assert list(adata.var.columns) == [1, 2]
+    assert 3 not in adata.var
+    assert list(adata.var["gene_note"]) == ["keep", "keep"]
+    assert list(adata.var.columns) == ["gene_note", 1, 2]
 
 
 def test_cnmf_get_results_rfc_uses_alignment_validation():

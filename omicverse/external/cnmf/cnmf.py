@@ -1778,7 +1778,12 @@ class cNMF():
 
         usage = usage.reindex(adata.obs_names)
         gep_scores = gep_scores.reindex(adata.var_names)
-        adata.var = adata.var.drop(columns=adata.var.columns.intersection(gep_scores.columns))
+        stale_gene_score_columns = [
+            column
+            for column in adata.var.columns
+            if isinstance(column, (int, np.integer)) and column >= 1
+        ]
+        adata.var = adata.var.drop(columns=stale_gene_score_columns)
         for column in usage.columns:
             adata.obs[column] = usage[column].to_numpy()
         for column in gep_scores.columns:
@@ -1787,14 +1792,20 @@ class cNMF():
 
     def get_results(self,adata,result_dict):
         usage = self._align_results_to_adata(adata, result_dict)
+        print('gene scores are added to adata.var')
         df=adata.obs[usage.columns].copy()
         max_topic = df.idxmax(axis=1)
         # 将结果添加到DataFrame中
         adata.obs['cNMF_cluster'] = max_topic
         print('cNMF_cluster is added to adata.obs')
-        print('gene scores are added to adata.var')
 
     def get_results_rfc(self,adata,result_dict,use_rep='STAGATE',cNMF_threshold=0.5):
+        """
+        Map cNMF results to ``adata`` and train RFC/decision-tree cluster labels.
+
+        This replaces existing cNMF usage and generated cNMF cluster columns,
+        including ``cNMF_cluster`` from ``get_results``.
+        """
         self._align_results_to_adata(adata, result_dict)
 
         import numpy as np
