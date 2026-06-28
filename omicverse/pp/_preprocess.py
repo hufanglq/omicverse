@@ -674,11 +674,12 @@ def preprocess(
         size normalization using scanpy's experimental.pp.normalize_pearson_residuals() function. 
         target_sum: The target total count after normalization.
         n_HVGs: the number of HVGs to select.
+        organism: The organism of the data. It can be either 'human' or 'mouse'.
+        no_cc: Whether to remove cc-correlated genes from HVGs.
+        identify_robust: Whether to filter to robust genes before normalization.
         exclude_highly_expressed: Whether to exclude highly expressed genes
             when computing the size factor in shiftlog normalization. If
             ``None``, preserves the existing backend defaults.
-        organism: The organism of the data. It can be either 'human' or 'mouse'. 
-        no_cc: Whether to remove cc-correlated genes from HVGs.
 
     Returns:
         adata: The preprocessed data matrix.

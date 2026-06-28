@@ -107,17 +107,21 @@ def test_preprocess_shiftlog_can_disable_high_expression_exclusion():
     import omicverse as ov
 
     target_sum = 10000
-    adata = _synthetic_counts_adata()
-    adata.X = adata.X.toarray()
-    adata.X[0, 0] = 1000
-    adata.X[0, 1:] = 1
-    adata.layers["counts"] = sp.csr_matrix(adata.X.astype(np.float32))
-    excluded = _synthetic_counts_adata()
-    excluded.X = adata.X.copy()
-    excluded.layers["counts"] = adata.layers["counts"].copy()
+    adata_without_exclusion = _synthetic_counts_adata()
+    adata_without_exclusion.X = adata_without_exclusion.X.toarray()
+    adata_without_exclusion.X[0, 0] = 1000
+    adata_without_exclusion.X[0, 1:] = 1
+    adata_without_exclusion.layers["counts"] = sp.csr_matrix(
+        adata_without_exclusion.X.astype(np.float32)
+    )
+    adata_with_exclusion = _synthetic_counts_adata()
+    adata_with_exclusion.X = adata_without_exclusion.X.copy()
+    adata_with_exclusion.layers["counts"] = adata_without_exclusion.layers[
+        "counts"
+    ].copy()
 
     ov.pp.preprocess(
-        excluded,
+        adata_with_exclusion,
         mode="shiftlog|pearson",
         n_HVGs=200,
         target_sum=target_sum,
@@ -126,7 +130,7 @@ def test_preprocess_shiftlog_can_disable_high_expression_exclusion():
     )
 
     ov.pp.preprocess(
-        adata,
+        adata_without_exclusion,
         mode="shiftlog|pearson",
         n_HVGs=200,
         target_sum=target_sum,
@@ -135,6 +139,11 @@ def test_preprocess_shiftlog_can_disable_high_expression_exclusion():
         no_cc=False,
     )
 
-    assert float(excluded.X.max()) > np.log1p(target_sum)
-    assert float(adata.X.max()) <= np.log1p(target_sum) + 1e-4
-    assert adata.uns["status_args"]["preprocess"]["exclude_highly_expressed"] is False
+    assert float(adata_with_exclusion.X.max()) > np.log1p(target_sum)
+    assert float(adata_without_exclusion.X.max()) <= np.log1p(target_sum) + 1e-4
+    assert (
+        adata_without_exclusion.uns["status_args"]["preprocess"][
+            "exclude_highly_expressed"
+        ]
+        is False
+    )
