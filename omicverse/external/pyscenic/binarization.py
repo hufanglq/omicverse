@@ -17,14 +17,14 @@ def _derive_threshold_task(args):
     regulon_name, data, seed, method = args
     assert method in {"hdt", "bic"}
 
-    if seed:
+    if seed is not None:
         np.random.seed(seed=seed)
 
     def isbimodal(data, method):
         if method == "hdt":
             # Use Hartigan's dip statistic to decide if distribution deviates from unimodality.
             _, pval, _ = diptst(data)
-            return (pval is not None) and (pval <= 0.05)
+            return (pval is not None) and (pval <= 0.05), None
         else:
             # Compare Bayesian Information Content of two Gaussian Mixture Models.
             X = data.reshape(-1, 1)
@@ -34,17 +34,20 @@ def _derive_threshold_task(args):
             gmm1 = mixture.GaussianMixture(
                 n_components=1, covariance_type="full", random_state=seed
             ).fit(X)
-            return gmm2.bic(X) <= gmm1.bic(X)
+            is_bimodal = gmm2.bic(X) <= gmm1.bic(X)
+            return is_bimodal, gmm2 if is_bimodal else None
 
-    if not isbimodal(data, method):
+    is_bimodal, gmm2 = isbimodal(data, method)
+    if not is_bimodal:
         # For a unimodal distribution the threshold is set as mean plus two standard deviations.
         threshold = data.mean() + 2.0 * data.std()
     else:
-        # Fit a two component Gaussian Mixture model on the AUC distribution using an Expectation-Maximization algorithm
-        # to identify the peaks in the distribution.
-        gmm2 = mixture.GaussianMixture(
-            n_components=2, covariance_type="full", random_state=seed
-        ).fit(data.reshape(-1, 1))
+        if gmm2 is None:
+            # Fit a two component Gaussian Mixture model on the AUC distribution using an Expectation-Maximization algorithm
+            # to identify the peaks in the distribution.
+            gmm2 = mixture.GaussianMixture(
+                n_components=2, covariance_type="full", random_state=seed
+            ).fit(data.reshape(-1, 1))
         # For a bimodal distribution the threshold is defined as the "trough" in between the two peaks.
         # This is solved as a minimization problem on the kernel smoothed density.
         threshold = minimize_scalar(
