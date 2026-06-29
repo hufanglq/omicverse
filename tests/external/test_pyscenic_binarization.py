@@ -1,3 +1,7 @@
+import subprocess
+import sys
+import textwrap
+
 import numpy as np
 import pandas as pd
 
@@ -34,45 +38,36 @@ def test_bic_method():
     assert np.isfinite(thresholds).all()
 
 
-def test_parallel_bic():
-    auc_mtx = pd.DataFrame(
-        {
-            "regulon_a": [0.1, 0.2, 0.3, 0.8, 0.9, 1.0],
-            "regulon_b": [0.05, 0.06, 0.07, 0.5, 0.6, 0.7],
-        }
+def test_parallel_smoke():
+    script = textwrap.dedent(
+        """
+        import numpy as np
+        import pandas as pd
+
+        from omicverse.external.pyscenic.binarization import binarize
+
+        auc_mtx = pd.DataFrame(
+            {
+                "regulon_a": [0.1, 0.2, 0.2, 0.8, 0.9, 1.0],
+                "regulon_b": [0.05, 0.06, 0.07, 0.5, 0.6, 0.7],
+            }
+        )
+
+        for method, seed in [("bic", 1), ("hdt", 0)]:
+            binary_mtx, thresholds = binarize(
+                auc_mtx,
+                seed=seed,
+                num_workers=2,
+                method=method,
+                use_tqdm=False,
+            )
+            assert binary_mtx.shape == auc_mtx.shape
+            assert list(thresholds.index) == list(auc_mtx.columns)
+            assert np.isfinite(thresholds).all()
+        """
     )
 
-    binary_mtx, thresholds = binarize(
-        auc_mtx,
-        seed=1,
-        num_workers=2,
-        method="bic",
-        use_tqdm=False,
-    )
-
-    assert binary_mtx.shape == auc_mtx.shape
-    assert list(thresholds.index) == list(auc_mtx.columns)
-
-
-def test_parallel_hdt():
-    auc_mtx = pd.DataFrame(
-        {
-            "regulon_a": [0.1, 0.2, 0.2, 0.8, 0.9, 1.0],
-            "regulon_b": [0.05, 0.06, 0.07, 0.5, 0.6, 0.7],
-        }
-    )
-
-    binary_mtx, thresholds = binarize(
-        auc_mtx,
-        seed=0,
-        num_workers=2,
-        method="hdt",
-        use_tqdm=False,
-    )
-
-    assert binary_mtx.shape == auc_mtx.shape
-    assert list(thresholds.index) == list(auc_mtx.columns)
-    assert np.isfinite(thresholds).all()
+    subprocess.run([sys.executable, "-c", script], check=True, timeout=30)
 
 
 def test_empty_regulons():
