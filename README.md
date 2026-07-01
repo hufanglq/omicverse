@@ -364,6 +364,12 @@ If you use `omicverse` in your work, please cite the `omicverse` publication as 
 
 Here are some other related packages, feel free to reference them if you use them!
 
+> **OmicOS: A Comprehensive Omics Ecosystem Infrastructure and Agent System for the AI Era**
+>
+> Zeng, Z., Meng, X., Hu, L. et al.
+>
+> _Biorxiv_ 2026 Jun 16. doi: [10.64898/2026.06.11.731775](https://doi.org/10.64898/2026.06.11.731775).
+
 > **CellOntologyMapper: Consensus mapping of cell type annotation**
 >
 > Zeng, Z., Wang, X., Du, H. et al.
