@@ -624,12 +624,12 @@ def perturb_sankey(
         palette = {c: cmap(i % 20) for i, c in enumerate(cats)}
 
     # Equal-height source bars so small clusters (e.g. Mk) stay visible.
-    # Each row of `ct` is already row-stochastic (out-distribution).
+    # Each row of `ct` is already row-stochastic (out-distribution), but
+    # ribbon coordinates must use the same normalized height scale as the bars.
     src_sizes = np.full(n, 1.0 / n, dtype=float)
-    # Destination heights = total inflow probability mass per destination.
-    right_in = ct.sum(axis=0).to_numpy()
-    right_in = right_in / right_in.sum()
-    right_sizes = right_in
+    flow_heights = ct.to_numpy(dtype=float) * src_sizes[:, None]
+    # Destination heights = total inflow mass on the same scale as sources.
+    right_sizes = flow_heights.sum(axis=0)
 
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
@@ -666,9 +666,8 @@ def perturb_sankey(
             p = float(ct.iloc[i, j])
             if p < min_flow:
                 continue
-            src_flow = p * src_sizes[i]
-            # destination flow occupies in_p[i,j] / right_in[j] fraction
-            dst_flow = ct.iloc[i, j] / right_in[j] * right_sizes[j] if right_in[j] > 0 else src_flow
+            src_flow = flow_heights[i, j]
+            dst_flow = flow_heights[i, j]
             y0_src = src_y_offsets[i]
             y0_dst = dst_y_offsets[j]
             verts = _make_sankey_ribbon(
