@@ -1047,15 +1047,15 @@ def normalize_to_minus_one_to_one(arr):
         "# Basic stacked volcano plot",
         "data_dict = {'Dataset1': deg_df1, 'Dataset2': deg_df2}",
         "color_dict = {'Dataset1': 'red', 'Dataset2': 'blue'}",
-        "fig, axes = ov.utils.stacking_vol(data_dict, color_dict)",
+        "fig, axes = ov.pl.stacking_vol(data_dict, color_dict)",
         "# Custom thresholds and styling",
-        "fig, axes = ov.utils.stacking_vol(data_dict, color_dict,",
+        "fig, axes = ov.pl.stacking_vol(data_dict, color_dict,",
         "                                 pval_threshold=0.05, log2fc_threshold=1.5,",
         "                                 figsize=(10,6), plot_genes_num=15)",
         "# Three-way comparison",
         "data_dict = {'Control': deg1, 'Treatment1': deg2, 'Treatment2': deg3}",
         "color_dict = {'Control': '#1f77b4', 'Treatment1': '#ff7f0e', 'Treatment2': '#2ca02c'}",
-        "fig, axes = ov.utils.stacking_vol(data_dict, color_dict)"
+        "fig, axes = ov.pl.stacking_vol(data_dict, color_dict)"
     ],
     related=["pl.volcano", "bulk.get_deg", "single.cosg"]
 )
@@ -1165,14 +1165,14 @@ def stacking_vol(data_dict:dict,color_dict:dict,
         "# Basic convex hull for a cluster",
         "fig, ax = plt.subplots()",
         "ov.pl.embedding(adata, basis='X_umap', color='leiden', ax=ax)",
-        "ov.utils.plot_ConvexHull(adata, basis='X_umap', cluster_key='leiden',",
+        "ov.pl.plot_ConvexHull(adata, basis='X_umap', cluster_key='leiden',",
         "                         hull_cluster='0', ax=ax)",
         "# Custom color and transparency",
-        "ov.utils.plot_ConvexHull(adata, basis='X_tsne', cluster_key='celltype',",
+        "ov.pl.plot_ConvexHull(adata, basis='X_tsne', cluster_key='celltype',",
         "                         hull_cluster='T cells', ax=ax, color='red', alpha=0.3)",
         "# Multiple cluster hulls",
         "for cluster in ['0', '1', '2']:",
-        "    ov.utils.plot_ConvexHull(adata, basis='X_umap', cluster_key='leiden',",
+        "    ov.pl.plot_ConvexHull(adata, basis='X_umap', cluster_key='leiden',",
         "                             hull_cluster=cluster, ax=ax)"
     ],
     related=["utils.embedding", "pl.umap", "pl.tsne"]
@@ -1201,7 +1201,7 @@ def plot_ConvexHull(adata:anndata.AnnData,basis:str,cluster_key:str,
         >>> # Create embedding plot with convex hull
         >>> fig, ax = plt.subplots()
         >>> ov.pl.embedding(adata, basis='X_umap', color='leiden', ax=ax)
-        >>> ov.utils.plot_ConvexHull(adata, basis='X_umap', cluster_key='leiden',
+        >>> ov.pl.plot_ConvexHull(adata, basis='X_umap', cluster_key='leiden',
         ...                          hull_cluster='0', ax=ax)
     """
     

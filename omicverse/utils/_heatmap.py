@@ -5,6 +5,7 @@ from matplotlib.colors import cnames, is_color_like, ListedColormap, to_rgb
 from matplotlib import patheffects, rcParams
 import scanpy as sc
 import anndata
+from collections.abc import Sequence as SequenceABC
 from typing import Union, Sequence
 
 #from scvelo import logging as logg
@@ -73,7 +74,7 @@ def plot_heatmap(
         else adata[:, var_names].X
     )
     if issparse(X):
-        X = X.A
+        X = X.toarray()
     df = pd.DataFrame(X[np.argsort(time)], columns=var_names)
 
     if n_convolve is not None:
@@ -594,7 +595,7 @@ def set_colors_for_categorical_obs(adata, value_to_plot, palette=None):
             if isinstance(palette, dict):
                 palette = [palette[c] for c in categories]
             # check if palette is a list and convert it to a cycler
-            if isinstance(palette, abc.Sequence):
+            if isinstance(palette, SequenceABC):
                 if len(palette) < length:
                     print(
                         "Length of palette colors is smaller than the number of "
@@ -656,4 +657,3 @@ def set_colors_for_categorical_obs(adata, value_to_plot, palette=None):
                 )
 
         adata.uns[f"{value_to_plot}_colors"] = palette[:length]
-

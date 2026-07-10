@@ -54,7 +54,8 @@ def test_utils_exports_agent_entrypoints(monkeypatch):
             "blue_palette", "orange_palette", "red_palette", "green_palette",
             "plot_text_set", "ticks_range", "plot_boxplot", "plot_network",
             "plot_cellproportion", "plot_embedding_celltype", "geneset_wordcloud",
-            "plot_pca_variance_ratio", "gen_mpl_labels"
+            "plot_pca_variance_ratio", "plot_ConvexHull", "stacking_vol",
+            "gen_mpl_labels",
         ],
         "_mde": ["mde"],
         "_syn": ["logger", "pancreas", "synthetic_iid", "url_datadir"],
