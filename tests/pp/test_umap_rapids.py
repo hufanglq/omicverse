@@ -49,7 +49,10 @@ def test_umap_falls_back_from_rapids(monkeypatch):
     monkeypatch.setattr(preprocess, "note", lambda **kwargs: None)
     monkeypatch.setattr(preprocess, "pick_color_key", lambda adata: None)
 
-    preprocess.umap(AnnData(np.ones((2, 2))), method="rapids", gamma=2.0)
+    preprocess.umap(
+        AnnData(np.ones((2, 2))), method="rapids", gamma=2.0, min_dist=0.2
+    )
 
     assert captured["method"] == "umap-gpu"
     assert captured["gamma"] == 2.0
+    assert captured["min_dist"] == 0.2
