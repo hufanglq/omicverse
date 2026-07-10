@@ -31,6 +31,47 @@ def test_plot_heatmap_accepts_sparse_view():
     plt.close(grid.fig)
 
 
+def test_make_dense_accepts_sparse_matrix_without_matrix_shortcuts():
+    """SciPy sparse matrices no longer expose the ``.A`` and ``.A1`` aliases."""
+    from omicverse.utils._heatmap import make_dense
+
+    matrix = sparse.csr_matrix([[1.0, 2.0], [3.0, 4.0]])
+
+    result = make_dense(matrix)
+
+    assert isinstance(result, np.ndarray)
+    np.testing.assert_array_equal(result, [[1.0, 2.0], [3.0, 4.0]])
+
+
+def test_make_dense_preserves_matrix_vector_semantics():
+    from omicverse.utils._heatmap import make_dense
+
+    result = make_dense(np.matrix([[1.0, 2.0]]))
+
+    np.testing.assert_array_equal(result, [1.0, 2.0])
+
+
+def test_interpret_colorkey_densifies_sparse_gene_vector():
+    from omicverse.utils._heatmap import interpret_colorkey
+
+    class SparseExpressionAdata:
+        var_names = ["g1"]
+        layers = {}
+        raw = None
+        obs = pd.DataFrame()
+
+        @staticmethod
+        def obs_vector(key, layer=None):
+            assert key == "g1"
+            assert layer is None
+            return sparse.csr_matrix([[1.0], [2.0], [3.0]])
+
+    result = interpret_colorkey(SparseExpressionAdata(), "g1")
+
+    assert isinstance(result, np.ndarray)
+    np.testing.assert_array_equal(result, [1.0, 2.0, 3.0])
+
+
 def test_set_colors_accepts_sequence_palette():
     from omicverse.utils._heatmap import set_colors_for_categorical_obs
 
