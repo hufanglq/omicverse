@@ -46,6 +46,8 @@ _FUNCTION_REPLACEMENTS = {
     "geneset_wordcloud": "ov.pl.geneset_wordcloud",
     "plot_pca_variance_ratio": "ov.pl.plot_pca_variance_ratio",
     "plot_pca_variance_ratio1": "ov.pl.plot_pca_variance_ratio1",
+    "plot_ConvexHull": "ov.pl.plot_ConvexHull",
+    "stacking_vol": "ov.pl.stacking_vol",
     "gen_mpl_labels": "ov.pl.gen_mpl_labels",
 }
 

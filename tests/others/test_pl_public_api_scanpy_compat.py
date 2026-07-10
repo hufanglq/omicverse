@@ -55,6 +55,32 @@ def test_public_plot_set_smoke():
     assert plt.rcParams["figure.dpi"] == 60
 
 
+def test_plot_convex_hull_is_exported():
+    assert callable(ov.pl.plot_ConvexHull)
+
+
+def test_stacking_vol_is_exported():
+    assert callable(ov.pl.stacking_vol)
+
+
+def test_stacking_vol_legacy_wrapper(monkeypatch):
+    import omicverse.pl._plot_backend as backend
+
+    calls = []
+
+    def fake_stacking_vol(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "stacked"
+
+    monkeypatch.setattr(backend, "stacking_vol", fake_stacking_vol)
+
+    with pytest.warns(DeprecationWarning, match="ov.pl.stacking_vol"):
+        result = ov.utils.stacking_vol("data", alpha=0.5)
+
+    assert result == "stacked"
+    assert calls == [(('data',), {"alpha": 0.5})]
+
+
 def test_public_embedding_smoke(toy_adata):
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")

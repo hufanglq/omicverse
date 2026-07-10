@@ -8,32 +8,32 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _load_module(module_name: str, relative_path: str):
+def _load_module(monkeypatch, module_name: str, relative_path: str):
     path = PROJECT_ROOT / relative_path
     spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    sys.modules[module_name] = module
+    monkeypatch.setitem(sys.modules, module_name, module)
     spec.loader.exec_module(module)
     return module
 
 
-def _seed_packages():
+def _seed_packages(monkeypatch):
     omicverse_pkg = types.ModuleType("omicverse")
     omicverse_pkg.__path__ = [str(PROJECT_ROOT / "omicverse")]
-    sys.modules["omicverse"] = omicverse_pkg
+    monkeypatch.setitem(sys.modules, "omicverse", omicverse_pkg)
 
     pl_pkg = types.ModuleType("omicverse.pl")
     pl_pkg.__path__ = [str(PROJECT_ROOT / "omicverse" / "pl")]
-    sys.modules["omicverse.pl"] = pl_pkg
+    monkeypatch.setitem(sys.modules, "omicverse.pl", pl_pkg)
 
     utils_pkg = types.ModuleType("omicverse.utils")
     utils_pkg.__path__ = [str(PROJECT_ROOT / "omicverse" / "utils")]
-    sys.modules["omicverse.utils"] = utils_pkg
+    monkeypatch.setitem(sys.modules, "omicverse.utils", utils_pkg)
 
 
 def test_utils_plot_wrapper_warns_and_delegates(monkeypatch):
-    _seed_packages()
+    _seed_packages(monkeypatch)
     calls = []
 
     backend = types.ModuleType("omicverse.pl._plot_backend")
@@ -78,7 +78,7 @@ def test_utils_plot_wrapper_warns_and_delegates(monkeypatch):
     backend.pastel_palette = []
     monkeypatch.setitem(sys.modules, "omicverse.pl._plot_backend", backend)
 
-    module = _load_module("omicverse.utils._plot", "omicverse/utils/_plot.py")
+    module = _load_module(monkeypatch, "omicverse.utils._plot", "omicverse/utils/_plot.py")
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -91,8 +91,50 @@ def test_utils_plot_wrapper_warns_and_delegates(monkeypatch):
     assert any("ov.pl.plot_set" in message for message in messages)
 
 
+def test_stacking_vol_wrapper_warns_and_delegates(monkeypatch):
+    _seed_packages(monkeypatch)
+    calls = []
+    backend = types.ModuleType("omicverse.pl._plot_backend")
+
+    def stacking_vol(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "stacked"
+
+    backend.stacking_vol = stacking_vol
+    monkeypatch.setitem(sys.modules, "omicverse.pl._plot_backend", backend)
+    module = _load_module(monkeypatch, "omicverse.utils._plot", "omicverse/utils/_plot.py")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert module.stacking_vol("data", alpha=0.5) == "stacked"
+
+    assert calls == [(('data',), {"alpha": 0.5})]
+    assert any("ov.pl.stacking_vol" in str(warning.message) for warning in caught)
+
+
+def test_plot_convex_hull_wrapper_warns_and_delegates(monkeypatch):
+    _seed_packages(monkeypatch)
+    calls = []
+    backend = types.ModuleType("omicverse.pl._plot_backend")
+
+    def plot_convex_hull(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "hull"
+
+    backend.plot_ConvexHull = plot_convex_hull
+    monkeypatch.setitem(sys.modules, "omicverse.pl._plot_backend", backend)
+    module = _load_module(monkeypatch, "omicverse.utils._plot", "omicverse/utils/_plot.py")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert module.plot_ConvexHull("adata", alpha=0.2) == "hull"
+
+    assert calls == [(('adata',), {"alpha": 0.2})]
+    assert any("ov.pl.plot_ConvexHull" in str(warning.message) for warning in caught)
+
+
 def test_utils_scatterplot_wrapper_warns_and_delegates(monkeypatch):
-    _seed_packages()
+    _seed_packages(monkeypatch)
     calls = []
 
     backend = types.ModuleType("omicverse.pl._scatterplot_backend")
@@ -123,7 +165,7 @@ def test_utils_scatterplot_wrapper_warns_and_delegates(monkeypatch):
         setattr(backend, name, embedding)
     monkeypatch.setitem(sys.modules, "omicverse.pl._scatterplot_backend", backend)
 
-    module = _load_module("omicverse.utils._scatterplot", "omicverse/utils/_scatterplot.py")
+    module = _load_module(monkeypatch, "omicverse.utils._scatterplot", "omicverse/utils/_scatterplot.py")
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -135,7 +177,7 @@ def test_utils_scatterplot_wrapper_warns_and_delegates(monkeypatch):
 
 
 def test_utils_venn_wrapper_warns_and_delegates(monkeypatch):
-    _seed_packages()
+    _seed_packages(monkeypatch)
     calls = []
 
     backend = types.ModuleType("omicverse.pl._venn_backend")
@@ -149,7 +191,7 @@ def test_utils_venn_wrapper_warns_and_delegates(monkeypatch):
     backend.venny4py = venny4py
     monkeypatch.setitem(sys.modules, "omicverse.pl._venn_backend", backend)
 
-    module = _load_module("omicverse.utils._venn", "omicverse/utils/_venn.py")
+    module = _load_module(monkeypatch, "omicverse.utils._venn", "omicverse/utils/_venn.py")
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")

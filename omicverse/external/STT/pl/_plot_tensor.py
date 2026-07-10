@@ -208,7 +208,7 @@ def plot_pathway(adata,figsize = (10,10),fontsize = 12,cmp='Set2',size = 20):
     fig, ax = plt.subplots(figsize = figsize)
     c_labels = adata.uns['pathway_labels']
     num_clusters = max(c_labels)+1
-    cmap = plt.cm.get_cmap(cmp, num_clusters)
+    cmap = plt.get_cmap(cmp, num_clusters)
 
     # Map the labels to colors using the colormap
     colors = cmap(c_labels/ num_clusters)

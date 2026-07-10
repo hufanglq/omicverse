@@ -245,6 +245,8 @@ from ._plot_backend import (
     geneset_wordcloud,
     plot_pca_variance_ratio,
     plot_pca_variance_ratio1,
+    plot_ConvexHull,
+    stacking_vol,
     gen_mpl_labels,
 )
 from ._funkyheatmap import (
@@ -451,6 +453,8 @@ __all__ = [
     "geneset_wordcloud",
     "plot_pca_variance_ratio",
     "plot_pca_variance_ratio1",
+    "plot_ConvexHull",
+    "stacking_vol",
     "gen_mpl_labels",
     # @ _cnv
     "cnv_heatmap",

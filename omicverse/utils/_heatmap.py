@@ -5,6 +5,7 @@ from matplotlib.colors import cnames, is_color_like, ListedColormap, to_rgb
 from matplotlib import patheffects, rcParams
 import scanpy as sc
 import anndata
+from collections.abc import Sequence as SequenceABC
 from typing import Union, Sequence
 
 #from scvelo import logging as logg
@@ -73,7 +74,7 @@ def plot_heatmap(
         else adata[:, var_names].X
     )
     if issparse(X):
-        X = X.A
+        X = X.toarray()
     df = pd.DataFrame(X[np.argsort(time)], columns=var_names)
 
     if n_convolve is not None:
@@ -182,10 +183,10 @@ def make_dense(X):
         Dense numpy array
     """
     if issparse(X):
-        XA = X.A if X.ndim == 2 else X.A1
-    else:
-        XA = X.A1 if isinstance(X, np.matrix) else X
-    return np.array(XA)
+        return np.asarray(X.toarray())
+    if isinstance(X, np.matrix):
+        return np.asarray(X).ravel()
+    return np.asarray(X)
 
 # TODO: Add docstrings
 def default_palette(palette=None):
@@ -326,7 +327,7 @@ def interpret_colorkey(adata, c=None, layer=None, perc=None, use_raw=None):
                 if adata.raw is None and use_raw:
                     raise ValueError("AnnData object does not have `raw` counts.")
                 c = adata.raw.obs_vector(c) if use_raw else adata.obs_vector(c)
-            c = c.A.flatten() if issparse(c) else c
+            c = make_dense(c).flatten() if issparse(c) else c
         elif c in adata.var.keys():  # color by observation key
             c = adata.var[c]
         elif np.any([var_key in c for var_key in adata.var.keys()]):
@@ -594,7 +595,7 @@ def set_colors_for_categorical_obs(adata, value_to_plot, palette=None):
             if isinstance(palette, dict):
                 palette = [palette[c] for c in categories]
             # check if palette is a list and convert it to a cycler
-            if isinstance(palette, abc.Sequence):
+            if isinstance(palette, SequenceABC):
                 if len(palette) < length:
                     print(
                         "Length of palette colors is smaller than the number of "
@@ -656,4 +657,3 @@ def set_colors_for_categorical_obs(adata, value_to_plot, palette=None):
                 )
 
         adata.uns[f"{value_to_plot}_colors"] = palette[:length]
-
