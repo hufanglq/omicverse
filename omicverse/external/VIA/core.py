@@ -138,9 +138,6 @@ def _rw2_walks(A: ndarray, root: int, memory: float = 0.8, weighted: bool = True
     :param walk_length: default None (walk_length = num_nodes *2)
     :return: implicit_ids
     '''
-    from pecanpy.graph import AdjlstGraph
-    # initialize SparseGraph object
-    # g = AdjlstGraph()
     # setting up the lazy-teleporting behaviour
     n_states = A.shape[0]
     P = A / A.sum(axis=1).reshape((n_states, 1))
