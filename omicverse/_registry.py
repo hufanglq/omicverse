@@ -1218,24 +1218,26 @@ def register_function(aliases: List[str],
             produces=produces,
             auto_fix=auto_fix
         )
-        
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            return func(*args, **kwargs)
 
-        # Add registry info to function
-        wrapper._registry_info = {
+        registry_info = {
             'aliases': aliases,
             'category': category,
             'description': description
         }
 
-        # If func is a class, copy over class methods and static methods
-        import inspect
+        # Classes must remain bound to their original module-level name.
+        # Replacing a class with a function wrapper breaks class identity and
+        # makes its instances impossible to pickle.
         if inspect.isclass(func):
-            for name, value in inspect.getmembers(func):
-                if isinstance(inspect.getattr_static(func, name), (classmethod, staticmethod)):
-                    setattr(wrapper, name, value)
+            func._registry_info = registry_info
+            return func
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+
+        # Add registry info to function
+        wrapper._registry_info = registry_info
 
         return wrapper
     

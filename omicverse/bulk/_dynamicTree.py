@@ -317,7 +317,7 @@ def cutreeHybrid(link, distM,
                 clusts = IndMergeToBranch[dendro_merge[merge,] - 1]
                 sizes = branch_size[clusts - 1]
                 # Note: for 2 elements, rank and order are the same.
-                rnk = rankdata(sizes, method = "ordinal")
+                rnk = np.asarray(rankdata(sizes, method = "ordinal"), dtype=np.intp)
                 small = clusts[rnk[0] - 1]
                 large = clusts[rnk[1] - 1]
                 sizes = sizes[rnk - 1]
@@ -776,7 +776,13 @@ def cutreeHybrid(link, distM,
 
     if UnlabeledExist:
         if len(Sizes) > 1:
-            SizeRank = np.append(1, rankdata(-Sizes[1:len(Sizes)], method="ordinal")+1)
+            SizeRank = np.append(
+                1,
+                np.asarray(
+                    rankdata(-Sizes[1:len(Sizes)], method="ordinal"),
+                    dtype=np.intp,
+                ) + 1,
+            )
         else:
             # Only one label (every gene unassigned / grey). SizeRank must stay
             # an array so the SizeRank[NumLabs - 1] gather below works — a bare
@@ -784,7 +790,10 @@ def cutreeHybrid(link, distM,
             SizeRank = np.array([1])
         OrdNumLabs = SizeRank[NumLabs - 1]
     else:
-        SizeRank = rankdata(-Sizes[np.arange(len(Sizes))], method="ordinal")
+        SizeRank = np.asarray(
+            rankdata(-Sizes[np.arange(len(Sizes))], method="ordinal"),
+            dtype=np.intp,
+        )
         OrdNumLabs = SizeRank[NumLabs - 2]
     ordCoreLabels = OrdNumLabs - UnlabeledExist
     ordCoreLabels[coreLabels == 0] = 0
@@ -945,7 +954,6 @@ def table(vector):
         results.iloc[i] = np.sum(vector == k)
         
     return(results)
-
 
 
 
