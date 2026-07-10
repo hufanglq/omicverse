@@ -2109,7 +2109,7 @@ class pyWGCNA(GeneExp):
                 else:
                     clusts = IndMergeToBranch[dendro_merge[merge, :].astype(int) - 1]
                     sizes = branch_size[clusts - 1]
-                    rnk = rankdata(sizes, method="ordinal")
+                    rnk = np.asarray(rankdata(sizes, method="ordinal"), dtype=np.intp)
                     small = clusts[rnk[0] - 1]
                     large = clusts[rnk[1] - 1]
                     sizes = sizes[rnk - 1]
@@ -2506,13 +2506,23 @@ class pyWGCNA(GeneExp):
 
         if UnlabeledExist:
             if len(Sizes) > 1:
-                SizeRank = np.insert(stats.rankdata(-1 * Sizes[1:len(Sizes)], method='ordinal') + 1, 0, 1)
+                SizeRank = np.insert(
+                    np.asarray(
+                        stats.rankdata(-1 * Sizes[1:len(Sizes)], method='ordinal'),
+                        dtype=np.intp,
+                    ) + 1,
+                    0,
+                    1,
+                )
             else:
                 SizeRank = [1]
             for i in range(len(NumLabs)):
                 OrdNumLabs.Value[i] = SizeRank[NumLabs[i] - 1]
         else:
-            SizeRank = stats.rankdata(-1 * Sizes, method='ordinal')
+            SizeRank = np.asarray(
+                stats.rankdata(-1 * Sizes, method='ordinal'),
+                dtype=np.intp,
+            )
             for i in range(len(NumLabs)):
                 OrdNumLabs.Value[i] = SizeRank[NumLabs[i] - 1]
 
@@ -2544,20 +2554,29 @@ class pyWGCNA(GeneExp):
             colorSeq = create_custom_color_seq(colors, naColor)
             colorSeq = interleave_colors(colorSeq)
 
-        if all(isinstance(x, int) for x in labels.Value):
-            if zeroIsGrey:
-                minLabel = 0
-            else:
-                minLabel = 1
-            if np.any(labels.Value < 0):
-                minLabel = np.min(labels.Value)
-            nLabels = labels.copy()
+        if isinstance(labels, pd.DataFrame):
+            if "Value" not in labels.columns:
+                raise ValueError("labels DataFrame must contain a 'Value' column")
+            label_values = labels["Value"].to_numpy()
+        elif isinstance(labels, pd.Series):
+            label_values = labels.to_numpy()
         else:
-            factors = pd.Categorical(labels.Value)
-            nLabels = factors.codes
+            label_values = np.asarray(labels)
 
-        if np.max(nLabels.Value) > len(colorSeq):
-            nRepeats = int((np.max(labels.Value) - 1) / len(colorSeq)) + 1
+        label_values = np.asarray(label_values).reshape(-1)
+        fin = np.asarray(pd.notna(label_values), dtype=bool)
+
+        if is_numeric_dtype(label_values) and np.all(
+            label_values[fin] == np.floor(label_values[fin])
+        ):
+            nLabels = np.zeros(label_values.shape[0], dtype=np.intp)
+            nLabels[fin] = label_values[fin].astype(np.intp, copy=False)
+        else:
+            nLabels = pd.Categorical(label_values).codes.astype(np.intp, copy=False)
+
+        maxLabel = int(np.max(nLabels[fin])) if np.any(fin) else -1
+        if maxLabel >= len(colorSeq):
+            nRepeats = int((maxLabel - 1) / len(colorSeq)) + 1
             print(f"{WARNING}labels2colors: Number of labels exceeds number of avilable colors.\n"
                   f"Some colors will be repeated {str(nRepeats)} times.{ENDC}")
             extColorSeq = colorSeq
@@ -2569,11 +2588,8 @@ class pyWGCNA(GeneExp):
             extColorSeq = colorSeq
 
         colors = np.empty(nLabels.shape[0], dtype=object)
-        fin = [v is not None for v in nLabels.Value]
-        fin = np.atleast_1d(fin)
         colors[~fin] = naColor
-        finLabels = nLabels.loc[fin, :]
-        colors[fin] = [extColorSeq[x] for x in finLabels.Value]
+        colors[fin] = [extColorSeq[x] for x in nLabels[fin]]
 
         return colors
 
