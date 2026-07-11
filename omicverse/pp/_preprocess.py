@@ -1908,21 +1908,28 @@ def umap(
             print(f"{EMOJI['gpu']} Using torch GPU to calculate UMAP (non-parametric)...")
             print_gpu_usage_color()
             from ._umap import umap as _umap
-            _umap(adata, method='umap-gpu', **kwargs)
+            mixed_kwargs = kwargs.copy()
+            mixed_kwargs.pop('method', None)
+            _umap(adata, method='umap-gpu', **mixed_kwargs)
             add_reference(adata, 'umap', 'UMAP with gpuex (non-parametric)')
             note(backend=f"omicverse({settings.mode}) · umap-gpu")
         else:
             try:
                 print(f"{EMOJI['gpu']} Using RAPIDS GPU UMAP...")
                 import rapids_singlecell as rsc
-                rsc.tl.umap(adata, **kwargs)
+                rapids_kwargs = kwargs.copy()
+                rapids_kwargs.pop('gamma', None)
+                rapids_kwargs.pop('method', None)
+                rsc.tl.umap(adata, **rapids_kwargs)
                 add_reference(adata, 'umap', 'UMAP with RAPIDS')
                 note(backend=f"omicverse({settings.mode}) · rapids")
             except Exception as e:
                 print(f"{EMOJI['error']} RAPIDS GPU UMAP failed: {e}")
                 print(f"{EMOJI['error']} Using GPU non-parametric UMAP instead...")
                 from ._umap import umap as _umap
-                _umap(adata, method='umap-gpu', **kwargs)
+                fallback_kwargs = kwargs.copy()
+                fallback_kwargs.pop('method', None)
+                _umap(adata, method='umap-gpu', **fallback_kwargs)
                 note(backend=f"omicverse({settings.mode}) · umap-gpu")
         note(viz=[{"function": "ov.pl.embedding",
                     "kwargs": {"basis": "X_umap",
