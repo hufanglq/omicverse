@@ -1908,7 +1908,9 @@ def umap(
             print(f"{EMOJI['gpu']} Using torch GPU to calculate UMAP (non-parametric)...")
             print_gpu_usage_color()
             from ._umap import umap as _umap
-            _umap(adata, method='umap-gpu', **kwargs)
+            mixed_kwargs = kwargs.copy()
+            mixed_kwargs.pop('method', None)
+            _umap(adata, method='umap-gpu', **mixed_kwargs)
             add_reference(adata, 'umap', 'UMAP with gpuex (non-parametric)')
             note(backend=f"omicverse({settings.mode}) · umap-gpu")
         else:
